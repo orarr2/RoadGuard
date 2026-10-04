@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="color-scheme" content="light dark">
+<title>RoadGuard</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="preconnect" href="https://accounts.google.com">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="brand">
+    <strong>RoadGuard</strong>
+    <small>decision support</small>
+  </div>
+  <nav id="nav" hidden>
+    <button type="button" data-screen="capture" class="nav-btn">Capture</button>
+    <button type="button" data-screen="history" class="nav-btn">History</button>
+    <button type="button" data-screen="settings" class="nav-btn">Settings</button>
+  </nav>
+</header>
+
+<main>
+
+  <section id="screen-signin" class="screen active">
+    <h1>Sign in</h1>
+    <p class="muted">
+      Access is limited to allow-listed Google accounts or to a shared
+      passphrase. RoadGuard is a decision-support tool; it never closes a
+      road or dispatches a contractor.
+    </p>
+    <div id="google-signin-container" aria-label="Google Sign-In"></div>
+    <div class="divider"><span>or</span></div>
+    <form id="passphrase-form" class="stack">
+      <label>
+        Passphrase
+        <input type="password" name="passphrase" autocomplete="current-password" required>
+      </label>
+      <button type="submit">Sign in with passphrase</button>
+      <p class="error" id="signin-error" hidden></p>
+    </form>
+  </section>
+
+  <section id="screen-capture" class="screen">
+    <h2>Capture a hazard</h2>
+    <div class="camera-wrap">
+      <video id="camera-video" autoplay playsinline muted></video>
+    </div>
+    <div class="row">
+      <button type="button" id="capture-btn" disabled>Capture</button>
+      <select id="camera-select" aria-label="Camera device"></select>
+    </div>
+    <p class="muted" id="capture-hint">Opening environment camera.</p>
+  </section>
+
+  <section id="screen-detect" class="screen">
+    <h2>Detections</h2>
+    <div class="detect-wrap">
+      <canvas id="detect-canvas" aria-label="Captured frame with bounding boxes"></canvas>
+      <div id="detect-list" aria-live="polite"></div>
+    </div>
+    <form id="metadata-form" class="stack">
+      <label>
+        Road type
+        <select name="road_type" required>
+          <option value="main">Main road</option>
+          <option value="secondary">Secondary road</option>
+          <option value="bike_path">Bike path</option>
+          <option value="parking">Parking lot</option>
+        </select>
+      </label>
+      <label>
+        Lane obstruction
+        <select name="lane_blocked" required>
+          <option value="none">None</option>
+          <option value="partial">Partial</option>
+          <option value="full">Full</option>
+        </select>
+      </label>
+      <label>
+        Location (optional)
+        <input type="text" name="location" placeholder="e.g. Rothschild Blvd 10">
+      </label>
+      <div class="row">
+        <button type="button" id="detect-back">Retake</button>
+        <button type="submit" id="submit-btn">Submit for triage</button>
+      </div>
+      <p class="muted" id="submit-hint"></p>
+      <p class="error" id="submit-error" hidden></p>
+    </form>
+  </section>
+
+  <section id="screen-verdict" class="screen">
+    <h2>Recommendation</h2>
+    <div id="verdict-card" aria-live="polite"></div>
+    <div class="row">
+      <button type="button" id="verdict-new">Report another hazard</button>
+      <button type="button" id="verdict-history">Open history</button>
+    </div>
+    <p class="muted">
+      This is a recommendation. External actions (contractor dispatch,
+      road closure) still require a human.
+    </p>
+  </section>
+
+  <section id="screen-history" class="screen">
+    <h2>Your reports</h2>
+    <div class="row">
+      <select id="history-filter-class" aria-label="Class filter">
+        <option value="">All classes</option>
+        <option value="D00">D00</option>
+        <option value="D10">D10</option>
+        <option value="D20">D20</option>
+        <option value="D40">D40</option>
+      </select>
+      <select id="history-filter-decision" aria-label="Decision filter">
+        <option value="">Any decision</option>
+        <option value="urgent">Urgent</option>
+        <option value="standard">Standard</option>
+        <option value="needs_more_evidence">Needs evidence</option>
+        <option value="human_review">Human review</option>
+      </select>
+      <button type="button" id="history-refresh">Refresh</button>
+    </div>
+    <div id="history-list" aria-live="polite">
+      <p class="muted">Loading.</p>
+    </div>
+  </section>
+
+  <section id="screen-settings" class="screen">
+    <h2>Settings</h2>
+    <form id="settings-form" class="stack">
+      <label>
+        <input type="checkbox" name="daily_email">
+        Receive the daily hazard summary by email
+      </label>
+      <label>
+        <input type="checkbox" name="use_front_camera">
+        Prefer the front camera (default is the back camera)
+      </label>
+      <div class="row">
+        <button type="button" id="settings-save">Save</button>
+        <button type="button" id="signout-btn">Sign out</button>
+      </div>
+      <p class="muted" id="settings-hint"></p>
+    </form>
+  </section>
+
+</main>
+
+<footer class="app-footer">
+  <small>RoadGuard - recommendations only. No road is closed from here.</small>
+</footer>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script type="module" src="assets/app.js"></script>
+</body>
+</html>

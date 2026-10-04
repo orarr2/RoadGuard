@@ -1,0 +1,4 @@
+{
+  "origin": null,
+  "note": "The VM rewrites this file whenever cloudflared mints a new quick-tunnel URL. When origin is null the webapp uses CONFIG.API_ORIGIN from assets/config.js."
+}
