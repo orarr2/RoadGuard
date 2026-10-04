@@ -1,0 +1,18 @@
+[Unit]
+Description=RoadGuard daily hazard summary email
+Documentation=https://github.com/orarr2/RoadGuard
+
+[Service]
+Type=oneshot
+User=roadguard
+Group=roadguard
+WorkingDirectory=/opt/roadguard/repo
+EnvironmentFile=/etc/roadguard/env
+Environment=PYTHONPATH=/opt/roadguard/repo/src
+ExecStart=/opt/roadguard/venv/bin/python -m jobs.email_report
+TimeoutStartSec=10min
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/roadguard

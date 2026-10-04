@@ -1,0 +1,11 @@
+[Unit]
+Description=Trigger RoadGuard daily summary email
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 UTC
+RandomizedDelaySec=5min
+Persistent=true
+Unit=roadguard-daily-email.service
+
+[Install]
+WantedBy=timers.target

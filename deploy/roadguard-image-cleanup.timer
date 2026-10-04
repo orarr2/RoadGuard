@@ -1,0 +1,11 @@
+[Unit]
+Description=Trigger RoadGuard image cleanup nightly
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+RandomizedDelaySec=10min
+Persistent=true
+Unit=roadguard-image-cleanup.service
+
+[Install]
+WantedBy=timers.target
