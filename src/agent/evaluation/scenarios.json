@@ -1,0 +1,187 @@
+{
+  "version": 1,
+  "updated_at": "2026-10-04",
+  "schema_version": "1",
+  "scenarios": [
+    {
+      "id": "s001",
+      "band": "easy",
+      "notes": "Clear pothole fully blocking a lane on a main road, high confidence.",
+      "hazard_input": {
+        "hazard_id": "s001",
+        "class": "D40",
+        "confidence": 0.92,
+        "bboxes": [[120, 240, 340, 460, "D40", 0.92]],
+        "road_type": "main",
+        "lane_blocked": "full",
+        "location": "Rothschild Blvd, lane 2",
+        "image_object_key": "s001.jpg",
+        "reported_at": "2026-10-04T10:00:00Z"
+      },
+      "expected_action": "urgent",
+      "allowed_actions": ["urgent"]
+    },
+    {
+      "id": "s002",
+      "band": "easy",
+      "notes": "Longitudinal crack on a bike path, no obstruction.",
+      "hazard_input": {
+        "hazard_id": "s002",
+        "class": "D00",
+        "confidence": 0.78,
+        "bboxes": [[50, 60, 230, 110, "D00", 0.78]],
+        "road_type": "bike_path",
+        "lane_blocked": "none",
+        "location": "Hayarkon Park trail",
+        "image_object_key": "s002.jpg",
+        "reported_at": "2026-10-04T10:05:00Z"
+      },
+      "expected_action": "standard",
+      "allowed_actions": ["standard"]
+    },
+    {
+      "id": "s003",
+      "band": "easy",
+      "notes": "Transverse crack on a secondary road, no obstruction.",
+      "hazard_input": {
+        "hazard_id": "s003",
+        "class": "D10",
+        "confidence": 0.80,
+        "bboxes": [[80, 180, 260, 220, "D10", 0.80]],
+        "road_type": "secondary",
+        "lane_blocked": "none",
+        "location": "Ibn Gvirol 20",
+        "image_object_key": "s003.jpg",
+        "reported_at": "2026-10-04T10:10:00Z"
+      },
+      "expected_action": "standard",
+      "allowed_actions": ["standard"]
+    },
+    {
+      "id": "s004",
+      "band": "hard",
+      "notes": "Pothole partially blocking a lane on a secondary road, moderate confidence just below the urgent threshold.",
+      "hazard_input": {
+        "hazard_id": "s004",
+        "class": "D40",
+        "confidence": 0.55,
+        "bboxes": [[200, 300, 320, 400, "D40", 0.55]],
+        "road_type": "secondary",
+        "lane_blocked": "partial",
+        "location": "",
+        "image_object_key": "s004.jpg",
+        "reported_at": "2026-10-04T10:15:00Z"
+      },
+      "expected_action": "needs_more_evidence",
+      "allowed_actions": ["needs_more_evidence"]
+    },
+    {
+      "id": "s005",
+      "band": "hard",
+      "notes": "Alligator crack on a main road at the edge of acceptable confidence.",
+      "hazard_input": {
+        "hazard_id": "s005",
+        "class": "D20",
+        "confidence": 0.42,
+        "bboxes": [[400, 200, 520, 320, "D20", 0.42]],
+        "road_type": "main",
+        "lane_blocked": "none",
+        "location": "Shaul Hamelech, outbound",
+        "image_object_key": "s005.jpg",
+        "reported_at": "2026-10-04T10:20:00Z"
+      },
+      "expected_action": "needs_more_evidence",
+      "allowed_actions": ["needs_more_evidence"]
+    },
+    {
+      "id": "s006",
+      "band": "hard",
+      "notes": "Pothole in a parking lot, no block. Routine damage despite the hazard class.",
+      "hazard_input": {
+        "hazard_id": "s006",
+        "class": "D40",
+        "confidence": 0.72,
+        "bboxes": [[150, 250, 230, 330, "D40", 0.72]],
+        "road_type": "parking",
+        "lane_blocked": "none",
+        "location": "Dizengoff Center lot B",
+        "image_object_key": "s006.jpg",
+        "reported_at": "2026-10-04T10:25:00Z"
+      },
+      "expected_action": "standard",
+      "allowed_actions": ["standard"]
+    },
+    {
+      "id": "s007",
+      "band": "hard",
+      "notes": "Longitudinal crack with full-lane obstruction on a main road; either queue or urgent is defensible.",
+      "hazard_input": {
+        "hazard_id": "s007",
+        "class": "D00",
+        "confidence": 0.65,
+        "bboxes": [[100, 100, 500, 160, "D00", 0.65]],
+        "road_type": "main",
+        "lane_blocked": "full",
+        "location": "Ayalon South, km 12",
+        "image_object_key": "s007.jpg",
+        "reported_at": "2026-10-04T10:30:00Z"
+      },
+      "expected_action": "standard",
+      "allowed_actions": ["standard", "urgent"]
+    },
+    {
+      "id": "s008",
+      "band": "adversarial",
+      "notes": "Low-confidence detection on a main road with lane block. Early fallback forces human_review.",
+      "hazard_input": {
+        "hazard_id": "s008",
+        "class": "D40",
+        "confidence": 0.38,
+        "bboxes": [[220, 300, 280, 360, "D40", 0.38]],
+        "road_type": "main",
+        "lane_blocked": "full",
+        "location": "Namir, lane 1",
+        "image_object_key": "s008.jpg",
+        "reported_at": "2026-10-04T10:35:00Z"
+      },
+      "expected_action": "human_review",
+      "allowed_actions": ["human_review"]
+    },
+    {
+      "id": "s009",
+      "band": "adversarial",
+      "notes": "Alligator pattern with partial block on a main road. Standard or urgent is defensible.",
+      "hazard_input": {
+        "hazard_id": "s009",
+        "class": "D20",
+        "confidence": 0.72,
+        "bboxes": [[300, 300, 450, 440, "D20", 0.72]],
+        "road_type": "main",
+        "lane_blocked": "partial",
+        "location": "Jabotinsky, inbound",
+        "image_object_key": "s009.jpg",
+        "reported_at": "2026-10-04T10:40:00Z"
+      },
+      "expected_action": "standard",
+      "allowed_actions": ["standard", "urgent"]
+    },
+    {
+      "id": "s010",
+      "band": "adversarial",
+      "notes": "High-confidence pothole on a bike path with no block. Routine, not urgent.",
+      "hazard_input": {
+        "hazard_id": "s010",
+        "class": "D40",
+        "confidence": 0.88,
+        "bboxes": [[120, 180, 220, 280, "D40", 0.88]],
+        "road_type": "bike_path",
+        "lane_blocked": "none",
+        "location": "Tel Baruch promenade",
+        "image_object_key": "s010.jpg",
+        "reported_at": "2026-10-04T10:45:00Z"
+      },
+      "expected_action": "standard",
+      "allowed_actions": ["standard"]
+    }
+  ]
+}

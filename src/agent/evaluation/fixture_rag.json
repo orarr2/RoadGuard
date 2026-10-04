@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "note": "Minimal procedure fixture for offline eval. Replaced by the full ChromaDB corpus on the VM.",
+  "procedures": [
+    {
+      "id": "p_d40_main",
+      "hazard_class": "D40",
+      "road_type": "main",
+      "text": "Potholes on arterial roads should be inspected within 24 hours when the hole exceeds 100 mm in diameter or intrudes into a traveled lane. Dispatch a crew with cold-mix for a temporary patch pending permanent repair.",
+      "issuing_body": "FHWA",
+      "publication_date": "2020-05-10",
+      "triggering_conditions": "pothole in a traveled lane on an arterial road",
+      "source_url": "https://fhwa.example/pothole-arterial",
+      "is_binding_in_il": false
+    },
+    {
+      "id": "p_d40_general",
+      "hazard_class": "D40",
+      "road_type": "any",
+      "text": "A pothole should be measured for diameter and depth before scheduling. Shallow potholes outside the traveled way are routine; those obstructing traffic warrant expedited response.",
+      "issuing_body": "AustRoads",
+      "publication_date": "2021-02-01",
+      "triggering_conditions": "any pothole on a public right-of-way",
+      "source_url": "https://austroads.example/pothole-general",
+      "is_binding_in_il": false
+    },
+    {
+      "id": "p_d20_main",
+      "hazard_class": "D20",
+      "road_type": "main",
+      "text": "Alligator cracking indicates structural fatigue in the pavement. Inspect for base failure, record extent and severity, and schedule for mill-and-overlay when area exceeds 10 square meters.",
+      "issuing_body": "NetivIsrael",
+      "publication_date": "2019-11-15",
+      "triggering_conditions": "interconnected cracking on a traveled lane",
+      "source_url": "https://netivisrael.example/alligator-cracking",
+      "is_binding_in_il": true
+    },
+    {
+      "id": "p_d00_main",
+      "hazard_class": "D00",
+      "road_type": "main",
+      "text": "Longitudinal cracks running parallel to the direction of travel are typically treated by routing and crack-sealing when width exceeds 3 mm. Monitor for progression into alligator cracking.",
+      "issuing_body": "AustRoads",
+      "publication_date": "2021-02-01",
+      "triggering_conditions": "longitudinal crack wider than 3 mm",
+      "source_url": "https://austroads.example/longitudinal-crack",
+      "is_binding_in_il": false
+    },
+    {
+      "id": "p_d10_main",
+      "hazard_class": "D10",
+      "road_type": "main",
+      "text": "Transverse cracking is normally caused by thermal cycling. Seal cracks before winter and inspect for spalling. Not an urgent safety issue unless combined with potholing.",
+      "issuing_body": "FHWA",
+      "publication_date": "2020-05-10",
+      "triggering_conditions": "transverse crack across the direction of travel",
+      "source_url": "https://fhwa.example/transverse-crack",
+      "is_binding_in_il": false
+    }
+  ]
+}
