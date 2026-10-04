@@ -36,7 +36,10 @@ addopts = [
     "--strict-markers",
     "--strict-config",
 ]
-asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning:starlette.*",
+    "ignore::pydantic.warnings.UnsupportedFieldAttributeWarning",
+]
 
 [tool.ruff]
 line-length = 100

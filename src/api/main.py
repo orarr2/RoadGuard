@@ -16,7 +16,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
 
 from agent import loop, tools
 
@@ -111,10 +110,20 @@ def _fallback_provider(settings: Settings) -> Optional[loop.LLMProvider]:
 
 
 def create_app() -> FastAPI:
+    # The @limiter.limit decorators below each append a Limit object to the
+    # shared Limiter instance's _route_limits dict. If create_app() is
+    # called more than once (which tests routinely do), each build would
+    # add another duplicate limit per route, which then counts each
+    # request twice, three times, and so on. Clearing the dict at the
+    # start of the build keeps every app instance to one limit per route.
+    for attr in ("_route_limits", "_dynamic_route_limits"):
+        bucket = getattr(limiter, attr, None)
+        if bucket is not None and hasattr(bucket, "clear"):
+            bucket.clear()
+
     app = FastAPI(title="RoadGuard", version=VERSION)
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-    app.add_middleware(SlowAPIMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=CORS_ORIGINS,
