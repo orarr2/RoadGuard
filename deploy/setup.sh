@@ -34,8 +34,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
     git curl ca-certificates sqlite3 \
-    python3 python3-venv python3-pip \
-    build-essential cmake pkg-config
+    python3 python3-venv python3-pip python3-dev \
+    build-essential cmake pkg-config ninja-build
 
 log "ensure $SERVICE_USER system user"
 if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
