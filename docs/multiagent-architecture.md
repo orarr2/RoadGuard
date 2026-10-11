@@ -2,9 +2,39 @@
 
 # RoadGuard · ארכיטקטורת הסוכנים
 
-**Agent Lead: Or Arbeli** · גרסה 1.0 · מבוסס על DS23 S42-S44 (Shlomit Levavi)
+**Agent Lead: Or Arbeli** · גרסה 1.1 · מבוסס על DS23 S42-S44 (Shlomit Levavi)
 
 מסמך זה הוא ה-authoritative spec לשכבת הסוכנים של RoadGuard. הוא מגדיר מה כל סוכן מקבל מהמודלים, מה הוא מחזיר, איך ה-handoffs מתועלים ומאומתים, ואיך כל המערכת נמדדת. העקרון המכונן של כל המודול שלנו שומר: **autonomy is a budget, not a switch** - כל צומת בגרף הוא קריאת API שעולה טוקנים, אז כל צומת חייב להצדיק את המחיר שלו.
+
+---
+
+## 0 · איפה הקוד · סטטוס מימוש
+
+כל קוד הסוכנים יושב ב-subpackage `src/agent/multiagent/`, בצד ה-monolith הקיים ב-`src/agent/{loop,policy,tools,prompts}.py`. ה-API בוחר ביניהם לפי המשתנה `AGENT_ARCHITECTURE` (ברירת מחדל: `monolith`).
+
+| רכיב | סטטוס | קובץ |
+|---|---|---|
+| State schema + reducers | ✅ | `src/agent/multiagent/state.py` |
+| Handoff schemas (Perception/Research) | ✅ | `src/agent/multiagent/schemas.py` |
+| Assert v3 · schema + grounding | ✅ | `src/agent/multiagent/asserts.py` |
+| Budget Guard · 4 תקרות + ContextVar | ✅ | `src/agent/multiagent/guards.py` |
+| Boundary Defence · location + OCR + passage | ✅ | `src/agent/multiagent/sanitize.py` |
+| 3 nodes · Perception, Research, Decision | ✅ | `src/agent/multiagent/nodes/*.py` |
+| Python Supervisor + sanitize_node + router | ✅ | `src/agent/multiagent/nodes/supervisor.py` |
+| 5 tools (least-privilege mapping) | ✅ | `src/agent/multiagent/tools/*.py` |
+| Chat wrapper (live/offline switch) | ✅ | `src/agent/multiagent/chat.py` |
+| Trace with speaker labels | ✅ | `src/agent/multiagent/trace.py` |
+| LangGraph StateGraph + dependency-free fallback | ✅ | `src/agent/multiagent/graph.py` |
+| The Loop Pays harness · 4 approaches | ✅ | `src/agent/multiagent/measure.py` |
+| 50 תסריטי eval | ✅ | `tests/multiagent_eval_scenarios.json` |
+| Adapter: HazardSubmit ↔ graph state ↔ AgentDecision | ✅ | `src/agent/multiagent/adapter.py` |
+| `/hazards/submit` dispatch via `AGENT_ARCHITECTURE` | ✅ | `src/api/main.py` + `src/api/settings.py` |
+| langgraph dependency ב-production | 🕒 Phase 2 | `requirements.txt` |
+| Approval gate → SQLite + email | 🕒 Phase 3 | `src/db/`, `src/jobs/email_report.py` |
+| Hooks ל-YOLO (`top1_margin`, `area_ratio`) מהקליינט | 🕒 תלוי ב-Shai | `webapp/` + `HazardSubmit` schema |
+| ChromaDB vector memory ל-`lookup_similar_cases` | 🕒 תלוי ב-Benny | חיבור בפרודקשן |
+
+**מצב הפיצ'ר כרגע:** ה-stub הדטרמיניסטי משיג 50/50 success · 100% grounded על 50 התסריטים (ראה סעיף 8). ה-API עובד end-to-end במסלול `multiagent` עם grounded citations ב-response.
 
 ---
 
@@ -323,11 +353,12 @@ class ResearchHandoff(TypedDict):
 
 ### 5.3 Assert v3 at Team Level
 
-הדפוס מ-S44 (slide 21) מופעל בכל handoff. יש שתי בדיקות:
+הדפוס מ-S44 (slide 21) מופעל בכל handoff. **מימוש:** `src/agent/multiagent/asserts.py` עם שתי בדיקות:
 
 ```python
+# הפסאודוקוד הכללי — הפונקציות האמיתיות מפוצלות לכל handoff
 def assert_handoff(handoff: dict, tool_result_ids: list[str]) -> bool:
-    """Schema + grounding check. Raises on failure."""
+    """Schema + grounding check. Raises HandoffAssertionError on failure."""
     # 1. SCHEMA: required fields present and typed
     required = {"sender", "recipient", "confidence"}
     assert required.issubset(handoff.keys()), f"missing: {required - handoff.keys()}"
@@ -340,13 +371,15 @@ def assert_handoff(handoff: dict, tool_result_ids: list[str]) -> bool:
     return True
 ```
 
-אם ה-Decision Agent מצטט `article-99` שלא היה ב-`tool_result_ids`, ה-assert נופל, הסוכן מקבל שגיאה חזרה ומתבקש לנסח שוב. אם שלוש ניסיונות נכשלים - נופל ל-`human_review` עם rationale מפורש.
+**בפועל במימוש** יש שלוש פונקציות: `assert_perception_handoff`, `assert_research_handoff`, `assert_decision_grounded`. ה-grounding check מרוכז ב-`assert_decision_grounded`, שמחליף את ה-`assert` ב-`raise HandoffAssertionError` כדי שהסוכן יוכל לתפוס ולנסות שוב (ראה `decision_node` ב-`nodes/decision.py`).
+
+אם ה-Decision Agent מצטט `article-99` שלא היה ב-`tool_result_ids`, האמירה נופלת, הסוכן מקבל שגיאה חזרה ומתבקש לנסח שוב. אם שלושה ניסיונות נכשלים - נופל ל-`human_review` עם rationale מפורש.
 
 ---
 
 ## 6 · Budget Guard (Locked at Top)
 
-בדיוק כמו ש-Shlomit דורשת ב-S42 slide 9. התא הראשון של כל סוכן טוען:
+בדיוק כמו ש-Shlomit דורשת ב-S42 slide 9. **מימוש:** `src/agent/multiagent/guards.py`. התא הראשון של כל סוכן טוען:
 
 ```python
 # ============================================================
@@ -369,13 +402,15 @@ class BudgetExceeded(Exception):
 3. `COST_CAP_USD` - תקרת עלות למשימה
 4. `WALL_CLOCK_CAP_SECONDS` - תקרת זמן (קריטי ל-FastAPI timeout)
 
-**כשה-guard נדלק:** הסוכן מחזיר `action="human_review"`, `rationale="budget guard fired at <reason>"`. זו תשובה לגיטימית, לא קריסה. ה-API מחזיר 200 עם ה-decision הזה (לא 500).
+**כשה-guard נדלק:** הסוכן מחזיר `action="human_review"`, `rationale="budget guard fired: <reason>"`. זו תשובה לגיטימית, לא קריסה. ה-API מחזיר 200 עם ה-decision הזה (לא 500) ו-`fallback_reason="guard_fired"`.
+
+**Thread safety:** בפרודקשן FastAPI מגיש בקשות במקביל ב-asyncio tasks. ה-tracker מוחזק ב-`contextvars.ContextVar` (ולא בגלובל מודול) כך שכל בקשה מקבלת tracker משלה אוטומטית. פונקציות הגישה: `new_budget()` (בתחילת ריצה) ו-`current_budget()` ב-`nodes/supervisor.py`.
 
 ---
 
 ## 7 · Boundary Defence (אבטחה מלאה)
 
-Prompt Injection הוא ה-#1 OWASP LLM. ב-RoadGuard יש **שלושה וקטורי התקפה אפשריים**:
+Prompt Injection הוא ה-#1 OWASP LLM. **מימוש:** `src/agent/multiagent/sanitize.py` + `nodes/research.py` ל-dual-LLM. ב-RoadGuard יש **שלושה וקטורי התקפה אפשריים**:
 
 ### 7.1 וקטור 1: שדה `location` (free text ממשתמש)
 
@@ -466,7 +501,7 @@ Approval = שליחת מייל/push לממונה אנושי. הפעולה לא �
 
 Shlomit ב-S43 slide 14: לפני שאני טוען שהצוות שווה את העלות, אני מודד. ה-plan שלי:
 
-### 8.1 50 תסריטי eval (ראה `tests/eval_scenarios.json`)
+### 8.1 50 תסריטי eval (ראה `tests/multiagent_eval_scenarios.json`)
 
 התפלגות (לפי Charter 85% target):
 - 20 תסריטי `urgent` (D40 חוסם בכביש ראשי)
@@ -489,20 +524,44 @@ Shlomit ב-S43 slide 14: לפני שאני טוען שהצוות שווה את �
 
 ### 8.4 פלט ה-eval
 
+**הפורמט שה-harness הנוכחי מחזיר** (`measure.run_all`):
+
 ```json
 {
-  "approach": "3-agent-supervisor",
+  "approach": "multiagent",
   "scenarios_run": 50,
-  "success_count": 42,
-  "success_rate": 0.84,
-  "grounded_count": 39,
-  "grounded_rate": 0.93,
-  "mean_cost_usd": 0.030,
-  "mean_latency_ms": 2400,
-  "guard_fired_count": 1,
-  "p95_latency_ms": 5100
+  "success_count": 50,
+  "success_rate": 1.0,
+  "grounded_count": 50,
+  "grounded_rate": 1.0,
+  "mean_cost_usd": 0.001628,
+  "total_cost_usd": 0.08130,
+  "wall_time_s": 0.0,
+  "per_scenario": [ /* row per scenario */ ]
 }
 ```
+
+**איך מריצים ידנית:**
+
+```bash
+.venv/bin/python -c "
+from agent.multiagent.measure import load_scenarios, run_all, print_report
+print_report(run_all(load_scenarios('tests/multiagent_eval_scenarios.json')))
+"
+```
+
+**התוצאה הצפויה (deterministic ב-stub):**
+
+```
+approach       success    grounded    total cost
+------------------------------------------------
+raw           35/50         0.0%      $0.00886
+cot           45/50         0.0%      $0.02798
+monolith      50/50        90.0%      $0.08535
+multiagent    50/50       100.0%      $0.08130
+```
+
+**שדות שעדיין לא נמדדים** ויוספו ב-Phase 2 (כשה-LLM האמיתי רץ): `mean_latency_ms`, `p95_latency_ms`, `guard_fired_count`.
 
 ---
 
@@ -583,44 +642,90 @@ class VectorHazardMemory:
 | רעיון מהקורס | איפה בארכיטקטורה שלנו |
 |---|---|
 | S42 · Agent Loop (think-act-observe) | כל צומת (Perception/Research/Decision) מריץ את הלולאה בפנים, עם `MAX_TOOL_HOPS_PER_AGENT=3` |
-| S42 · Function Calling | כל הכלים ב-`src/agent/tools/` עם JSON Schema מלא |
-| S42 · Budget Guard | סעיף 6, 4 תקרות במקום 2 |
-| S42 · Chat Wrapper | `src/agent/chat.py` עם stub דטרמיניסטי ל-eval אופליין |
-| S43 · Conversation Memory | סעיף 10.1 |
-| S43 · Vector Memory | סעיף 10.2 |
-| S43 · The Loop Pays | סעיף 8, 50 תסריטים, 4 גישות |
-| S43 · Agent Trace | `src/agent/trace.py`, קריא עם speaker labels |
-| S43 · Runaway Loop + Graceful Stop | ה-Budget Guard עוצר ומחזיר `human_review` לגיטימי |
-| S43 · Prompt Injection + Boundary Defence | סעיף 7, 3 וקטורים + dual-LLM + approval gates |
-| S44 · Multi-Agent Systems | סעיף 3, Orchestrator-Worker |
-| S44 · Handoff Schema | סעיף 5 |
-| S44 · Assert v3 at Team Level | סעיף 5.3 |
-| S44 · LangGraph StateGraph | `src/agent/graph.py` |
-| S44 · Conditional Edges | ה-router אחרי Decision |
-| S44 · Topology Cost | סעיף 9 |
+| S42 · Function Calling | כל הכלים ב-`src/agent/multiagent/tools/` עם JSON Schema מלא |
+| S42 · Budget Guard | סעיף 6 · `src/agent/multiagent/guards.py` · 4 תקרות במקום 2 |
+| S42 · Chat Wrapper | `src/agent/multiagent/chat.py` עם stub דטרמיניסטי ל-eval אופליין |
+| S43 · Conversation Memory | סעיף 10.1 (עדיין לא ממומש) |
+| S43 · Vector Memory | סעיף 10.2 · stub ב-`tools/lookup_similar_cases.py` |
+| S43 · The Loop Pays | סעיף 8 · `src/agent/multiagent/measure.py` · 50 תסריטים, 4 גישות |
+| S43 · Agent Trace | `src/agent/multiagent/trace.py`, קריא עם speaker labels |
+| S43 · Runaway Loop + Graceful Stop | ה-Budget Guard עוצר ומחזיר `human_review` לגיטימי (`graceful_stop_decision`) |
+| S43 · Prompt Injection + Boundary Defence | סעיף 7 · `src/agent/multiagent/sanitize.py` + dual-LLM ב-`nodes/research.py` |
+| S44 · Multi-Agent Systems | סעיף 3 · Orchestrator-Worker |
+| S44 · Handoff Schema | סעיף 5 · `src/agent/multiagent/schemas.py` |
+| S44 · Assert v3 at Team Level | סעיף 5.3 · `src/agent/multiagent/asserts.py` |
+| S44 · LangGraph StateGraph | `src/agent/multiagent/graph.py` · `build_graph()` + `run_graph_locally()` fallback |
+| S44 · Conditional Edges | ה-router אחרי Decision · `route_after_decision` ב-`nodes/supervisor.py` |
+| S44 · Topology Cost | סעיף 9 · נמדד ב-`measure.py` |
 
 ---
 
 ## 12 · Roadmap למימוש
 
-| שלב | מה | קבצים | eval target |
-|---|---|---|---|
-| 0 | Scaffold (קיים ברפו הזה) | `src/agent/` כולו | - |
-| 1 | Hook ל-YOLO output של Shai | `src/agent/schemas.py` | כניסה תקינה |
-| 2 | Hook ל-RAG של Benny | `src/agent/tools/query_repair_standards.py` | 10 תסריטים עוברים |
-| 3 | Perception + Research + Decision mock | `src/agent/nodes/*.py` | 25 תסריטים עוברים |
-| 4 | Boundary Defence + dual-LLM | `src/agent/sanitize.py` | 3 attack scenarios מנוטרלים |
-| 5 | Full eval על 50 תסריטים | `tests/eval_scenarios.json` + `src/agent/measure.py` | 85% success, 90% grounded |
-| 6 | Topology cost report | `docs/eval_report.md` | מספרים מדודים חיים |
+| שלב | מה | קבצים | eval target | סטטוס |
+|---|---|---|---|---|
+| 0 | Scaffold · state, schemas, asserts, guards, sanitize, chat, trace, graph, measure, 3 nodes, 5 tools | `src/agent/multiagent/` + `tests/multiagent_eval_scenarios.json` | ה-stub הדטרמיניסטי מריץ 50/50 | ✅ |
+| 1 | Adapter + API dispatch (opt-in `AGENT_ARCHITECTURE=multiagent`) | `src/agent/multiagent/adapter.py` + `src/api/main.py` + `src/api/settings.py` | end-to-end 200 עם cited sources | ✅ |
+| 2 | הוספת `langgraph>=0.2` ל-requirements, מעבר ל-`build_graph` ב-FastAPI startup, מדידת latency אמיתית | `requirements.txt` + `src/api/main.py` | p95 < 5s על 50 תסריטים | 🕒 |
+| 3 | Approval gate חי · SQLite row + מייל לממונה | `src/agent/multiagent/graph.py` + `src/db/` + `src/jobs/email_report.py` | כל urgent/human_review מייצר row ממתין | 🕒 |
+| 4 | Hook ל-YOLO output של Shai (`top1_margin`, `area_ratio`, `n_detections_by_class`) בקליינט ובסכימה | `webapp/` + `src/api/schemas.py` (`HazardSubmit`) | כניסה תקינה עם perception_confidence מדויק | 🕒 תלוי ב-Shai |
+| 5 | Hook ל-ChromaDB של Benny בפרודקשן (לא stub) | `src/agent/multiagent/tools/query_repair_standards.py` | tool_result_ids חזרה מהמסד | 🕒 תלוי ב-Benny |
+| 6 | Vector memory אמיתי ל-`lookup_similar_cases` | `src/agent/multiagent/tools/lookup_similar_cases.py` | 3 תסריטי recurrence עוברים | 🕒 |
+| 7 | Full eval על LLM אמיתי (לא stub) | `src/agent/multiagent/chat.py` עם `ROADGUARD_USE_LIVE=1` | 85% success, 90% grounded | 🕒 |
+| 8 | Topology cost report עם מספרים מדודים חיים | `docs/multiagent-eval-report.md` | טבלה סופית לכתיבת המדריך | 🕒 |
 
 ---
 
 ## 13 · הצלבות עם צוות
 
-| צוות member | מה אני צריך מהם | מתי |
+| צוות member | מה אני צריך מהם | סטטוס |
 |---|---|---|
-| Shai (CV) | YOLO output בפורמט של סעיף 2.1 כולל `top1_margin` ו-`area_ratio` | Milestone 2 |
-| Benny (RAG) | ChromaDB עם `tool_result_ids` מובנה (סעיף 2.4) | Milestone 2 |
-| Ovad (Data) | 50 תסריטי eval עם ground-truth action + מידע ש-RAG צריך להחזיר | Milestone 5 |
+| Shai (CV) | YOLO output בפורמט של סעיף 2.1 כולל `top1_margin` ו-`area_ratio` ו-`n_detections_by_class` | 🕒 ממתין. בינתיים ה-adapter ממלא defaults |
+| Benny (RAG) | ChromaDB עם `tool_result_ids` מובנה (סעיף 2.4) | 🕒 ממתין. בינתיים `_STUB_CORPUS` ב-`query_repair_standards.py` |
+| Ovad (Data) | 50 תסריטי eval עם ground-truth action + מידע ש-RAG צריך להחזיר | ✅ קיים ב-`tests/multiagent_eval_scenarios.json` כנקודת פתיחה |
+
+---
+
+## 14 · Production wiring (Phase 1)
+
+הסוכנים לא נגישים ישירות ל-API. ה-API ממשיך לקבל `HazardSubmit` flat (אותו contract של ה-monolith), ומגיע לסוכנים דרך adapter דק:
+
+```
+POST /hazards/submit
+      │
+      ▼
+┌──────────────────────────────────┐
+│  settings.agent_architecture?    │
+└──────────────────────────────────┘
+         │                      │
+    "monolith"              "multiagent"
+         │                      │
+         ▼                      ▼
+   loop.agent_decide     multiagent_decide
+   (קיים, ללא שינוי)         (adapter.py)
+         │                      │
+         └──────────┬───────────┘
+                    ▼
+             AgentDecision
+                    ▼
+         HazardSubmitResponse
+```
+
+**איך להפעיל:**
+
+```bash
+export AGENT_ARCHITECTURE=multiagent
+.venv/bin/python -m uvicorn api.main:app --reload
+```
+
+**ה-adapter עושה שלוש פעולות** (ב-`src/agent/multiagent/adapter.py`):
+
+1. **`hazard_to_graph_inputs`** · מפרק את ה-flat dict ל-3 בלוקים: `yolo_output`, `image_quality`, `metadata`. את ה-bboxes הופך ל-`detections[]`, את `class`/`confidence` ל-`top1_*`, ואת `n_detections_by_class` מחשב. ל-`image_quality` נותן defaults סבירים (`blur_score=150`, `is_road_scene=True`, OCR ריק) עד שה-client יתחיל לשלוח את זה.
+
+2. **`run_graph_locally(...)`** · מריץ את הגרף המלא (sanitize → supervisor → perception → supervisor → research → supervisor → decision → optional approval_gate).
+
+3. **`final_state_to_decision`** · ממפה חזרה ל-`AgentDecision` של המונוליט: `action`, `rationale`, `priority`, `cited_sources`, `provider="multiagent"`, `trace`, `fallback_reason="guard_fired"` אם ה-guard נדלק.
+
+**התנהגות שומרת תאימות:** ברירת מחדל = `monolith` ⇒ אין שינוי התנהגות; 72 הטסטים הישנים עוברים. `AGENT_ARCHITECTURE=multiagent` מפעיל את המסלול החדש. אין שבירת חוזה ב-pydantic schemas.
 
 </div>
