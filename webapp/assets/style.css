@@ -385,15 +385,23 @@ a { color: inherit; text-decoration: none; }
   aspect-ratio: 16 / 9;
   box-shadow: var(--shadow-lg);
 }
-.live-stage video, .live-stage canvas {
+.live-stage video {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;
   background: #000;
 }
-.live-stage canvas { pointer-events: none; }
+.live-stage canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: transparent;
+  pointer-events: none;
+}
 
 .live-camera-select {
   display: inline-flex;

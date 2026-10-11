@@ -204,10 +204,16 @@ function iou(a, b) {
 }
 
 export function drawBoxes(canvas, source, detections) {
+  // The overlay canvas sits ON TOP of the <video>. It must stay
+  // transparent except where boxes are drawn, otherwise it hides
+  // the live stream. Earlier versions here called drawImage(source)
+  // which copied the frame onto the overlay and blocked the video
+  // on iOS Safari in portrait mode.
   const ctx = canvas.getContext("2d");
-  canvas.width = source.width;
-  canvas.height = source.height;
-  ctx.drawImage(source, 0, 0, source.width, source.height);
+  if (canvas.width !== source.width) canvas.width = source.width;
+  if (canvas.height !== source.height) canvas.height = source.height;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!detections || !detections.length) return;
   ctx.lineWidth = Math.max(2, Math.round(source.width / 400));
   ctx.font = `${Math.max(14, Math.round(source.width / 50))}px system-ui, sans-serif`;
   ctx.textBaseline = "top";
