@@ -1,4 +1,4 @@
 {
-  "origin": null,
-  "note": "The VM rewrites this file whenever cloudflared mints a new quick-tunnel URL. When origin is null the webapp uses CONFIG.API_ORIGIN from assets/config.js."
+  "origin": "https://literary-hockey-holding-rpg.trycloudflare.com",
+  "note": "Updated by the VM when cloudflared rotates its quick-tunnel URL. Clients fetch this file first; when origin is null they fall back to CONFIG.API_ORIGIN in assets/config.js."
 }
