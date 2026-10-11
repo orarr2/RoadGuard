@@ -11,11 +11,19 @@ export const CONFIG = Object.freeze({
   GOOGLE_CLIENT_ID: "",
 
   // Local URL for the YOLO ONNX weights. Dropped into assets/models/
-  // by deploy/assets-bootstrap.sh; the webapp falls through to a mock
-  // detector when the file is not present (so the UI is testable
+  // when Shai exports the trained model; the webapp falls through to a
+  // mock detector when the file is missing (so the UI is testable
   // without a trained model).
   YOLO_MODEL_URL: "assets/models/yolov8n-roadguard.onnx",
   YOLO_INPUT_SIZE: 640,
+
+  // YOLO_CLASS_NAMES is indexed by the model's class-id output. The
+  // agent API enum is fixed at D00/D10/D20/D40, so this list must map
+  // every slot to one of those four strings. If Shai's training labels
+  // use friendly names ("Longitudinal Crack") instead of the RDD2022
+  // codes, keep this list as the codes in the same order his model
+  // emits them. tools/download_dataset.py writes manifest.json with
+  // the actual class order from the roboflow dataset.
   YOLO_CLASS_NAMES: ["D00", "D10", "D20", "D40"],
   YOLO_CONFIDENCE_THRESHOLD: 0.35,
 
