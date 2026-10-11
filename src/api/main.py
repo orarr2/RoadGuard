@@ -18,7 +18,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from agent import loop, tools
-from agent.multiagent.adapter import multiagent_decide
+from agent.multiagent.adapter import multiagent_decide, multiagent_decide_live
 
 from .auth import (
     create_jwt,
@@ -26,6 +26,7 @@ from .auth import (
     verify_google_id_token,
     verify_passphrase,
 )
+from .decision_cache import DecisionCache, get_decision_cache
 from .rate_limits import limiter
 from .schemas import (
     AgentVerdict,
@@ -34,6 +35,8 @@ from .schemas import (
     HazardSubmit,
     HazardSubmitResponse,
     HealthResponse,
+    LiveHazardResponse,
+    LiveHazardSubmit,
     LoginRequest,
     LoginResponse,
     Me,
@@ -251,6 +254,109 @@ def create_app() -> FastAPI:
             ),
             provider=decision.provider,
             fallback_reason=decision.fallback_reason,
+        )
+
+    @app.post("/hazards/live", response_model=LiveHazardResponse)
+    @limiter.limit("90/minute")
+    def hazards_live(
+        request: Request,
+        body: LiveHazardSubmit = Body(...),
+        user: dict[str, Any] = Depends(get_current_user),
+        settings: Settings = Depends(get_settings),
+        cache: DecisionCache = Depends(get_decision_cache),
+    ) -> LiveHazardResponse:
+        """Streaming submit from the live-drive screen.
+
+        Returns the cached verdict when the same session resubmits the
+        same canonical hazard within the TTL. On a miss, runs the
+        agent (multiagent when AGENT_ARCHITECTURE=multiagent, otherwise
+        monolith with the richer YOLO shape) and caches the result.
+        """
+        cache_key = DecisionCache.canonical_key(
+            session_id=body.session_id,
+            hazard_class=body.hazard_class,
+            road_type=body.road_type,
+            lane_blocked=body.lane_blocked,
+            track_id=body.track_id,
+        )
+
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return LiveHazardResponse(
+                hazard_id=f"hz_live_{uuid.uuid4().hex[:12]}",
+                verdict=AgentVerdict(
+                    action=cached.action,
+                    rationale=cached.rationale,
+                    priority=cached.priority,
+                    cited_sources=cached.cited_sources,
+                ),
+                provider=cached.provider,
+                fallback_reason=cached.fallback_reason,
+                cached=True,
+                cache_key=cache_key,
+            )
+
+        hazard_id = f"hz_live_{uuid.uuid4().hex[:12]}"
+        submit_dict: dict[str, Any] = {
+            "class": body.hazard_class,
+            "confidence": float(body.confidence),
+            "top1_margin": body.top1_margin,
+            "area_ratio": body.area_ratio,
+            "n_detections_by_class": body.n_detections_by_class,
+            "bbox": body.bbox,
+            "center_y_rel": body.center_y_rel,
+            "road_type": body.road_type,
+            "lane_blocked": body.lane_blocked,
+            "location": body.location or "",
+            "session_id": body.session_id,
+            "track_id": body.track_id or "",
+            "image_quality": (
+                body.image_quality.model_dump(exclude_none=True)
+                if body.image_quality is not None
+                else {}
+            ),
+            "reported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+
+        if settings.agent_architecture == "multiagent":
+            decision = multiagent_decide_live(hazard_id=hazard_id, submit=submit_dict)
+        else:
+            # Monolith does not consume the richer live fields; adapt down.
+            hazard_input: dict[str, Any] = {
+                "hazard_id": hazard_id,
+                "class": body.hazard_class,
+                "confidence": float(body.confidence),
+                "bboxes": [body.bbox] if body.bbox else [],
+                "road_type": body.road_type,
+                "lane_blocked": body.lane_blocked,
+                "location": body.location or "",
+                "image_object_key": f"live/{body.session_id}/{hazard_id}.jpg",
+                "reported_at": submit_dict["reported_at"],
+            }
+            primary = _primary_provider(settings)
+            fallback = _fallback_provider(settings)
+            ctx = tools.ToolContext()
+            decision = loop.agent_decide(
+                hazard=hazard_input,
+                provider=primary,
+                ctx=ctx,
+                fallback_provider=fallback,
+            )
+
+        cache.put(cache_key, decision)
+
+        return LiveHazardResponse(
+            hazard_id=hazard_id,
+            verdict=AgentVerdict(
+                action=decision.action,
+                rationale=decision.rationale,
+                priority=decision.priority,
+                cited_sources=decision.cited_sources,
+            ),
+            provider=decision.provider,
+            fallback_reason=decision.fallback_reason,
+            cached=False,
+            cache_key=cache_key,
         )
 
     @app.get("/hazards/history", response_model=HazardHistoryResponse)

@@ -58,18 +58,29 @@ export class YoloDetector {
   }
 
   #detectMock(canvas) {
-    // One deterministic bbox centered on the frame, class D40, moderate
-    // confidence. Enough to drive the metadata form and the submit
-    // flow without a real model.
+    // Deterministic mock output for the shell flow: one centred D40
+    // bbox, moderate confidence, enriched to the richer live-shape
+    // (top1_margin, area_ratio, position, n_detections_by_class) so
+    // the live-drive tracker and the /hazards/live endpoint can be
+    // exercised end-to-end without a trained ONNX file.
     const w = canvas.width;
     const h = canvas.height;
     const bx = Math.round(w * 0.35);
     const by = Math.round(h * 0.45);
     const bw = Math.round(w * 0.3);
     const bh = Math.round(h * 0.25);
+    const centerYRel = (by + bh / 2) / h;
+    const centerXRel = (bx + bw / 2) / w;
+    const areaRatio = (bw * bh) / (w * h);
+    const confidence = 0.62;
     return {
       model: "mock",
       input_size: this.inputSize,
+      top1_class: "D40",
+      top1_confidence: confidence,
+      top1_margin: 0.38,
+      area_ratio: areaRatio,
+      n_detections_by_class: { D40: 1, D20: 0, D00: 0, D10: 0 },
       detections: [
         {
           x1: bx,
@@ -77,7 +88,9 @@ export class YoloDetector {
           x2: bx + bw,
           y2: by + bh,
           class: "D40",
-          confidence: 0.62,
+          confidence,
+          area_ratio: areaRatio,
+          position: { center_x_rel: centerXRel, center_y_rel: centerYRel },
         },
       ],
     };

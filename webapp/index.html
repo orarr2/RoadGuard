@@ -17,6 +17,7 @@
     <small>decision support</small>
   </div>
   <nav id="nav" hidden>
+    <button type="button" data-screen="drive" class="nav-btn nav-btn-primary">Live drive</button>
     <button type="button" data-screen="capture" class="nav-btn">Capture</button>
     <button type="button" data-screen="history" class="nav-btn">History</button>
     <button type="button" data-screen="settings" class="nav-btn">Settings</button>
@@ -41,6 +42,52 @@
       </label>
       <button type="submit">Sign in with passphrase</button>
       <p class="error" id="signin-error" hidden></p>
+    </form>
+  </section>
+
+  <section id="screen-drive" class="screen">
+    <h2>Live drive</h2>
+    <p class="muted">
+      The back camera streams while you drive. Confirmed hazards fire
+      one submission each; the server dedups within a short window so
+      the same pothole seen for three seconds costs one agent call,
+      not thirty. Nothing is auto-dispatched - every verdict is a
+      recommendation for human review.
+    </p>
+    <div class="drive-stage">
+      <video id="drive-video" autoplay playsinline muted></video>
+      <canvas id="drive-overlay" aria-label="Live detections overlay"></canvas>
+      <div class="drive-hud">
+        <span class="drive-session" id="drive-session">session: -</span>
+        <span class="drive-mode" id="drive-mode">detector: -</span>
+        <span class="drive-stats" id="drive-stats">frames: 0 - tracks: 0</span>
+      </div>
+      <div class="toast-stack" id="verdict-toasts" aria-live="polite"></div>
+    </div>
+    <form id="drive-controls" class="drive-controls">
+      <label>
+        Road type
+        <select name="road_type" required>
+          <option value="main">Main road</option>
+          <option value="secondary">Secondary road</option>
+          <option value="bike_path">Bike path</option>
+          <option value="parking">Parking lot</option>
+        </select>
+      </label>
+      <label>
+        Lane obstruction (default)
+        <select name="lane_blocked" required>
+          <option value="none">None</option>
+          <option value="partial">Partial</option>
+          <option value="full">Full</option>
+        </select>
+      </label>
+      <div class="row">
+        <button type="button" id="drive-start">Start</button>
+        <button type="button" id="drive-stop" disabled>Stop</button>
+      </div>
+      <p class="muted" id="drive-hint">Press Start to open the back camera.</p>
+      <p class="error" id="drive-error" hidden></p>
     </form>
   </section>
 

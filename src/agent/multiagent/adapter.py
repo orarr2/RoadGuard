@@ -131,3 +131,90 @@ def multiagent_decide(hazard: dict[str, Any]) -> AgentDecision:
         metadata=metadata,
     )
     return final_state_to_decision(final_state)
+
+
+def live_hazard_to_graph_inputs(
+    hazard_id: str,
+    submit: dict[str, Any],
+) -> tuple[str, dict, dict, dict]:
+    """Shape a LiveHazardSubmit (dict form) for run_graph_locally.
+
+    LiveHazardSubmit already carries the richer fields the Perception
+    node wants (top1_margin, area_ratio, n_detections_by_class,
+    image_quality), so no defaults are injected except where the client
+    skipped a field.
+    """
+    hazard_class = submit["class"] if "class" in submit else submit["hazard_class"]
+    confidence = float(submit["confidence"])
+    top1_margin = float(submit.get("top1_margin") or 0.0)
+    area_ratio = float(submit.get("area_ratio") or 0.0)
+    counts = submit.get("n_detections_by_class") or {
+        "D00": 0,
+        "D10": 0,
+        "D20": 0,
+        "D40": 0,
+    }
+    counts.setdefault(hazard_class, 0)
+    if counts.get(hazard_class, 0) < 1:
+        counts[hazard_class] = 1
+
+    detection: dict[str, Any] = {
+        "class": hazard_class,
+        "confidence": confidence,
+        "area_ratio": area_ratio,
+    }
+    if submit.get("bbox"):
+        detection["bbox"] = list(submit["bbox"])
+    if submit.get("center_y_rel") is not None:
+        detection["position"] = {"center_y_rel": float(submit["center_y_rel"])}
+
+    yolo_output = {
+        "top1_class": hazard_class,
+        "top1_confidence": confidence,
+        "top1_margin": top1_margin,
+        "detections": [detection],
+        "n_detections_by_class": counts,
+    }
+
+    quality_in = submit.get("image_quality") or {}
+    image_quality = {
+        "blur_score": float(quality_in.get("blur_score") or 150.0),
+        "brightness_mean": float(quality_in.get("brightness_mean") or 0.5),
+        "is_road_scene": bool(
+            quality_in.get("is_road_scene")
+            if quality_in.get("is_road_scene") is not None
+            else True
+        ),
+        "road_scene_confidence": float(
+            quality_in.get("road_scene_confidence") or 0.9
+        ),
+        "occlusion_estimate": quality_in.get("occlusion_estimate") or "low",
+        "ocr_text_detected": quality_in.get("ocr_text_detected") or "",
+    }
+
+    metadata = {
+        "road_type": submit["road_type"],
+        "lane_blocked": submit["lane_blocked"],
+        "location": submit.get("location") or "",
+        "reported_at": submit.get("reported_at", ""),
+        "session_id": submit.get("session_id", ""),
+        "track_id": submit.get("track_id") or "",
+    }
+    return hazard_id, yolo_output, image_quality, metadata
+
+
+def multiagent_decide_live(
+    hazard_id: str,
+    submit: dict[str, Any],
+) -> AgentDecision:
+    """Live-drive variant: expects a LiveHazardSubmit-style dict."""
+    hazard_id, yolo_output, image_quality, metadata = live_hazard_to_graph_inputs(
+        hazard_id=hazard_id, submit=submit
+    )
+    final_state = run_graph_locally(
+        hazard_id=hazard_id,
+        yolo_output=yolo_output,
+        image_quality=image_quality,
+        metadata=metadata,
+    )
+    return final_state_to_decision(final_state)

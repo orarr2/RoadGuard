@@ -71,6 +71,52 @@ class HazardSubmitResponse(BaseModel):
     fallback_reason: Optional[str] = None
 
 
+class ImageQualitySignal(BaseModel):
+    """Optional client-side quality probe surfaced to the Perception node."""
+
+    blur_score: Optional[float] = None
+    brightness_mean: Optional[float] = None
+    is_road_scene: Optional[bool] = None
+    road_scene_confidence: Optional[float] = None
+    occlusion_estimate: Optional[Literal["low", "medium", "high"]] = None
+    ocr_text_detected: Optional[str] = None
+
+
+class LiveHazardSubmit(BaseModel):
+    """Streaming submission from the live-drive screen.
+
+    One per confirmed hazard, not per frame. The client's IoU tracker
+    collapses frames into one submission; the server's decision cache
+    (keyed by session_id + track_id + canonical attrs) covers the gap
+    when the tracker drops and reacquires the same hazard.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    session_id: str = Field(min_length=4, max_length=64)
+    track_id: Optional[str] = Field(default=None, max_length=64)
+    hazard_class: Literal["D00", "D10", "D20", "D40"] = Field(alias="class")
+    confidence: float = Field(ge=0, le=1)
+    top1_margin: Optional[float] = Field(default=None, ge=0, le=1)
+    area_ratio: Optional[float] = Field(default=None, ge=0, le=1)
+    n_detections_by_class: Optional[dict[str, int]] = None
+    bbox: Optional[list[float]] = None
+    center_y_rel: Optional[float] = Field(default=None, ge=0, le=1)
+    road_type: RoadType
+    lane_blocked: LaneBlocked
+    location: Optional[str] = None
+    image_quality: Optional[ImageQualitySignal] = None
+
+
+class LiveHazardResponse(BaseModel):
+    hazard_id: str
+    verdict: AgentVerdict
+    provider: str
+    fallback_reason: Optional[str] = None
+    cached: bool = False
+    cache_key: Optional[str] = None
+
+
 class HazardHistoryItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 

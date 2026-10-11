@@ -13,9 +13,11 @@ import {
 } from "./auth.js";
 import { CameraController, requestCameraPermission } from "./camera.js";
 import { YoloDetector, drawBoxes, topDetection } from "./detect.js";
+import { LiveDriver } from "./drive.js";
 
 const SCREENS = [
   "signin",
+  "drive",
   "capture",
   "detect",
   "verdict",
@@ -29,6 +31,8 @@ const state = {
   lastSnapshot: null,
   lastDetections: [],
   lastVerdict: null,
+  driver: null,
+  verdictCount: 0,
 };
 
 const SETTINGS_KEY = "roadguard.settings.v1";
@@ -62,6 +66,11 @@ function show(screen) {
     startCamera();
   } else if (state.camera) {
     state.camera.stop();
+  }
+  if (screen !== "drive" && state.driver && state.driver.running) {
+    state.driver.stop();
+    document.getElementById("drive-start").disabled = false;
+    document.getElementById("drive-stop").disabled = true;
   }
   if (screen === "history") {
     loadHistory();
@@ -238,7 +247,7 @@ async function signInViaPassphrase(ev) {
 
 async function afterSignIn() {
   document.getElementById("nav").hidden = false;
-  show("capture");
+  show("drive");
   try {
     const me = await fetchMe();
     document.getElementById("brand-sub")?.replaceChildren(
@@ -256,6 +265,112 @@ function signOut() {
   show("signin");
 }
 
+function wireDrive() {
+  const video = document.getElementById("drive-video");
+  const overlay = document.getElementById("drive-overlay");
+  const sessionEl = document.getElementById("drive-session");
+  const modeEl = document.getElementById("drive-mode");
+  const statsEl = document.getElementById("drive-stats");
+  const hintEl = document.getElementById("drive-hint");
+  const errorEl = document.getElementById("drive-error");
+  const toastStack = document.getElementById("verdict-toasts");
+  const startBtn = document.getElementById("drive-start");
+  const stopBtn = document.getElementById("drive-stop");
+  const controlsForm = document.getElementById("drive-controls");
+
+  const readMeta = () => ({
+    road_type: controlsForm.road_type.value || "main",
+    lane_blocked: controlsForm.lane_blocked.value || "none",
+  });
+
+  function pushToast({ action, rationale, priority, cited_sources, cached }) {
+    const el = document.createElement("div");
+    el.className = `toast toast-${action}`;
+    const safeRationale = (rationale || "").replace(/[<>]/g, "");
+    const cites = (cited_sources || []).slice(0, 1).map((u) => {
+      try {
+        return new URL(u).hostname;
+      } catch {
+        return u;
+      }
+    });
+    el.innerHTML = `
+      <div class="toast-head">
+        ${action.replace(/_/g, " ")}
+        <span class="toast-cache">${cached ? "cached" : "fresh"}</span>
+      </div>
+      <div class="toast-body">
+        ${safeRationale}
+        <span class="muted">(priority ${priority ?? "-"})</span>
+      </div>
+      ${cites.length ? `<div class="toast-cite">source: ${cites[0]}</div>` : ""}
+    `;
+    toastStack.appendChild(el);
+    while (toastStack.children.length > 4) {
+      toastStack.removeChild(toastStack.firstChild);
+    }
+    setTimeout(() => {
+      el.classList.add("toast-fade");
+      setTimeout(() => el.remove(), 500);
+    }, 7000);
+  }
+
+  function initDriver() {
+    const driver = new LiveDriver({
+      video,
+      overlayCanvas: overlay,
+      getMetadata: readMeta,
+    });
+    sessionEl.textContent = `session: ${driver.sessionId.slice(0, 8)}`;
+    driver.on("state", ({ running, mode }) => {
+      startBtn.disabled = !!running;
+      stopBtn.disabled = !running;
+      if (mode) {
+        const label = mode === "mock" ? "detector: mock" : `detector: ${mode}`;
+        modeEl.textContent = label;
+        if (mode === "mock") {
+          hintEl.textContent =
+            "Mock detector active - replace assets/models/yolov8n-roadguard.onnx to use the real model.";
+        } else {
+          hintEl.textContent = "Running.";
+        }
+      }
+      if (!running) hintEl.textContent = "Stopped.";
+    });
+    driver.on("tick", ({ frameCount, tracks }) => {
+      statsEl.textContent = `frames: ${frameCount} - tracks: ${tracks.length}`;
+    });
+    driver.on("verdict", ({ response }) => {
+      state.verdictCount += 1;
+      pushToast({
+        action: response.verdict.action,
+        rationale: response.verdict.rationale,
+        priority: response.verdict.priority,
+        cited_sources: response.verdict.cited_sources,
+        cached: response.cached,
+      });
+    });
+    driver.on("error", ({ code, message }) => {
+      errorEl.hidden = false;
+      errorEl.textContent =
+        code === "camera_denied"
+          ? "Camera permission denied. Allow back-camera access to continue."
+          : `Error: ${code}${message ? " - " + message : ""}`;
+    });
+    return driver;
+  }
+
+  startBtn.addEventListener("click", async () => {
+    errorEl.hidden = true;
+    errorEl.textContent = "";
+    if (!state.driver) state.driver = initDriver();
+    await state.driver.start();
+  });
+  stopBtn.addEventListener("click", () => {
+    if (state.driver) state.driver.stop();
+  });
+}
+
 function wireNav() {
   for (const btn of document.querySelectorAll(".nav-btn")) {
     btn.addEventListener("click", () => show(btn.dataset.screen));
@@ -268,6 +383,7 @@ function wireNav() {
   document.getElementById("verdict-history").addEventListener("click", () => show("history"));
   document.getElementById("history-refresh").addEventListener("click", loadHistory);
   document.getElementById("signout-btn").addEventListener("click", signOut);
+  wireDrive();
 
   const settings = loadLocalSettings();
   const form = document.getElementById("settings-form");
