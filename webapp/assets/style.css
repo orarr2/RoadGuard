@@ -364,26 +364,33 @@ a { color: inherit; text-decoration: none; }
   padding: 16px 24px 24px;
   min-height: calc(100vh - 74px);
 }
-@media (max-width: 900px) {
-  .live { grid-template-columns: 1fr; padding: 12px 12px 20px; }
-  .live-stage { min-height: 260px; }
-}
-@media (max-width: 640px) and (orientation: portrait) {
-  .live-stage {
-    aspect-ratio: auto;
-    height: calc(100vh - 200px);
-    min-height: 340px;
-  }
-}
 
 .live-stage {
   position: relative;
+  width: 100%;
+  max-width: 100%;
   border-radius: var(--radius-lg);
   overflow: hidden;
   background: #000;
   min-height: 320px;
   aspect-ratio: 16 / 9;
   box-shadow: var(--shadow-lg);
+}
+
+/* Mobile: drop the sidebar, drop the 16/9 (which on a narrow viewport
+   derives width from height and overflows horizontally), use the
+   viewport's own height instead. No `(orientation: portrait)` guard
+   because iOS Safari does not always report that correctly in
+   emulated or embedded contexts. */
+@media (max-width: 900px) {
+  .live { grid-template-columns: 1fr; padding: 12px 12px 20px; }
+  .live-stage {
+    aspect-ratio: auto;
+    width: 100%;
+    max-width: 100%;
+    height: calc(100svh - 200px);
+    min-height: 320px;
+  }
 }
 .live-stage video {
   position: absolute;
