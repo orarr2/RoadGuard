@@ -21,12 +21,15 @@ export const CONFIG = Object.freeze({
   // agent API enum is fixed at D00/D10/D20/D40, so this list must map
   // every slot to one of those four strings.
   //
-  // Current dataset (xjsj/road-damage-10k v1, nc=4) ships three named
-  // classes - LongitudinalCracks, Potholes, TransverseCrack - plus an
-  // unnamed 4th slot. Mapped below to RDD2022 codes; the 4th slot is
-  // assumed to be alligator (D20) because that is the fourth standard
-  // RDD2022 class. Confirm with Shai after the first training run.
-  YOLO_CLASS_NAMES: ["D00", "D40", "D10", "D20"],
+  // Order confirmed against the actual data.yaml of xjsj/road-damage-10k
+  // v1 downloaded to the VM (see /opt/roadguard/datasets/road-damage-10k/
+  // manifest.json). All four classes are named - the dataset is the full
+  // RDD2022 four-class set, just under friendly labels:
+  //   id 0 = AlligatorCrack      -> D20
+  //   id 1 = LongitudinalCracks  -> D00
+  //   id 2 = Potholes            -> D40
+  //   id 3 = TransverseCrack     -> D10
+  YOLO_CLASS_NAMES: ["D20", "D00", "D40", "D10"],
   YOLO_CONFIDENCE_THRESHOLD: 0.35,
 
   // Path to the tunnel JSON file. On the VM, deploy/update-tunnel-url.sh
