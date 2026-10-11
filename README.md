@@ -1,50 +1,103 @@
 # RoadGuard
 
-A decision-support system for municipal infrastructure managers. A photo of
-a road is captured in the browser, a YOLOv8 model running on-device detects
-cracks and potholes, and a tool-using LLM agent recommends one of four
-actions: urgent inspection, standard work queue, request for additional
-evidence, or human review.
+**Live site: https://orarr2.github.io/RoadGuard/**
 
-The system is decision support only. It never closes a road, dispatches a
-contractor, or files a real work order. Every recommendation is surfaced
-with a cited maintenance procedure so a human can act on it.
+Real-time road hazard decision-support agent. The back camera streams
+while the car drives, a YOLO model runs on-device, an IoU tracker
+collapses frames into one submission per confirmed hazard, and a
+3-agent orchestrator-worker system (Perception + Research + Decision,
+with a Python supervisor) recommends one of four actions: `urgent`,
+`standard`, `needs_more_evidence`, or `human_review`. Every verdict
+cites a maintenance procedure. Nothing closes a road or dispatches a
+contractor; a human reviews each recommendation.
 
-## Architecture
+## Access
+
+- Webapp (public): https://orarr2.github.io/RoadGuard/
+- Alternate URL (served from the VM through a Cloudflare quick tunnel):
+  the URL rotates when `cloudflared.service` restarts; the latest value
+  is pushed into [`webapp/tunnel-url.json`](webapp/tunnel-url.json).
+- API routes (same origin as the webapp through the tunnel):
+  `GET /health`, `POST /auth/login`, `GET /auth/me`,
+  `POST /hazards/live`, `POST /hazards/submit`.
+
+## Architecture at a glance
 
 ```
-Browser  ->  Supabase Storage  ->  FastAPI VM
-  |                                   |
-  | YOLO ONNX inference (on-device)   | Agent loop (5 tools, Groq + Llama fallback)
-  | Signed upload (image stays here)  | ChromaDB RAG over road-maintenance corpus
-  | Metadata POST only                | SQLite log, nightly email, 48h image cleanup
+Phone / dash
+  back camera -> YOLO ONNX (on-device, onnxruntime-web)
+                -> IoU tracker -> one POST per confirmed hazard
+                                        |
+                                        v
+Cloudflare quick tunnel  ------->  FastAPI VM (e2-micro)
+                                        |
+            server-side DecisionCache (session_id + track_id + class
+            + road + lane, TTL 120 s) deduplicates resurfaces
+                                        |
+                                        v
+          +--------------------- SUPERVISOR (python router) --------+
+          |                              |                          |
+          v                              v                          v
+   Perception node             Research node                 Decision node
+   (hazard profile +           (RAG query_repair_            (chooses one of four
+    IoU + quality signals)      standards, read-only)        actions, cites sources)
+                                        |
+                                        v
+                              AgentDecision -> HazardSubmitResponse
 ```
 
-- **Client**: GitHub Pages webapp, environment-facing camera, in-browser
-  YOLO via `onnxruntime-web`, signed PUT to Supabase, metadata POST to the
-  VM.
-- **VM**: Google Cloud e2-micro Free Tier (1 GB RAM), FastAPI behind a
-  Cloudflare quick tunnel. Agent orchestrates five tools via Groq function
-  calling; a local Llama 3.2 1B Q4_K_M gguf is the fallback.
-- **Storage**: User-owned Supabase bucket, 48 hour TTL enforced by a
-  nightly cron on the VM. The VM database stores only derived metadata.
+- Every handoff is validated by `assert_v3` (schema + grounding check).
+- Budget guard (4 caps: iterations, hops per agent, cost, wall-clock)
+  returns `human_review` with `fallback_reason=guard_fired` instead of
+  crashing when any cap trips.
+- Boundary defence sanitizes free-text location, OCR text pulled from
+  the image, and RAG passages (dual-LLM pattern).
+
+See [docs/multiagent-architecture.md](docs/multiagent-architecture.md)
+for the authoritative spec. The walk-through is
+[notebooks/agent_walkthrough.ipynb](notebooks/agent_walkthrough.ipynb)
+(deterministic, no network needed, runs end to end in a few seconds).
+
+## What is live today
+
+| Component | Status |
+|---|---|
+| `/health`, `/auth/*`, `/hazards/live`, `/hazards/submit` on the VM | up |
+| GitHub Pages mirror of the webapp | up |
+| Cloudflare quick tunnel from the VM | up |
+| 3-agent graph (multiagent) with grounded citations | up, 50/50 scenarios, 100% grounded on stub |
+| Groq provider (gpt-oss-120b) for the agent LLM | wired, `ROADGUARD_USE_LIVE=1` |
+| Decision cache (per-session, 120 s TTL) | up |
+| YOLO ONNX model | **pending Shai** (mock detector active until the ONNX lands under `webapp/assets/models/`) |
+| ChromaDB production corpus | **pending Benny** (stub corpus answers `query_repair_standards` today) |
+| Local Llama fallback (gguf) | optional, not installed on the e2-micro to leave disk headroom |
+| Supabase image storage | deferred (live flow does not upload full frames) |
+| SQLite history + daily email | wired in code, surface-only in API |
 
 ## Repository layout
 
 ```
 src/
-  agent/            Tool-using decision agent (five tools, decision loop)
-  api/              FastAPI endpoints, auth, rate limits
-  storage/          Supabase client (presign, delete, signed read)
-  db/               SQLite schema and models
+  agent/
+    multiagent/     3-node orchestrator-worker: nodes, tools, guards,
+                    chat wrapper, sanitize, measure, graph, adapter
+    loop.py         single-agent monolith (older path, kept for A/B)
+    evaluation/     scenarios.json + run_eval.py (10 seed scenarios)
+    policy.py       charter-mandated fallbacks + decision table
+  api/              FastAPI shell, auth, rate limits, decision_cache,
+                    schemas (incl. LiveHazardSubmit + LiveHazardResponse)
+  storage/          Supabase client (ready, not yet wired to a bucket)
+  db/               SQLite schema + models (ready, not yet queried)
   jobs/             Daily email + nightly image cleanup
-  tools/            Operational helpers (RAG index build, etc.)
-tests/              pytest suite
-docs/               Charter, agent contract, deployment notes
-deploy/             VM setup script, systemd units, Cloudflare notes
-webapp/             GitHub Pages client (vanilla ES modules, YOLO ONNX)
-data/               Split lists for RDD2022 (filenames only, no raw bytes)
-corpus/             Road-maintenance RAG corpus (procedures, standards)
+  tools/            Operational helpers (download_dataset.py, ...)
+tests/              pytest suite (201 tests; multiagent + api + db + jobs)
+notebooks/          agent_walkthrough.ipynb (standalone demo)
+docs/               CHARTER.md, agent-contract.md,
+                    multiagent-architecture.md (RTL Hebrew spec)
+deploy/             setup.sh, systemd units, Cloudflare tunnel notes
+webapp/             GitHub Pages client (vanilla ES modules, dark design
+                    system, live-drive flow, verdict toasts)
+tests/multiagent_eval_scenarios.json   50 scenarios across 4 approaches
 ```
 
 ## Local development
@@ -57,11 +110,36 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
+Full suite: 201 tests, green.
+
+## VM provisioning
+
+```bash
+curl -L https://raw.githubusercontent.com/orarr2/RoadGuard/main/deploy/setup.sh -o /tmp/roadguard-setup.sh
+sudo bash /tmp/roadguard-setup.sh
+```
+
+Idempotent. Uses `requirements-vm.txt` (the lean subset that fits the
+e2-micro Free Tier) and leaves the heavy packages (`llama-cpp-python`,
+`chromadb`) off until there is disk and RAM headroom. See
+[deploy/README.md](deploy/README.md).
+
+## Dataset
+
+Backup script: `src/tools/download_dataset.py` pulls
+`xjsj/road-damage-10k` v1 (YOLOv8 format, 9,926 images, CC BY 4.0)
+from Roboflow Universe to `/opt/roadguard/datasets/road-damage-10k`
+on the VM. Shai trains the detector; the agent only needs the class
+list from the resulting `data.yaml` to match
+`webapp/assets/config.js` `YOLO_CLASS_NAMES`.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
 
-External datasets used only locally during training:
+External resources (not redistributed through this repository):
 
-- RDD2022 (CC BY-SA 4.0, Sekilab) is downloaded for YOLO fine-tuning and
-  is not redistributed through this repository.
+- Roboflow dataset `xjsj/road-damage-10k` is CC BY 4.0; backed up on
+  the VM only.
+- RDD2022 (Sekilab) is CC BY-SA 4.0; referenced in
+  [docs/CHARTER.md](docs/CHARTER.md).
