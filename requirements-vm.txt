@@ -1,0 +1,26 @@
+# Lean install set for the e2-micro VM (1 GB RAM, 30 GB disk).
+#
+# Omitted on purpose:
+#   - chromadb and chroma-hnswlib: 3.13 wheels not yet published, source
+#     build requires Python.h plus >1 GB tmp. The agent falls back to the
+#     stub corpus in src/agent/multiagent/tools/query_repair_standards.py.
+#     Install when Benny's RAG index is ready and the VM has headroom.
+#   - llama-cpp-python: source build is ~15 min on this hardware and the
+#     compile has repeatedly tripped the disk cap. The agent treats the
+#     fallback provider as optional; without it, graceful degradation on
+#     a Groq outage returns human_review instead of running local Llama.
+#
+# For a full local dev environment that includes those packages, use the
+# top-level requirements.txt + requirements-dev.txt instead.
+
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.30,<0.33
+pydantic>=2.9,<3
+pydantic-settings>=2.5,<3
+python-jose[cryptography]>=3.3,<4
+passlib[bcrypt]>=1.7.4,<2
+bcrypt>=4.2,<5
+slowapi>=0.1.9,<0.2
+httpx>=0.27,<0.29
+python-multipart>=0.0.12,<0.1
+email-validator>=2.2,<3

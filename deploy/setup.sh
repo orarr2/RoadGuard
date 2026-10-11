@@ -61,14 +61,32 @@ if [ ! -x "$VENV_DIR/bin/python" ]; then
     sudo -u "$SERVICE_USER" python3 -m venv "$VENV_DIR"
 fi
 
-log "install Python requirements"
+log "install Python requirements (lean VM set)"
+# requirements-vm.txt is the subset the VM actually needs. It omits
+# chromadb (3.13 wheels unavailable, source build needs >1 GB tmp) and
+# llama-cpp-python (source build is ~15 min and fills /tmp on e2-micro).
+# Both are lazy-imported from the agent code and gracefully stubbed, so
+# the service runs without them. Install them manually later when disk
+# headroom and Benny's RAG index are ready.
+VM_REQS="$REPO_DIR/requirements-vm.txt"
+if [ ! -f "$VM_REQS" ]; then
+    VM_REQS="$REPO_DIR/requirements.txt"
+fi
 sudo -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install --upgrade pip wheel
-sudo -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install \
-    -r "$REPO_DIR/requirements.txt"
+sudo -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install -r "$VM_REQS"
 
-log "download Llama 3.2 1B gguf (fallback LLM, ~800 MB)"
-if [ ! -s "$LLAMA_GGUF_PATH" ]; then
-    sudo -u "$SERVICE_USER" curl -fL -o "$LLAMA_GGUF_PATH" "$LLAMA_GGUF_URL"
+log "download Llama 3.2 1B gguf (fallback LLM, ~800 MB) [optional]"
+if [ "${ROADGUARD_SKIP_LLAMA_DOWNLOAD:-0}" = "1" ]; then
+    echo "  Skipping gguf download (ROADGUARD_SKIP_LLAMA_DOWNLOAD=1)."
+elif [ ! -s "$LLAMA_GGUF_PATH" ]; then
+    # The fallback LLM is optional; if llama-cpp-python is not installed
+    # the service still runs and simply returns human_review when Groq
+    # is down. Try the download but do not fail the whole script if the
+    # VM is tight on disk.
+    sudo -u "$SERVICE_USER" curl -fL -o "$LLAMA_GGUF_PATH" "$LLAMA_GGUF_URL" || {
+        echo "  Llama gguf download failed; continuing without it."
+        rm -f "$LLAMA_GGUF_PATH"
+    }
 fi
 
 log "ensure $ENV_FILE exists"
