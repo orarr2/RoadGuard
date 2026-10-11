@@ -1,208 +1,318 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<meta name="color-scheme" content="light dark">
-<title>RoadGuard</title>
-<link rel="stylesheet" href="assets/style.css">
-<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-<link rel="preconnect" href="https://accounts.google.com">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0a0d14">
+  <meta name="description" content="Real-time road hazard detector that runs while you drive. Camera stays on your device.">
+  <title>RoadGuard - AI road hazard agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/style.css">
 </head>
-<body>
+<body data-view="landing">
 
-<header class="app-header">
-  <div class="brand">
-    <strong>RoadGuard</strong>
-    <small>decision support</small>
+  <!-- ========================= NAV ========================= -->
+  <header class="nav">
+    <div class="nav-brand">
+      <svg class="brand-mark" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+        <path d="M20 3 L34 10 V22 C34 29 28 35 20 37 C12 35 6 29 6 22 V10 Z"
+              stroke="url(#brandStroke)" stroke-width="2" stroke-linejoin="round"/>
+        <path d="M20 12 V28 M14 20 H26" stroke="url(#brandStroke)" stroke-width="2.5" stroke-linecap="round"/>
+        <defs>
+          <linearGradient id="brandStroke" x1="0" y1="0" x2="40" y2="40">
+            <stop offset="0" stop-color="#7dd3fc"/>
+            <stop offset="0.5" stop-color="#a78bfa"/>
+            <stop offset="1" stop-color="#34d399"/>
+          </linearGradient>
+        </defs>
+      </svg>
+      <span class="brand-text">RoadGuard</span>
+      <span class="brand-tag">beta</span>
+    </div>
+    <nav class="nav-actions">
+      <button class="nav-btn nav-btn--ghost" id="nav-session" title="Session status" hidden>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>
+        <span id="nav-session-label">session</span>
+      </button>
+      <button class="nav-btn nav-btn--ghost" id="nav-signin" title="Sign in">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        <span id="signin-label">Sign in</span>
+      </button>
+    </nav>
+  </header>
+
+  <!-- ========================= LANDING ========================= -->
+  <main class="landing" id="view-landing">
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="hero-badge">
+          <span class="hero-dot"></span>
+          Runs entirely in your browser
+        </div>
+        <h1 class="hero-title">
+          Your <span class="hero-grad">road hazard agent</span>,
+          right in the dash.
+        </h1>
+        <p class="hero-sub">
+          RoadGuard streams your back camera, detects cracks and potholes
+          on-device, dedups the same hazard across a few seconds of frames,
+          and asks a tool-using agent to recommend one of four actions:
+          urgent, standard queue, needs more evidence, or human review.
+          No install, no upload, no video leaves the car.
+        </p>
+        <div class="hero-cta">
+          <button class="btn btn--primary btn--lg" id="start-btn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            Start live drive
+          </button>
+          <a class="btn btn--ghost btn--lg" href="#how">
+            How it works
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+          </a>
+        </div>
+        <div class="hero-trust">
+          <div class="trust-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            <span>Video never leaves your device</span>
+          </div>
+          <div class="trust-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+            <span>YOLO runs in the browser</span>
+          </div>
+          <div class="trust-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            <span>Every verdict cites a real procedure</span>
+          </div>
+        </div>
+      </div>
+      <div class="hero-visual">
+        <div class="hero-frame">
+          <div class="hero-frame-inner">
+            <div class="hero-road" aria-hidden="true">
+              <svg viewBox="0 0 240 320" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                <defs>
+                  <linearGradient id="roadStroke" x1="0" y1="0" x2="240" y2="320">
+                    <stop offset="0" stop-color="#7dd3fc"/>
+                    <stop offset="0.5" stop-color="#a78bfa"/>
+                    <stop offset="1" stop-color="#34d399"/>
+                  </linearGradient>
+                  <linearGradient id="roadSurface" x1="0" y1="0" x2="0" y2="320">
+                    <stop offset="0" stop-color="#1e2333" stop-opacity="0"/>
+                    <stop offset="1" stop-color="#1e2333" stop-opacity="0.9"/>
+                  </linearGradient>
+                </defs>
+                <path d="M30 310 L95 60 L145 60 L210 310 Z" fill="url(#roadSurface)" stroke="url(#roadStroke)" stroke-width="2.2"/>
+                <path d="M120 60 L120 310" stroke="url(#roadStroke)" stroke-width="2" stroke-dasharray="12 10"/>
+                <circle cx="104" cy="220" r="18" fill="rgba(248,113,113,0.18)" stroke="#f87171" stroke-width="2"/>
+                <circle cx="152" cy="150" r="10" fill="rgba(251,191,36,0.18)" stroke="#fbbf24" stroke-width="1.8"/>
+                <rect x="86" y="258" width="36" height="28" rx="4" fill="none" stroke="#34d399" stroke-width="1.8" stroke-dasharray="6 4"/>
+              </svg>
+            </div>
+            <div class="hero-hud">
+              <div class="hero-hud-row"><span>Detections</span><span class="hero-hud-val">3</span></div>
+              <div class="hero-hud-bar">
+                <div class="hero-hud-fill" style="width: 72%"></div>
+              </div>
+              <div class="hero-hud-pill hero-hud-pill--bad">D40 - urgent</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="how" id="how">
+      <div class="section-head">
+        <h2>How it works</h2>
+        <p>Three moving parts, all working together in the car.</p>
+      </div>
+      <div class="how-grid">
+        <div class="how-card">
+          <div class="how-num">01</div>
+          <h3>Camera + YOLO</h3>
+          <p>Your back camera feeds a YOLOv8 ONNX model running on-device via onnxruntime-web. Four hazard classes (D00, D10, D20, D40) at a few frames per second on any modern phone.</p>
+        </div>
+        <div class="how-card">
+          <div class="how-num">02</div>
+          <h3>Tracker + dedup</h3>
+          <p>An IoU tracker in the browser collapses the same hazard across a few frames into one submission. A short-TTL cache on the server dedups the resurface so you never pay the LLM twice for the same pothole.</p>
+        </div>
+        <div class="how-card">
+          <div class="how-num">03</div>
+          <h3>Agent verdict</h3>
+          <p>Perception then Research then Decision agents cite the exact maintenance procedure from the local corpus and recommend one of four actions: urgent, standard, needs more evidence, or human review.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ========================= LIVE ========================= -->
+  <main class="live" id="view-live" hidden>
+    <div class="live-stage">
+      <video id="cam" playsinline autoplay muted></video>
+      <canvas id="overlay"></canvas>
+
+      <div class="live-topbar">
+        <button class="live-back" id="stop-btn" title="End drive">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+          <span>End</span>
+        </button>
+        <div class="live-title">
+          <div class="live-title-name" id="live-mode-name">Live drive</div>
+          <div class="live-title-meta">
+            <span class="live-title-tag" id="live-provider">Streaming</span>
+            <span class="live-title-sep">&middot;</span>
+            <span id="live-fps">0 fps</span>
+          </div>
+        </div>
+        <div class="live-camera-select" id="camera-select-wrap" hidden>
+          <label for="camera-select" class="sr-only">Camera</label>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+          <select id="camera-select" aria-label="Choose camera"></select>
+        </div>
+      </div>
+
+      <div class="live-hud">
+        <div class="hud-metric">
+          <div class="hud-metric-label">Tracks</div>
+          <div class="hud-metric-value" id="hud-tracks">0</div>
+        </div>
+        <div class="hud-metric">
+          <div class="hud-metric-label">Top class</div>
+          <div class="hud-metric-value" id="hud-topclass">--</div>
+        </div>
+        <div class="hud-ring" id="hud-ring">
+          <svg viewBox="0 0 100 100" class="ring">
+            <circle cx="50" cy="50" r="42" class="ring-track"/>
+            <circle cx="50" cy="50" r="42" class="ring-fill" id="ring-fill"/>
+          </svg>
+          <div class="hud-ring-center">
+            <div class="hud-ring-count" id="hud-verdicts">0</div>
+            <div class="hud-ring-goal">verdicts</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="live-bottom">
+        <div class="verdict-banner" id="verdict-banner" data-level="idle">
+          <div class="verdict-banner-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 22h20L12 2z"/><path d="M12 10v4"/><circle cx="12" cy="18" r="1" fill="currentColor"/></svg>
+          </div>
+          <div class="verdict-banner-body">
+            <div class="verdict-banner-head">
+              <span id="verdict-head-action">idle</span>
+              <span class="verdict-banner-head-tag" id="verdict-head-tag">waiting</span>
+            </div>
+            <div class="verdict-banner-text" id="verdict-text">Press start - RoadGuard begins when the back camera opens.</div>
+            <a class="verdict-banner-source" id="verdict-source" href="#" target="_blank" rel="noopener" hidden>view procedure</a>
+          </div>
+          <div class="verdict-banner-pending" id="verdict-pending" hidden aria-hidden="true">
+            <span class="verdict-banner-dot"></span>
+            <span class="verdict-banner-dot"></span>
+            <span class="verdict-banner-dot"></span>
+          </div>
+        </div>
+        <div class="live-mini">
+          <div class="mini-stat">
+            <div class="mini-stat-value" id="mini-urgent">0</div>
+            <div class="mini-stat-label">Urgent</div>
+          </div>
+          <div class="mini-stat">
+            <div class="mini-stat-value" id="mini-standard">0</div>
+            <div class="mini-stat-label">Standard</div>
+          </div>
+          <div class="mini-stat">
+            <div class="mini-stat-value" id="mini-elapsed">0:00</div>
+            <div class="mini-stat-label">Time</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="live-loading" id="live-loading" hidden>
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Warming up the detector...</div>
+      </div>
+    </div>
+
+    <aside class="live-side">
+      <div class="side-head">
+        <h3>Verdicts</h3>
+        <span class="side-head-tag" id="verdict-count">0</span>
+      </div>
+      <div class="side-controls">
+        <label class="side-control">
+          <span>Road type</span>
+          <select id="drive-road-type">
+            <option value="main">Main</option>
+            <option value="secondary">Secondary</option>
+            <option value="bike_path">Bike path</option>
+            <option value="parking">Parking</option>
+          </select>
+        </label>
+        <label class="side-control">
+          <span>Lane obstruction (default)</span>
+          <select id="drive-lane-blocked">
+            <option value="none">None</option>
+            <option value="partial">Partial</option>
+            <option value="full">Full</option>
+          </select>
+        </label>
+      </div>
+      <div class="verdict-log" id="verdict-log">
+        <div class="verdict-empty">
+          Verdicts arrive here as RoadGuard clears each confirmed hazard.
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- ========================= SIGN-IN MODAL ========================= -->
+  <div class="modal" id="signin-modal" hidden>
+    <div class="modal-body signin-modal-body">
+      <div class="signin-brand">
+        <svg class="brand-mark" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+          <path d="M20 3 L34 10 V22 C34 29 28 35 20 37 C12 35 6 29 6 22 V10 Z"
+                stroke="url(#signinStroke)" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M20 12 V28 M14 20 H26" stroke="url(#signinStroke)" stroke-width="2.5" stroke-linecap="round"/>
+          <defs>
+            <linearGradient id="signinStroke" x1="0" y1="0" x2="40" y2="40">
+              <stop offset="0" stop-color="#7dd3fc"/>
+              <stop offset="0.5" stop-color="#a78bfa"/>
+              <stop offset="1" stop-color="#34d399"/>
+            </linearGradient>
+          </defs>
+        </svg>
+        <h2>Sign in to RoadGuard</h2>
+      </div>
+      <p class="signin-copy">Access is invite-only. Sign in with Google (if your address is on the allow list) or paste the passphrase you were given.</p>
+
+      <div class="signin-google" id="signin-google" hidden>
+        <div id="google-signin-button" class="google-btn-holder"></div>
+        <div class="signin-sep"><span>or</span></div>
+      </div>
+
+      <form class="signin-form" id="signin-form" autocomplete="off">
+        <label class="signin-field">
+          <span>Passphrase</span>
+          <input type="password" id="signin-pass" placeholder="Ask the owner" required autocomplete="current-password">
+        </label>
+        <button class="btn btn--primary btn--lg signin-submit" type="submit" id="signin-submit">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
+          Continue
+        </button>
+        <div class="signin-error" id="signin-error" hidden></div>
+      </form>
+
+      <p class="signin-foot">RoadGuard is a decision-support tool. No road is closed from here. Every urgent and human-review case is a recommendation for a human to act on.</p>
+    </div>
+    <div class="modal-backdrop" id="signin-backdrop"></div>
   </div>
-  <nav id="nav" hidden>
-    <button type="button" data-screen="drive" class="nav-btn nav-btn-primary">Live drive</button>
-    <button type="button" data-screen="capture" class="nav-btn">Capture</button>
-    <button type="button" data-screen="history" class="nav-btn">History</button>
-    <button type="button" data-screen="settings" class="nav-btn">Settings</button>
-  </nav>
-</header>
 
-<main>
+  <!-- ========================= TOAST ========================= -->
+  <div class="toast" id="toast" hidden></div>
 
-  <section id="screen-signin" class="screen active">
-    <h1>Sign in</h1>
-    <p class="muted">
-      Access is limited to allow-listed Google accounts or to a shared
-      passphrase. RoadGuard is a decision-support tool; it never closes a
-      road or dispatches a contractor.
-    </p>
-    <div id="google-signin-container" aria-label="Google Sign-In"></div>
-    <div class="divider"><span>or</span></div>
-    <form id="passphrase-form" class="stack">
-      <label>
-        Passphrase
-        <input type="password" name="passphrase" autocomplete="current-password" required>
-      </label>
-      <button type="submit">Sign in with passphrase</button>
-      <p class="error" id="signin-error" hidden></p>
-    </form>
-  </section>
-
-  <section id="screen-drive" class="screen">
-    <h2>Live drive</h2>
-    <p class="muted">
-      The back camera streams while you drive. Confirmed hazards fire
-      one submission each; the server dedups within a short window so
-      the same pothole seen for three seconds costs one agent call,
-      not thirty. Nothing is auto-dispatched - every verdict is a
-      recommendation for human review.
-    </p>
-    <div class="drive-stage">
-      <video id="drive-video" autoplay playsinline muted></video>
-      <canvas id="drive-overlay" aria-label="Live detections overlay"></canvas>
-      <div class="drive-hud">
-        <span class="drive-session" id="drive-session">session: -</span>
-        <span class="drive-mode" id="drive-mode">detector: -</span>
-        <span class="drive-stats" id="drive-stats">frames: 0 - tracks: 0</span>
-      </div>
-      <div class="toast-stack" id="verdict-toasts" aria-live="polite"></div>
-    </div>
-    <form id="drive-controls" class="drive-controls">
-      <label>
-        Road type
-        <select name="road_type" required>
-          <option value="main">Main road</option>
-          <option value="secondary">Secondary road</option>
-          <option value="bike_path">Bike path</option>
-          <option value="parking">Parking lot</option>
-        </select>
-      </label>
-      <label>
-        Lane obstruction (default)
-        <select name="lane_blocked" required>
-          <option value="none">None</option>
-          <option value="partial">Partial</option>
-          <option value="full">Full</option>
-        </select>
-      </label>
-      <div class="row">
-        <button type="button" id="drive-start">Start</button>
-        <button type="button" id="drive-stop" disabled>Stop</button>
-      </div>
-      <p class="muted" id="drive-hint">Press Start to open the back camera.</p>
-      <p class="error" id="drive-error" hidden></p>
-    </form>
-  </section>
-
-  <section id="screen-capture" class="screen">
-    <h2>Capture a hazard</h2>
-    <div class="camera-wrap">
-      <video id="camera-video" autoplay playsinline muted></video>
-    </div>
-    <div class="row">
-      <button type="button" id="capture-btn" disabled>Capture</button>
-      <select id="camera-select" aria-label="Camera device"></select>
-    </div>
-    <p class="muted" id="capture-hint">Opening environment camera.</p>
-  </section>
-
-  <section id="screen-detect" class="screen">
-    <h2>Detections</h2>
-    <div class="detect-wrap">
-      <canvas id="detect-canvas" aria-label="Captured frame with bounding boxes"></canvas>
-      <div id="detect-list" aria-live="polite"></div>
-    </div>
-    <form id="metadata-form" class="stack">
-      <label>
-        Road type
-        <select name="road_type" required>
-          <option value="main">Main road</option>
-          <option value="secondary">Secondary road</option>
-          <option value="bike_path">Bike path</option>
-          <option value="parking">Parking lot</option>
-        </select>
-      </label>
-      <label>
-        Lane obstruction
-        <select name="lane_blocked" required>
-          <option value="none">None</option>
-          <option value="partial">Partial</option>
-          <option value="full">Full</option>
-        </select>
-      </label>
-      <label>
-        Location (optional)
-        <input type="text" name="location" placeholder="e.g. Rothschild Blvd 10">
-      </label>
-      <div class="row">
-        <button type="button" id="detect-back">Retake</button>
-        <button type="submit" id="submit-btn">Submit for triage</button>
-      </div>
-      <p class="muted" id="submit-hint"></p>
-      <p class="error" id="submit-error" hidden></p>
-    </form>
-  </section>
-
-  <section id="screen-verdict" class="screen">
-    <h2>Recommendation</h2>
-    <div id="verdict-card" aria-live="polite"></div>
-    <div class="row">
-      <button type="button" id="verdict-new">Report another hazard</button>
-      <button type="button" id="verdict-history">Open history</button>
-    </div>
-    <p class="muted">
-      This is a recommendation. External actions (contractor dispatch,
-      road closure) still require a human.
-    </p>
-  </section>
-
-  <section id="screen-history" class="screen">
-    <h2>Your reports</h2>
-    <div class="row">
-      <select id="history-filter-class" aria-label="Class filter">
-        <option value="">All classes</option>
-        <option value="D00">D00</option>
-        <option value="D10">D10</option>
-        <option value="D20">D20</option>
-        <option value="D40">D40</option>
-      </select>
-      <select id="history-filter-decision" aria-label="Decision filter">
-        <option value="">Any decision</option>
-        <option value="urgent">Urgent</option>
-        <option value="standard">Standard</option>
-        <option value="needs_more_evidence">Needs evidence</option>
-        <option value="human_review">Human review</option>
-      </select>
-      <button type="button" id="history-refresh">Refresh</button>
-    </div>
-    <div id="history-list" aria-live="polite">
-      <p class="muted">Loading.</p>
-    </div>
-  </section>
-
-  <section id="screen-settings" class="screen">
-    <h2>Settings</h2>
-    <form id="settings-form" class="stack">
-      <label>
-        <input type="checkbox" name="daily_email">
-        Receive the daily hazard summary by email
-      </label>
-      <label>
-        <input type="checkbox" name="use_front_camera">
-        Prefer the front camera (default is the back camera)
-      </label>
-      <div class="row">
-        <button type="button" id="settings-save">Save</button>
-        <button type="button" id="signout-btn">Sign out</button>
-      </div>
-      <p class="muted" id="settings-hint"></p>
-    </form>
-  </section>
-
-</main>
-
-<footer class="app-footer">
-  <small>RoadGuard - recommendations only. No road is closed from here.</small>
-</footer>
-
-<script src="https://accounts.google.com/gsi/client" async defer></script>
-<script type="module" src="assets/app.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script type="module" src="assets/app.js"></script>
 </body>
 </html>

@@ -1,6 +1,15 @@
-// Screen router + flow controller for the nine RoadGuard screens.
+/**
+ * RoadGuard web app - entry point.
+ *
+ * Two view states (data-view on <body>):
+ *   - landing:  hero + how it works, gated start button
+ *   - live:     back camera + bbox overlay + HUD + verdict log
+ *
+ * Access is gated by a sign-in modal (passphrase, with Google if the
+ * client id is configured). Only signed-in users reach the VM.
+ */
 
-import { CONFIG } from "./config.js";
+import { resolveApiOrigin } from "./auth.js";
 import {
   clearToken,
   fetchJson,
@@ -9,420 +18,382 @@ import {
   loginWithGoogleIdToken,
   loginWithPassphrase,
   mountGoogleSignIn,
-  resolveApiOrigin,
+  parseJwt,
 } from "./auth.js";
-import { CameraController, requestCameraPermission } from "./camera.js";
-import { YoloDetector, drawBoxes, topDetection } from "./detect.js";
 import { LiveDriver } from "./drive.js";
 
-const SCREENS = [
-  "signin",
-  "drive",
-  "capture",
-  "detect",
-  "verdict",
-  "history",
-  "settings",
-];
-
 const state = {
-  camera: null,
-  detector: new YoloDetector(),
-  lastSnapshot: null,
-  lastDetections: [],
-  lastVerdict: null,
   driver: null,
-  verdictCount: 0,
+  view: "landing",
+  verdicts: [],
+  counts: { urgent: 0, standard: 0, needs_more_evidence: 0, human_review: 0 },
+  topClass: null,
+  startedAt: 0,
+  timerHandle: null,
+  pendingAfterSignin: null,
+  tracks: 0,
 };
 
-const SETTINGS_KEY = "roadguard.settings.v1";
+const LEVEL_BY_ACTION = {
+  urgent: "bad",
+  standard: "good",
+  needs_more_evidence: "warn",
+  human_review: "info",
+};
 
-function loadLocalSettings() {
-  try {
-    return JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
-  } catch {
-    return {};
+// ============================================================ BOOT
+window.addEventListener("DOMContentLoaded", async () => {
+  wireLanding();
+  wireLive();
+  wireSignIn();
+  wireNavSignIn();
+  refreshSignInLabel();
+  resolveApiOrigin().catch(() => {});
+});
+
+// ============================================================ VIEW HELPERS
+function setView(view) {
+  state.view = view;
+  document.body.dataset.view = view;
+  document.getElementById("view-landing").hidden = view !== "landing";
+  document.getElementById("view-live").hidden = view !== "live";
+  const sessionBtn = document.getElementById("nav-session");
+  sessionBtn.hidden = view !== "live";
+  window.scrollTo({ top: 0 });
+}
+
+function toast(msg, ms = 2500) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toast._h);
+  toast._h = setTimeout(() => {
+    t.hidden = true;
+  }, ms);
+}
+
+function refreshSignInLabel() {
+  const label = document.getElementById("signin-label");
+  if (!label) return;
+  const payload = parseJwt();
+  if (payload && payload.email) {
+    label.textContent = payload.email.split("@")[0];
+  } else if (payload && payload.name) {
+    label.textContent = payload.name;
+  } else {
+    label.textContent = "Sign in";
   }
 }
 
-function saveLocalSettings(obj) {
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(obj));
-  } catch {
-    // ignore
-  }
-}
-
-function show(screen) {
-  for (const name of SCREENS) {
-    const el = document.getElementById(`screen-${name}`);
-    if (!el) continue;
-    el.classList.toggle("active", name === screen);
-  }
-  for (const btn of document.querySelectorAll(".nav-btn")) {
-    btn.classList.toggle("active", btn.dataset.screen === screen);
-  }
-  if (screen === "capture") {
-    startCamera();
-  } else if (state.camera) {
-    state.camera.stop();
-  }
-  if (screen !== "drive" && state.driver && state.driver.running) {
-    state.driver.stop();
-    document.getElementById("drive-start").disabled = false;
-    document.getElementById("drive-stop").disabled = true;
-  }
-  if (screen === "history") {
-    loadHistory();
-  }
-}
-
-async function startCamera() {
-  const video = document.getElementById("camera-video");
-  const select = document.getElementById("camera-select");
-  const hint = document.getElementById("capture-hint");
-  const captureBtn = document.getElementById("capture-btn");
-  if (!state.camera) {
-    state.camera = new CameraController(video, select);
-  }
-  state.camera.setUseFront(Boolean(loadLocalSettings().use_front_camera));
-  try {
-    const ok = await requestCameraPermission();
-    if (!ok) {
-      hint.textContent = "Camera permission denied.";
+// ============================================================ LANDING
+function wireLanding() {
+  const startBtn = document.getElementById("start-btn");
+  startBtn.addEventListener("click", () => {
+    if (!isSignedIn()) {
+      state.pendingAfterSignin = () => startLive();
+      openSignIn();
       return;
     }
-    await state.camera.start(select.value || "");
-    hint.textContent = "Camera ready. Point at the hazard and capture.";
-    captureBtn.disabled = false;
-  } catch (err) {
-    hint.textContent = `Could not open camera: ${err.message || err}.`;
-    captureBtn.disabled = true;
-  }
-}
-
-async function runDetection() {
-  const hint = document.getElementById("capture-hint");
-  const list = document.getElementById("detect-list");
-  const canvas = document.getElementById("detect-canvas");
-  const snapshot = state.camera.snapshot();
-  state.lastSnapshot = snapshot;
-  hint.textContent = "Running on-device detection.";
-  const result = await state.detector.detect(snapshot.canvas);
-  state.lastDetections = result.detections;
-  drawBoxes(canvas, snapshot.canvas, result.detections);
-  list.innerHTML = "";
-  if (!result.detections.length) {
-    list.innerHTML = `<p class="muted">No damage detected. Try a different angle.</p>`;
-  }
-  for (const d of result.detections) {
-    const row = document.createElement("div");
-    row.className = "detect-row";
-    row.innerHTML = `
-      <span class="cls">${d.class}</span>
-      <span class="conf">${(d.confidence * 100).toFixed(0)}%</span>
-    `;
-    list.appendChild(row);
-  }
-  const modeHint = result.model === "mock" ? " (mock detector - drop a YOLO ONNX in assets/models to replace)" : "";
-  hint.textContent = `Detected ${result.detections.length} hazard(s).${modeHint}`;
-  show("detect");
-}
-
-async function submitHazard(ev) {
-  ev.preventDefault();
-  const form = ev.currentTarget;
-  const errBox = document.getElementById("submit-error");
-  const hint = document.getElementById("submit-hint");
-  errBox.hidden = true;
-  errBox.textContent = "";
-  const top = topDetection(state.lastDetections);
-  if (!top) {
-    errBox.hidden = false;
-    errBox.textContent = "No detection to submit. Retake the photo.";
-    return;
-  }
-  const fd = new FormData(form);
-  const body = {
-    class: top.class,
-    confidence: top.confidence,
-    bboxes: state.lastDetections.map((d) => [
-      d.x1,
-      d.y1,
-      d.x2,
-      d.y2,
-      d.class,
-      d.confidence,
-    ]),
-    road_type: fd.get("road_type"),
-    lane_blocked: fd.get("lane_blocked"),
-    location: fd.get("location") || "",
-    image_object_key: `pending/${crypto.randomUUID()}.jpg`,
-  };
-  hint.textContent = "Submitting.";
-  try {
-    const verdict = await fetchJson("/hazards/submit", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-    state.lastVerdict = verdict;
-    renderVerdict(verdict);
-    show("verdict");
-  } catch (err) {
-    errBox.hidden = false;
-    errBox.textContent = `Submit failed: ${err.message || err}`;
-  } finally {
-    hint.textContent = "";
-  }
-}
-
-function renderVerdict(verdict) {
-  const card = document.getElementById("verdict-card");
-  const v = verdict.verdict || {};
-  card.className = "";
-  card.classList.add(v.action || "human_review");
-  const cited = (v.cited_sources || [])
-    .map((u) => `<li><a href="${u}" target="_blank" rel="noopener">${u}</a></li>`)
-    .join("");
-  const action = (v.action || "human_review").replace(/_/g, " ");
-  card.innerHTML = `
-    <h3>${action.toUpperCase()}</h3>
-    <p>${v.rationale || ""}</p>
-    <p class="priority">Priority: ${v.priority ?? "n/a"} / 100</p>
-    ${cited ? `<p class="muted">Cited procedures:</p><ul>${cited}</ul>` : ""}
-    ${
-      verdict.fallback_reason
-        ? `<p class="muted">Fallback: ${verdict.fallback_reason}</p>`
-        : ""
-    }
-  `;
-}
-
-async function loadHistory() {
-  const list = document.getElementById("history-list");
-  list.innerHTML = `<p class="muted">Loading.</p>`;
-  try {
-    const data = await fetchJson("/hazards/history");
-    const items = data.items || [];
-    if (!items.length) {
-      list.innerHTML = `<p class="muted">No reports yet.</p>`;
-      return;
-    }
-    list.innerHTML = "";
-    for (const row of items) {
-      const el = document.createElement("div");
-      el.className = "history-row";
-      el.innerHTML = `
-        <div>
-          <strong>${row.class || row.hazard_class}</strong>
-          <span class="badge badge-${row.agent_decision}">${row.agent_decision.replace(/_/g, " ")}</span>
-          <div class="meta">${row.reported_at} - ${row.road_type} / ${row.lane_blocked}</div>
-        </div>
-        <div class="meta">priority ${row.priority}</div>
-      `;
-      list.appendChild(el);
-    }
-  } catch (err) {
-    if (err.status === 501) {
-      list.innerHTML = `<p class="muted">History will be available once the database layer is wired to the VM.</p>`;
-    } else {
-      list.innerHTML = `<p class="error">${err.message || err}</p>`;
-    }
-  }
-}
-
-async function signInViaPassphrase(ev) {
-  ev.preventDefault();
-  const errBox = document.getElementById("signin-error");
-  errBox.hidden = true;
-  const value = ev.currentTarget.passphrase.value;
-  try {
-    await loginWithPassphrase(value);
-    afterSignIn();
-  } catch (err) {
-    errBox.hidden = false;
-    errBox.textContent = err.message || "Sign-in failed.";
-  }
-}
-
-async function afterSignIn() {
-  document.getElementById("nav").hidden = false;
-  show("drive");
-  try {
-    const me = await fetchMe();
-    document.getElementById("brand-sub")?.replaceChildren(
-      document.createTextNode(me.email || "signed in")
-    );
-  } catch {
-    // non-fatal
-  }
-}
-
-function signOut() {
-  clearToken();
-  if (state.camera) state.camera.stop();
-  document.getElementById("nav").hidden = true;
-  show("signin");
-}
-
-function wireDrive() {
-  const video = document.getElementById("drive-video");
-  const overlay = document.getElementById("drive-overlay");
-  const sessionEl = document.getElementById("drive-session");
-  const modeEl = document.getElementById("drive-mode");
-  const statsEl = document.getElementById("drive-stats");
-  const hintEl = document.getElementById("drive-hint");
-  const errorEl = document.getElementById("drive-error");
-  const toastStack = document.getElementById("verdict-toasts");
-  const startBtn = document.getElementById("drive-start");
-  const stopBtn = document.getElementById("drive-stop");
-  const controlsForm = document.getElementById("drive-controls");
-
-  const readMeta = () => ({
-    road_type: controlsForm.road_type.value || "main",
-    lane_blocked: controlsForm.lane_blocked.value || "none",
+    startLive();
   });
+}
 
-  function pushToast({ action, rationale, priority, cited_sources, cached }) {
-    const el = document.createElement("div");
-    el.className = `toast toast-${action}`;
-    const safeRationale = (rationale || "").replace(/[<>]/g, "");
-    const cites = (cited_sources || []).slice(0, 1).map((u) => {
-      try {
-        return new URL(u).hostname;
-      } catch {
-        return u;
-      }
-    });
-    el.innerHTML = `
-      <div class="toast-head">
-        ${action.replace(/_/g, " ")}
-        <span class="toast-cache">${cached ? "cached" : "fresh"}</span>
-      </div>
-      <div class="toast-body">
-        ${safeRationale}
-        <span class="muted">(priority ${priority ?? "-"})</span>
-      </div>
-      ${cites.length ? `<div class="toast-cite">source: ${cites[0]}</div>` : ""}
-    `;
-    toastStack.appendChild(el);
-    while (toastStack.children.length > 4) {
-      toastStack.removeChild(toastStack.firstChild);
+// ============================================================ LIVE
+function wireLive() {
+  const stopBtn = document.getElementById("stop-btn");
+  stopBtn.addEventListener("click", () => stopLive());
+}
+
+async function startLive() {
+  setView("live");
+  resetSession();
+  showLoading(true);
+
+  const video = document.getElementById("cam");
+  const overlay = document.getElementById("overlay");
+  const roadSelect = document.getElementById("drive-road-type");
+  const laneSelect = document.getElementById("drive-lane-blocked");
+
+  const driver = new LiveDriver({
+    video,
+    overlayCanvas: overlay,
+    getMetadata: () => ({
+      road_type: roadSelect.value || "main",
+      lane_blocked: laneSelect.value || "none",
+    }),
+  });
+  state.driver = driver;
+
+  driver.on("state", ({ running, mode }) => {
+    if (mode) {
+      document.getElementById("live-provider").textContent =
+        mode === "mock" ? "Mock" : mode.toUpperCase();
     }
-    setTimeout(() => {
-      el.classList.add("toast-fade");
-      setTimeout(() => el.remove(), 500);
-    }, 7000);
-  }
-
-  function initDriver() {
-    const driver = new LiveDriver({
-      video,
-      overlayCanvas: overlay,
-      getMetadata: readMeta,
-    });
-    sessionEl.textContent = `session: ${driver.sessionId.slice(0, 8)}`;
-    driver.on("state", ({ running, mode }) => {
-      startBtn.disabled = !!running;
-      stopBtn.disabled = !running;
-      if (mode) {
-        const label = mode === "mock" ? "detector: mock" : `detector: ${mode}`;
-        modeEl.textContent = label;
-        if (mode === "mock") {
-          hintEl.textContent =
-            "Mock detector active - replace assets/models/yolov8n-roadguard.onnx to use the real model.";
-        } else {
-          hintEl.textContent = "Running.";
-        }
-      }
-      if (!running) hintEl.textContent = "Stopped.";
-    });
-    driver.on("tick", ({ frameCount, tracks }) => {
-      statsEl.textContent = `frames: ${frameCount} - tracks: ${tracks.length}`;
-    });
-    driver.on("verdict", ({ response }) => {
-      state.verdictCount += 1;
-      pushToast({
-        action: response.verdict.action,
-        rationale: response.verdict.rationale,
-        priority: response.verdict.priority,
-        cited_sources: response.verdict.cited_sources,
-        cached: response.cached,
+    if (running) {
+      showLoading(false);
+    }
+  });
+  driver.on("tick", ({ frameCount, tracks, model }) => {
+    state.tracks = tracks.length;
+    document.getElementById("hud-tracks").textContent = String(tracks.length);
+    document.getElementById("live-fps").textContent =
+      driver.fps + " fps";
+    if (tracks.length) {
+      const best = tracks.reduce(
+        (a, b) => (a.confidence > b.confidence ? a : b),
+      );
+      state.topClass = best.class;
+      document.getElementById("hud-topclass").textContent = best.class;
+    }
+  });
+  driver.on("verdict", ({ response }) => recordVerdict(response));
+  driver.on("error", ({ code, message }) => {
+    if (code === "camera_denied") {
+      showLoading(false);
+      setBanner({
+        action: "human_review",
+        rationale:
+          "Camera permission denied. Allow back-camera access and press start again.",
+        priority: null,
+        cited_sources: [],
+        cached: false,
       });
-    });
-    driver.on("error", ({ code, message }) => {
-      errorEl.hidden = false;
-      errorEl.textContent =
-        code === "camera_denied"
-          ? "Camera permission denied. Allow back-camera access to continue."
-          : `Error: ${code}${message ? " - " + message : ""}`;
-    });
-    return driver;
-  }
+    } else {
+      toast(`Error: ${code}${message ? " - " + message : ""}`, 4000);
+    }
+  });
 
-  startBtn.addEventListener("click", async () => {
-    errorEl.hidden = true;
-    errorEl.textContent = "";
-    if (!state.driver) state.driver = initDriver();
-    await state.driver.start();
-  });
-  stopBtn.addEventListener("click", () => {
-    if (state.driver) state.driver.stop();
-  });
+  // Session nav chip
+  document.getElementById("nav-session-label").textContent =
+    "session " + driver.sessionId.slice(0, 6);
+
+  state.startedAt = Date.now();
+  state.timerHandle = setInterval(updateElapsed, 1000);
+  updateElapsed();
+
+  try {
+    await driver.start();
+  } catch (err) {
+    showLoading(false);
+    toast(`Could not start: ${err && err.message ? err.message : err}`, 4000);
+  }
 }
 
-function wireNav() {
-  for (const btn of document.querySelectorAll(".nav-btn")) {
-    btn.addEventListener("click", () => show(btn.dataset.screen));
+function stopLive() {
+  if (state.driver) {
+    state.driver.stop();
+    state.driver = null;
   }
-  document.getElementById("passphrase-form").addEventListener("submit", signInViaPassphrase);
-  document.getElementById("capture-btn").addEventListener("click", runDetection);
-  document.getElementById("detect-back").addEventListener("click", () => show("capture"));
-  document.getElementById("metadata-form").addEventListener("submit", submitHazard);
-  document.getElementById("verdict-new").addEventListener("click", () => show("capture"));
-  document.getElementById("verdict-history").addEventListener("click", () => show("history"));
-  document.getElementById("history-refresh").addEventListener("click", loadHistory);
-  document.getElementById("signout-btn").addEventListener("click", signOut);
-  wireDrive();
+  if (state.timerHandle) {
+    clearInterval(state.timerHandle);
+    state.timerHandle = null;
+  }
+  setView("landing");
+}
 
-  const settings = loadLocalSettings();
-  const form = document.getElementById("settings-form");
-  form.daily_email.checked = Boolean(settings.daily_email);
-  form.use_front_camera.checked = Boolean(settings.use_front_camera);
-  document.getElementById("settings-save").addEventListener("click", () => {
-    const next = {
-      daily_email: form.daily_email.checked,
-      use_front_camera: form.use_front_camera.checked,
-    };
-    saveLocalSettings(next);
-    document.getElementById("settings-hint").textContent = "Saved locally.";
-    setTimeout(
-      () => (document.getElementById("settings-hint").textContent = ""),
-      1500
-    );
+function resetSession() {
+  state.verdicts = [];
+  state.counts = { urgent: 0, standard: 0, needs_more_evidence: 0, human_review: 0 };
+  state.topClass = null;
+  state.tracks = 0;
+  document.getElementById("verdict-log").innerHTML =
+    `<div class="verdict-empty">Verdicts arrive here as RoadGuard clears each confirmed hazard.</div>`;
+  document.getElementById("verdict-count").textContent = "0";
+  document.getElementById("hud-tracks").textContent = "0";
+  document.getElementById("hud-topclass").textContent = "--";
+  document.getElementById("hud-verdicts").textContent = "0";
+  document.getElementById("mini-urgent").textContent = "0";
+  document.getElementById("mini-standard").textContent = "0";
+  document.getElementById("mini-elapsed").textContent = "0:00";
+  setBanner({
+    action: null,
+    rationale:
+      "Point the back camera at the road. RoadGuard streams detections and will post a verdict as soon as a hazard holds for a few frames.",
+    priority: null,
+    cited_sources: [],
+    cached: false,
+  });
+  const ringFill = document.getElementById("ring-fill");
+  if (ringFill) {
+    ringFill.style.strokeDashoffset = "263.9";
+  }
+  document.getElementById("hud-ring").removeAttribute("data-level");
+}
+
+function showLoading(on) {
+  document.getElementById("live-loading").hidden = !on;
+}
+
+function updateElapsed() {
+  if (!state.startedAt) return;
+  const ms = Date.now() - state.startedAt;
+  const total = Math.floor(ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  document.getElementById("mini-elapsed").textContent =
+    `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function recordVerdict(response) {
+  const action = response.verdict.action;
+  state.verdicts.unshift({ ...response, at: Date.now() });
+  state.counts[action] = (state.counts[action] || 0) + 1;
+  document.getElementById("verdict-count").textContent =
+    String(state.verdicts.length);
+  document.getElementById("hud-verdicts").textContent =
+    String(state.verdicts.length);
+  document.getElementById("mini-urgent").textContent =
+    String(state.counts.urgent);
+  document.getElementById("mini-standard").textContent =
+    String(state.counts.standard);
+  setBanner({
+    action,
+    rationale: response.verdict.rationale,
+    priority: response.verdict.priority,
+    cited_sources: response.verdict.cited_sources,
+    cached: response.cached,
+    fallback_reason: response.fallback_reason,
+  });
+  const level = LEVEL_BY_ACTION[action] || "info";
+  const ring = document.getElementById("hud-ring");
+  ring.setAttribute("data-level", level);
+  const ringFill = document.getElementById("ring-fill");
+  if (ringFill) {
+    const pct = Math.max(0, Math.min(1, (response.verdict.priority || 0) / 100));
+    const dash = 263.9 * (1 - pct);
+    ringFill.style.strokeDashoffset = String(dash);
+  }
+  appendVerdictLog(action, response);
+}
+
+function appendVerdictLog(action, response) {
+  const log = document.getElementById("verdict-log");
+  const empty = log.querySelector(".verdict-empty");
+  if (empty) empty.remove();
+  const level = LEVEL_BY_ACTION[action] || "info";
+  const item = document.createElement("div");
+  item.className = "verdict-item";
+  item.dataset.level = level;
+  const t = new Date();
+  const stamp = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}:${String(t.getSeconds()).padStart(2, "0")}`;
+  const safe = (response.verdict.rationale || "").replace(/[<>]/g, "");
+  const cite = (response.verdict.cited_sources || [])[0];
+  item.innerHTML = `
+    <div class="verdict-time">
+      <span>${stamp}</span>
+      <span class="verdict-time-tag">${response.cached ? "cached" : "fresh"}</span>
+    </div>
+    <div class="verdict-msg">
+      <strong>${action.replace(/_/g, " ").toUpperCase()}</strong>
+      ${safe}
+    </div>
+    ${cite ? `<a class="verdict-src" href="${cite}" target="_blank" rel="noopener">${cite}</a>` : ""}
+  `;
+  log.insertBefore(item, log.firstChild);
+  while (log.children.length > 50) {
+    log.removeChild(log.lastChild);
+  }
+}
+
+function setBanner({ action, rationale, priority, cited_sources, cached, fallback_reason }) {
+  const banner = document.getElementById("verdict-banner");
+  const level = action ? LEVEL_BY_ACTION[action] || "info" : "idle";
+  banner.dataset.level = level;
+  const head = document.getElementById("verdict-head-action");
+  const tag = document.getElementById("verdict-head-tag");
+  head.textContent = action ? action.replace(/_/g, " ") : "idle";
+  if (action) {
+    const bits = [];
+    if (cached) bits.push("cached");
+    if (priority !== null && priority !== undefined) bits.push(`priority ${priority}`);
+    if (fallback_reason) bits.push(fallback_reason);
+    tag.textContent = bits.join(" - ") || "fresh";
+  } else {
+    tag.textContent = "waiting";
+  }
+  document.getElementById("verdict-text").textContent = rationale || "";
+  const src = document.getElementById("verdict-source");
+  const firstCite = (cited_sources || [])[0];
+  if (firstCite) {
+    src.hidden = false;
+    src.href = firstCite;
+    src.textContent = `view procedure (${firstCite.replace(/^https?:\/\//, "").split("/")[0]})`;
+  } else {
+    src.hidden = true;
+    src.removeAttribute("href");
+  }
+}
+
+// ============================================================ SIGN IN
+function wireSignIn() {
+  const form = document.getElementById("signin-form");
+  const err = document.getElementById("signin-error");
+  const backdrop = document.getElementById("signin-backdrop");
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    err.hidden = true;
+    err.textContent = "";
+    const pass = document.getElementById("signin-pass").value;
+    try {
+      await loginWithPassphrase(pass);
+      refreshSignInLabel();
+      closeSignIn();
+      runPending();
+      toast("Signed in");
+    } catch (e) {
+      err.hidden = false;
+      err.textContent = e && e.message ? e.message : "Sign-in failed";
+    }
   });
 
-  mountGoogleSignIn("google-signin-container", async (credential) => {
-    const errBox = document.getElementById("signin-error");
-    errBox.hidden = true;
+  backdrop.addEventListener("click", () => closeSignIn());
+
+  mountGoogleSignIn("google-signin-button", async (credential) => {
+    err.hidden = true;
     try {
       await loginWithGoogleIdToken(credential);
-      afterSignIn();
-    } catch (err) {
-      errBox.hidden = false;
-      errBox.textContent = err.message || "Google sign-in failed.";
+      refreshSignInLabel();
+      closeSignIn();
+      runPending();
+      toast("Signed in with Google");
+    } catch (e) {
+      err.hidden = false;
+      err.textContent = e && e.message ? e.message : "Google sign-in failed";
     }
   });
 }
 
-async function boot() {
-  await resolveApiOrigin();
-  wireNav();
-  if (isSignedIn()) {
-    afterSignIn();
-  } else {
-    show("signin");
+function openSignIn() {
+  document.getElementById("signin-modal").hidden = false;
+  const googleWrap = document.getElementById("signin-google");
+  googleWrap.hidden = !document.querySelector(
+    "#google-signin-button iframe, #google-signin-button div",
+  );
+  setTimeout(() => document.getElementById("signin-pass").focus(), 60);
+}
+function closeSignIn() {
+  document.getElementById("signin-modal").hidden = true;
+}
+
+function runPending() {
+  if (state.pendingAfterSignin) {
+    const fn = state.pendingAfterSignin;
+    state.pendingAfterSignin = null;
+    fn();
   }
 }
 
-boot();
+function wireNavSignIn() {
+  const btn = document.getElementById("nav-signin");
+  btn.addEventListener("click", () => {
+    if (isSignedIn()) {
+      clearToken();
+      refreshSignInLabel();
+      toast("Signed out");
+      if (state.view === "live") stopLive();
+    } else {
+      openSignIn();
+    }
+  });
+}
