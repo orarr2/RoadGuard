@@ -295,10 +295,21 @@ function appendVerdictLog(action, response) {
   }
 }
 
+let _bannerFadeTimer = null;
 function setBanner({ action, rationale, priority, cited_sources, cached, fallback_reason }) {
   const banner = document.getElementById("verdict-banner");
   const level = action ? LEVEL_BY_ACTION[action] || "info" : "idle";
   banner.dataset.level = level;
+  banner.classList.remove("verdict-fade");
+  if (_bannerFadeTimer) clearTimeout(_bannerFadeTimer);
+  // On mobile the banner covers a quarter of the stage, so fade it out
+  // after a few seconds once a verdict is in. New verdicts cancel the
+  // pending fade and show the banner again.
+  if (action) {
+    _bannerFadeTimer = setTimeout(() => {
+      banner.classList.add("verdict-fade");
+    }, 6000);
+  }
   const head = document.getElementById("verdict-head-action");
   const tag = document.getElementById("verdict-head-tag");
   head.textContent = action ? action.replace(/_/g, " ") : "idle";

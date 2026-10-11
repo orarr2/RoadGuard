@@ -388,9 +388,41 @@ a { color: inherit; text-decoration: none; }
     aspect-ratio: auto;
     width: 100%;
     max-width: 100%;
-    height: calc(100svh - 200px);
+    height: calc(100svh - 160px);
     min-height: 320px;
   }
+  /* Compact the HUD on mobile so the camera is not covered by it. */
+  .live-hud {
+    top: 10px; right: 10px;
+    padding: 6px 8px;
+    gap: 6px;
+    background: rgba(10, 13, 20, 0.5);
+  }
+  .live-hud .hud-metric { min-width: 44px; }
+  .live-hud .hud-metric-label { font-size: 9px; margin-bottom: 1px; }
+  .live-hud .hud-metric-value { font-size: 13px; }
+  .live-hud .hud-ring { width: 44px; height: 44px; }
+  .live-hud .hud-ring-count { font-size: 14px; }
+  .live-hud .hud-ring-goal { display: none; }
+  /* Top-left: shrink the label stack so the stage is less cluttered. */
+  .live-topbar { top: 10px; left: 10px; gap: 8px; }
+  .live-back { padding: 6px 10px; font-size: 12px; }
+  .live-title { display: none; }
+  /* Bottom row: compact banner, hide the mini-stats row entirely on
+     mobile - they are repeated on the side panel. The verdict banner
+     auto-fades (see .verdict-banner.verdict-fade) so the camera is
+     visible between verdicts. */
+  .live-mini { display: none; }
+  .live-bottom { bottom: 10px; left: 10px; right: 10px; gap: 8px; }
+  .verdict-banner {
+    padding: 10px 12px;
+    background: rgba(10, 13, 20, 0.6);
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+  .verdict-banner-text { font-size: 13px; line-height: 1.3; }
+  .verdict-banner-head { font-size: 10px; margin-bottom: 2px; }
+  .verdict-banner-icon { width: 28px; height: 28px; }
+  .verdict-banner.verdict-fade { opacity: 0; transform: translateY(10px); pointer-events: none; }
 }
 .live-stage video {
   position: absolute;
