@@ -18,6 +18,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from agent import loop, tools
+from agent.multiagent.adapter import multiagent_decide
 
 from .auth import (
     create_jwt,
@@ -228,15 +229,18 @@ def create_app() -> FastAPI:
             "image_object_key": body.image_object_key,
             "reported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        primary = _primary_provider(settings)
-        fallback = _fallback_provider(settings)
-        ctx = tools.ToolContext()
-        decision = loop.agent_decide(
-            hazard=hazard_input,
-            provider=primary,
-            ctx=ctx,
-            fallback_provider=fallback,
-        )
+        if settings.agent_architecture == "multiagent":
+            decision = multiagent_decide(hazard_input)
+        else:
+            primary = _primary_provider(settings)
+            fallback = _fallback_provider(settings)
+            ctx = tools.ToolContext()
+            decision = loop.agent_decide(
+                hazard=hazard_input,
+                provider=primary,
+                ctx=ctx,
+                fallback_provider=fallback,
+            )
         return HazardSubmitResponse(
             hazard_id=hazard_id,
             verdict=AgentVerdict(

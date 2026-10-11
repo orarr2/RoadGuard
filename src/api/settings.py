@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     )
 
     agent_provider: str = "groq"
+    agent_architecture: str = "monolith"  # "monolith" or "multiagent"
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-120b"
 
