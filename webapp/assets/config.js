@@ -19,12 +19,14 @@ export const CONFIG = Object.freeze({
 
   // YOLO_CLASS_NAMES is indexed by the model's class-id output. The
   // agent API enum is fixed at D00/D10/D20/D40, so this list must map
-  // every slot to one of those four strings. If Shai's training labels
-  // use friendly names ("Longitudinal Crack") instead of the RDD2022
-  // codes, keep this list as the codes in the same order his model
-  // emits them. tools/download_dataset.py writes manifest.json with
-  // the actual class order from the roboflow dataset.
-  YOLO_CLASS_NAMES: ["D00", "D10", "D20", "D40"],
+  // every slot to one of those four strings.
+  //
+  // Current dataset (xjsj/road-damage-10k v1, nc=4) ships three named
+  // classes - LongitudinalCracks, Potholes, TransverseCrack - plus an
+  // unnamed 4th slot. Mapped below to RDD2022 codes; the 4th slot is
+  // assumed to be alligator (D20) because that is the fourth standard
+  // RDD2022 class. Confirm with Shai after the first training run.
+  YOLO_CLASS_NAMES: ["D00", "D40", "D10", "D20"],
   YOLO_CONFIDENCE_THRESHOLD: 0.35,
 
   // Path to the tunnel JSON file. On the VM, deploy/update-tunnel-url.sh

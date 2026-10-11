@@ -51,16 +51,54 @@ def _ensure_sdk() -> object:
     return roboflow  # type: ignore
 
 
+def _parse_data_yaml_classes(yaml_text: str) -> tuple[list[str], int]:
+    """Return (ordered class names, nc). Handles the three shapes roboflow
+    emits: single-line inline list, multi-line YAML list, and dict form.
+    """
+    classes: list[str] = []
+    nc = 0
+    lines = yaml_text.splitlines()
+    for i, raw in enumerate(lines):
+        line = raw.rstrip()
+        stripped = line.strip()
+        if stripped.startswith("nc:"):
+            try:
+                nc = int(stripped.split(":", 1)[1].strip())
+            except ValueError:
+                nc = 0
+            continue
+        if stripped.startswith("names:"):
+            rest = stripped.split(":", 1)[1].strip()
+            if rest.startswith("[") and rest.endswith("]"):
+                classes = [c.strip().strip("'\"") for c in rest[1:-1].split(",")]
+                continue
+            # multi-line forms: either a YAML sequence (`- name`) or a mapping
+            # (`0: name`) starting with the next line.
+            j = i + 1
+            while j < len(lines):
+                lraw = lines[j]
+                l = lraw.rstrip()
+                if not l.strip():
+                    j += 1
+                    continue
+                if not (lraw.startswith(" ") or lraw.startswith("\t") or lraw.startswith("-")):
+                    break
+                ls = l.strip()
+                if ls.startswith("- "):
+                    classes.append(ls[2:].strip().strip("'\""))
+                elif ":" in ls:
+                    _, name = ls.split(":", 1)
+                    classes.append(name.strip().strip("'\""))
+                j += 1
+    return classes, nc
+
+
 def _write_manifest(dest: Path, workspace: str, project: str, version: int) -> None:
     classes_path = dest / "data.yaml"
     classes: list[str] = []
+    nc = 0
     if classes_path.exists():
-        for line in classes_path.read_text(encoding="utf-8").splitlines():
-            if line.strip().startswith("names"):
-                raw = line.split(":", 1)[1].strip()
-                if raw.startswith("[") and raw.endswith("]"):
-                    classes = [c.strip().strip("'\"") for c in raw[1:-1].split(",")]
-                break
+        classes, nc = _parse_data_yaml_classes(classes_path.read_text(encoding="utf-8"))
     manifest = {
         "workspace": workspace,
         "project": project,
@@ -68,15 +106,51 @@ def _write_manifest(dest: Path, workspace: str, project: str, version: int) -> N
         "format": DEFAULT_FORMAT,
         "downloaded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "classes": classes,
+        "nc": nc,
+        "agent_class_map": _suggest_class_map(classes),
         "note": (
-            "If this class list differs from the agent enum (D00, D10, D20, D40), "
-            "update webapp/assets/config.js YOLO_CLASS_NAMES to match the order "
-            "of this list; the API enum stays the same."
+            "The agent API enum stays D00/D10/D20/D40. agent_class_map "
+            "maps each dataset class (indexed by its position in classes) "
+            "to the agent enum; apply it to the YOLO output in "
+            "webapp/assets/detect.js before posting to /hazards/live."
         ),
     }
     (dest / "manifest.json").write_text(
         json.dumps(manifest, indent=2), encoding="utf-8"
     )
+
+
+_RDD_SYNONYMS = {
+    # dataset label (lowered, no non-alphanum) -> RDD2022 enum code
+    "longitudinalcracks": "D00",
+    "longitudinalcrack": "D00",
+    "longitudinal": "D00",
+    "transversecracks": "D10",
+    "transversecrack": "D10",
+    "transverse": "D10",
+    "alligatorcracks": "D20",
+    "alligatorcrack": "D20",
+    "alligator": "D20",
+    "crocodilecracks": "D20",
+    "potholes": "D40",
+    "pothole": "D40",
+    "d00": "D00",
+    "d10": "D10",
+    "d20": "D20",
+    "d40": "D40",
+}
+
+
+def _suggest_class_map(classes: list[str]) -> dict[str, str]:
+    """Map each dataset class name to the agent enum (D00/D10/D20/D40)
+    using a small synonym table. Unknown labels map to "" so the caller
+    can decide (usually: route to D20 by default, or flag the label).
+    """
+    out: dict[str, str] = {}
+    for name in classes:
+        key = "".join(c.lower() for c in name if c.isalnum())
+        out[name] = _RDD_SYNONYMS.get(key, "")
+    return out
 
 
 def _free_bytes(path: Path) -> int:
