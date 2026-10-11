@@ -11,9 +11,12 @@ import time
 import uuid
 from typing import Any, Optional
 
+from pathlib import Path as _Path
+
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -397,6 +400,15 @@ def create_app() -> FastAPI:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail="report_not_wired_yet",
+        )
+
+    # Mount the webapp at the repo root last, so API routes above take
+    # precedence over the static fallback. Phones can then hit the same
+    # cloudflared tunnel URL both for the API and for the webapp assets.
+    _webapp_dir = _Path(__file__).resolve().parents[2] / "webapp"
+    if _webapp_dir.is_dir():
+        app.mount(
+            "/", StaticFiles(directory=str(_webapp_dir), html=True), name="webapp"
         )
 
     return app
