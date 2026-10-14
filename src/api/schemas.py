@@ -45,6 +45,17 @@ class PresignResponse(BaseModel):
     expires_in: int
 
 
+class ImageQualitySignal(BaseModel):
+    """Optional client-side quality probe surfaced to the Perception node."""
+
+    blur_score: Optional[float] = None
+    brightness_mean: Optional[float] = None
+    is_road_scene: Optional[bool] = None
+    road_scene_confidence: Optional[float] = None
+    occlusion_estimate: Optional[Literal["low", "medium", "high"]] = None
+    ocr_text_detected: Optional[str] = None
+
+
 class HazardSubmit(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -55,6 +66,14 @@ class HazardSubmit(BaseModel):
     lane_blocked: LaneBlocked
     location: Optional[str] = None
     image_object_key: str
+    # Optional rich fields. Clients that have already computed them (live
+    # drive, future webapp versions) can send them; older clients may omit
+    # them and the agent falls back to defaults.
+    top1_margin: Optional[float] = Field(default=None, ge=0, le=1)
+    area_ratio: Optional[float] = Field(default=None, ge=0, le=1)
+    n_detections_by_class: Optional[dict[str, int]] = None
+    center_y_rel: Optional[float] = Field(default=None, ge=0, le=1)
+    image_quality: Optional[ImageQualitySignal] = None
 
 
 class AgentVerdict(BaseModel):
@@ -69,17 +88,6 @@ class HazardSubmitResponse(BaseModel):
     verdict: AgentVerdict
     provider: str
     fallback_reason: Optional[str] = None
-
-
-class ImageQualitySignal(BaseModel):
-    """Optional client-side quality probe surfaced to the Perception node."""
-
-    blur_score: Optional[float] = None
-    brightness_mean: Optional[float] = None
-    is_road_scene: Optional[bool] = None
-    road_scene_confidence: Optional[float] = None
-    occlusion_estimate: Optional[Literal["low", "medium", "high"]] = None
-    ocr_text_detected: Optional[str] = None
 
 
 class LiveHazardSubmit(BaseModel):

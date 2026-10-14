@@ -234,6 +234,16 @@ def create_app() -> FastAPI:
             "location": body.location or "",
             "image_object_key": body.image_object_key,
             "reported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            # Optional rich fields - absent on older clients
+            "top1_margin": body.top1_margin,
+            "area_ratio": body.area_ratio,
+            "n_detections_by_class": body.n_detections_by_class,
+            "center_y_rel": body.center_y_rel,
+            "image_quality": (
+                body.image_quality.model_dump(exclude_none=True)
+                if body.image_quality is not None
+                else None
+            ),
         }
         if settings.agent_architecture == "multiagent":
             decision = multiagent_decide(hazard_input)

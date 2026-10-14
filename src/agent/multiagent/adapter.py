@@ -27,6 +27,11 @@ def hazard_to_graph_inputs(hazard: dict[str, Any]) -> tuple[str, dict, dict, dic
     """Map a flat HazardSubmit-style dict to the graph's three input blocks.
 
     Returns (hazard_id, yolo_output, image_quality, metadata).
+
+    HazardSubmit now carries the optional rich fields (top1_margin,
+    area_ratio, n_detections_by_class, center_y_rel, image_quality). When
+    present, they override the defaults; when absent, the perception node
+    still has sensible fallbacks.
     """
     hazard_id = hazard["hazard_id"]
     hazard_class = hazard["class"]
@@ -34,21 +39,37 @@ def hazard_to_graph_inputs(hazard: dict[str, Any]) -> tuple[str, dict, dict, dic
     bboxes = hazard.get("bboxes") or []
 
     detections = _bboxes_to_detections(bboxes, hazard_class, confidence)
+    # If the client sent area_ratio, surface it onto the top-1 detection so
+    # Perception's area-based severity gate sees it.
+    if hazard.get("area_ratio") is not None and detections:
+        detections[0]["area_ratio"] = float(hazard["area_ratio"])
+    if hazard.get("center_y_rel") is not None and detections:
+        detections[0].setdefault("position", {})["center_y_rel"] = float(
+            hazard["center_y_rel"]
+        )
+
     yolo_output = {
         "top1_class": hazard_class,
         "top1_confidence": confidence,
-        "top1_margin": 0.0,  # not emitted by current client; perception has a default
+        "top1_margin": float(hazard.get("top1_margin") or 0.0),
         "detections": detections,
-        "n_detections_by_class": _count_by_class(detections),
+        "n_detections_by_class": (
+            hazard.get("n_detections_by_class") or _count_by_class(detections)
+        ),
     }
 
+    quality_in = hazard.get("image_quality") or {}
     image_quality = {
-        "blur_score": 150.0,
-        "brightness_mean": 0.5,
-        "is_road_scene": True,
-        "road_scene_confidence": 0.9,
-        "occlusion_estimate": "low",
-        "ocr_text_detected": "",
+        "blur_score": float(quality_in.get("blur_score") or 150.0),
+        "brightness_mean": float(quality_in.get("brightness_mean") or 0.5),
+        "is_road_scene": bool(
+            quality_in["is_road_scene"]
+            if quality_in.get("is_road_scene") is not None
+            else True
+        ),
+        "road_scene_confidence": float(quality_in.get("road_scene_confidence") or 0.9),
+        "occlusion_estimate": quality_in.get("occlusion_estimate") or "low",
+        "ocr_text_detected": quality_in.get("ocr_text_detected") or "",
     }
 
     metadata = {
