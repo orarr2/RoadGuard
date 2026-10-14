@@ -119,7 +119,9 @@ def test_chat_committee_agreement(monkeypatch):
             "groq:llama-b": [_msg("standard")],
         },
     )
-    msg, in_tok, out_tok = chat_mod.chat(messages=[{"role": "user", "content": "x"}])
+    msg, in_tok, out_tok = chat_mod.chat(
+        messages=[{"role": "user", "content": "x"}], use_panel=True
+    )
     assert len(calls) == 2
     body = json.loads(msg.content)
     assert body["action"] == "standard"
@@ -142,7 +144,9 @@ def test_chat_committee_disagreement_picks_severe(monkeypatch):
             "groq:llama-b": [_msg("urgent")],
         },
     )
-    msg, *_ = chat_mod.chat(messages=[{"role": "user", "content": "x"}])
+    msg, *_ = chat_mod.chat(
+        messages=[{"role": "user", "content": "x"}], use_panel=True
+    )
     body = json.loads(msg.content)
     assert body["action"] == "urgent"  # severity tiebreak
     assert "split" in body["committee_note"]
@@ -165,7 +169,9 @@ def test_chat_panel_majority_vote(monkeypatch):
             "ollama:llama-c": [_msg("urgent")],
         },
     )
-    msg, *_ = chat_mod.chat(messages=[{"role": "user", "content": "x"}])
+    msg, *_ = chat_mod.chat(
+        messages=[{"role": "user", "content": "x"}], use_panel=True
+    )
     body = json.loads(msg.content)
     assert body["action"] == "standard"  # 2 of 3
     assert "panel" in body["committee_note"]
@@ -187,7 +193,7 @@ def test_chat_panel_dedupes_identical_specs(monkeypatch):
             "anthropic:claude-b": [_msg("urgent")],
         },
     )
-    chat_mod.chat(messages=[{"role": "user", "content": "x"}])
+    chat_mod.chat(messages=[{"role": "user", "content": "x"}], use_panel=True)
     # Only 2 distinct specs should have been called
     assert len(calls) == 2
 
@@ -203,3 +209,45 @@ def test_chat_offline_when_use_live_false(monkeypatch):
     # Offline stub returns one of the fixed strings; it must not call real providers.
     assert isinstance(msg, ChatMessage)
     assert in_tok > 0 and out_tok > 0
+
+
+def test_chat_panel_ignored_without_use_panel_flag(monkeypatch):
+    """Panel/committee env fires ONLY when caller asks (Decision node)."""
+    monkeypatch.setenv("ROADGUARD_USE_LIVE", "1")
+    monkeypatch.setenv(
+        "AGENT_LLM_PANEL",
+        "groq:llama-a,anthropic:claude-b,ollama:llama-c",
+    )
+    monkeypatch.delenv("AGENT_LLM_COMMITTEE", raising=False)
+    monkeypatch.delenv("AGENT_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("AGENT_LLM_MODEL", raising=False)
+    monkeypatch.delenv("GROQ_MODEL", raising=False)
+    monkeypatch.setattr(chat_mod, "USE_LIVE", True)
+
+    calls = _install_fake_providers(
+        monkeypatch,
+        {"groq:" + providers.DEFAULT_MODEL_BY_PROVIDER["groq"]: [_msg("standard")]},
+    )
+    # Caller did NOT pass use_panel; must stay single-provider.
+    chat_mod.chat(messages=[{"role": "user", "content": "x"}])
+    assert len(calls) == 1
+
+
+def test_chat_committee_ignored_without_use_panel_flag(monkeypatch):
+    monkeypatch.setenv("ROADGUARD_USE_LIVE", "1")
+    monkeypatch.setenv("AGENT_LLM_COMMITTEE", "1")
+    monkeypatch.setenv("AGENT_LLM_PROVIDER", "groq:llama-a")
+    monkeypatch.setenv("AGENT_LLM_COMMITTEE_MODEL_B", "llama-b")
+    monkeypatch.delenv("AGENT_LLM_PANEL", raising=False)
+    monkeypatch.setattr(chat_mod, "USE_LIVE", True)
+
+    calls = _install_fake_providers(
+        monkeypatch,
+        {
+            "groq:llama-a": [_msg("standard")],
+            "groq:llama-b": [_msg("urgent")],
+        },
+    )
+    chat_mod.chat(messages=[{"role": "user", "content": "x"}])
+    # Single call, not two
+    assert len(calls) == 1

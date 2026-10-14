@@ -16,8 +16,11 @@ top of single-provider mode:
   review. Doubles the LLM calls, so it is off by default.
 - Panel (`AGENT_LLM_PANEL="model_a,model_b,model_c"`): N>=2 models,
   majority vote with severity tiebreak. Each panelist can carry its
-  own provider prefix (e.g. "anthropic:claude-opus-4-7,groq:openai/gpt-oss-120b").
-  Panel precedence overrides committee when both are set.
+  own provider prefix (e.g. "groq:openai/gpt-oss-120b,
+  openai_compat:meta-llama/Llama-3.3-70B-Instruct-Turbo,
+  openai_compat:deepseek/deepseek-chat"). Panel precedence overrides
+  committee when both are set, and panel/committee only fire when the
+  caller passes ``use_panel=True`` (Decision node only).
 """
 
 from __future__ import annotations
@@ -225,20 +228,28 @@ def chat(
     messages: list[dict],
     tools: list[dict] | None = None,
     temperature: float = 0.0,
+    use_panel: bool = False,
 ) -> tuple[ChatMessage, int, int]:
-    """Return (message, tokens_in, tokens_out). Transparent to live/offline/panel."""
+    """Return (message, tokens_in, tokens_out). Transparent to live/offline/panel.
+
+    ``use_panel`` is Decision-only: when False, panel/committee env vars are
+    ignored and a single provider answers. Perception and Research keep the
+    cheap single-model path even when AGENT_LLM_PANEL is set, so panel cost
+    stays bounded to the one node whose verdict actually ships.
+    """
     if not USE_LIVE:
         return _chat_offline(messages, tools)
 
-    panel = _panel_specs()
-    if panel and len(panel) >= 2:
-        results = _call_specs(panel, messages, tools, temperature)
-        return _combine(results, mode="panel")
+    if use_panel:
+        panel = _panel_specs()
+        if panel and len(panel) >= 2:
+            results = _call_specs(panel, messages, tools, temperature)
+            return _combine(results, mode="panel")
 
-    committee = _committee_specs()
-    if committee:
-        results = _call_specs(committee, messages, tools, temperature)
-        return _combine(results, mode="committee")
+        committee = _committee_specs()
+        if committee:
+            results = _call_specs(committee, messages, tools, temperature)
+            return _combine(results, mode="committee")
 
     spec = os.environ.get("AGENT_LLM_PROVIDER") or "groq"
     msg, in_tok, out_tok, _p, _m = call_provider(spec, messages, tools, temperature)
