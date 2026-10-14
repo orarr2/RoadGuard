@@ -52,3 +52,30 @@ CREATE TABLE IF NOT EXISTS work_orders (
 
 CREATE INDEX IF NOT EXISTS idx_work_orders_hazard
     ON work_orders(hazard_id);
+
+-- Charter §5-§6 require human approval for every urgent / human_review
+-- verdict. A row lands here with status='pending'; the supervisor
+-- receives an email with a link to /approvals/{id} and must click
+-- approve or deny before anything downstream can act.
+-- Note: hazard_id is a soft reference. Approvals are often created before
+-- the hazard row is persisted (the agent writes approval during the live
+-- flow, the hazard row is written later or not at all for cached runs),
+-- so no FOREIGN KEY here on purpose.
+CREATE TABLE IF NOT EXISTS approvals (
+    id                  TEXT PRIMARY KEY,
+    hazard_id           TEXT NOT NULL,
+    action              TEXT NOT NULL,         -- urgent | human_review
+    priority            INTEGER NOT NULL DEFAULT 0,
+    rationale           TEXT NOT NULL DEFAULT '',
+    cited_sources_json  TEXT NOT NULL DEFAULT '[]',
+    created_at          REAL NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | denied
+    decided_at          REAL,
+    decided_by          TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_approvals_status
+    ON approvals(status);
+
+CREATE INDEX IF NOT EXISTS idx_approvals_hazard
+    ON approvals(hazard_id);

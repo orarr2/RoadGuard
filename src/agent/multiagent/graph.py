@@ -77,21 +77,70 @@ def build_graph():
 
 
 def _approval_gate_node(state: RoadGuardState) -> dict:
-    """Writes a pending-approval row. Does NOT execute the action.
+    """Writes a pending-approval row and (optionally) emails a supervisor.
 
-    Side effect: in production this triggers a push/email to a human
-    supervisor. The URL/row id gets stored for the frontend to display.
-    The scaffold stub only emits a trace entry; wiring to the SQLite
-    approvals table and the email job happens in a later phase.
+    Behaviour per Charter §5-§6: any urgent / human_review verdict must
+    be approved by a human before anything downstream can act. The row
+    sits in the ``approvals`` table with status='pending' until the
+    supervisor opens /approvals/{id} and clicks approve or deny.
+
+    DB and email wiring are best-effort - if the environment can't be
+    read or SMTP isn't configured, the gate still emits a trace entry
+    so the graph does not fail. The approval_id, when it was created,
+    is attached to the trace so the API can surface it to the caller.
     """
+    import json as _json
+    import os
+    import logging
+
+    log = logging.getLogger("roadguard.multiagent.approval_gate")
+
+    hazard_id = state.get("hazard_id") or ""
+    action = state.get("action") or ""
+    priority = int(state.get("priority") or 0)
+    rationale = state.get("rationale") or ""
+    cited = state.get("cited_sources") or []
+
+    approval_id: str | None = None
+    try:
+        # Local import to keep multiagent importable without the API package.
+        from db.models import Database  # type: ignore
+        from api.settings import get_settings  # type: ignore
+        from jobs.approval_email import send_approval_request  # type: ignore
+
+        settings = get_settings()
+        with Database(settings.roadguard_db_path) as db:
+            approval_id = db.create_approval(
+                hazard_id=hazard_id,
+                action=action,
+                priority=priority,
+                rationale=rationale,
+                cited_sources_json=_json.dumps(cited),
+            )
+        base_url = os.environ.get("ROADGUARD_APPROVAL_BASE_URL", "")
+        if base_url and approval_id is not None:
+            send_approval_request(
+                settings,
+                approval_id=approval_id,
+                hazard_id=hazard_id,
+                action=action,
+                priority=priority,
+                rationale=rationale,
+                cited_sources=list(cited),
+                base_url=base_url,
+            )
+    except Exception as exc:
+        log.warning("approval_gate_wiring_skipped: %s", exc)
+
     approval_entry = {
         "iter": state.get("iterations", 0) + 1,
         "speaker": "approval_gate",
         "kind": "pending_human_approval",
         "content": {
-            "action": state.get("action"),
-            "priority": state.get("priority"),
-            "hazard_id": state.get("hazard_id"),
+            "action": action,
+            "priority": priority,
+            "hazard_id": hazard_id,
+            "approval_id": approval_id,
         },
     }
     return {"trace": [approval_entry], "iterations": 1}

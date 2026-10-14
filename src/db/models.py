@@ -57,6 +57,20 @@ class Hazard:
 
 
 @dataclass
+class Approval:
+    id: str
+    hazard_id: str
+    action: str
+    priority: int
+    rationale: str
+    cited_sources_json: str
+    created_at: float
+    status: str = "pending"
+    decided_at: Optional[float] = None
+    decided_by: Optional[str] = None
+
+
+@dataclass
 class WorkOrder:
     id: str
     hazard_id: str
@@ -280,6 +294,86 @@ class Database:
             (since_ts, limit),
         ).fetchall()
         return [self._row_to_hazard(r) for r in rows]
+
+    # ----- Approvals -------------------------------------------------------
+
+    def create_approval(
+        self,
+        hazard_id: str,
+        action: str,
+        priority: int,
+        rationale: str,
+        cited_sources_json: str = "[]",
+    ) -> str:
+        """Writes a pending approval row. Returns the approval id."""
+        approval_id = f"apr_{uuid.uuid4().hex[:12]}"
+        self._conn.execute(
+            """
+            INSERT INTO approvals (
+                id, hazard_id, action, priority, rationale,
+                cited_sources_json, created_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+            """,
+            (
+                approval_id,
+                hazard_id,
+                action,
+                int(priority),
+                rationale,
+                cited_sources_json,
+                time.time(),
+            ),
+        )
+        return approval_id
+
+    def get_approval(self, approval_id: str) -> Optional[Approval]:
+        row = self._conn.execute(
+            "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+        ).fetchone()
+        return self._row_to_approval(row) if row else None
+
+    def decide_approval(
+        self,
+        approval_id: str,
+        decision: str,
+        decided_by: str,
+    ) -> bool:
+        """Mark pending approval as approved or denied. Returns True if a
+        pending row was updated, False if it was already decided or missing."""
+        if decision not in ("approved", "denied"):
+            raise ValueError(f"invalid decision: {decision!r}")
+        cur = self._conn.execute(
+            """
+            UPDATE approvals
+            SET status = ?, decided_at = ?, decided_by = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (decision, time.time(), decided_by, approval_id),
+        )
+        return cur.rowcount > 0
+
+    def list_pending_approvals(self, limit: int = 50) -> list[Approval]:
+        rows = self._conn.execute(
+            "SELECT * FROM approvals WHERE status = 'pending' "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [self._row_to_approval(r) for r in rows]
+
+    @staticmethod
+    def _row_to_approval(row: sqlite3.Row) -> Approval:
+        return Approval(
+            id=row["id"],
+            hazard_id=row["hazard_id"],
+            action=row["action"],
+            priority=row["priority"],
+            rationale=row["rationale"],
+            cited_sources_json=row["cited_sources_json"] or "[]",
+            created_at=row["created_at"],
+            status=row["status"],
+            decided_at=row["decided_at"],
+            decided_by=row["decided_by"],
+        )
 
     # ----- Work orders -----------------------------------------------------
 

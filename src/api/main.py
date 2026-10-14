@@ -13,9 +13,9 @@ from typing import Any, Optional
 
 from pathlib import Path as _Path
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
+from fastapi import Body, Depends, FastAPI, Form, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -53,6 +53,73 @@ from .settings import Settings, get_settings
 
 LOGGER = logging.getLogger("roadguard.api")
 VERSION = "0.1.0"
+
+
+def _render_approval_html(row: Any) -> str:
+    """Minimal HTML page for the approval gate.
+
+    Shows the pending verdict + Approve/Deny form, or a frozen status
+    line once the decision has been recorded. No JavaScript, so it
+    renders in any mail client's preview and any browser.
+    """
+    import html as _html
+    import json as _json
+
+    sources = []
+    try:
+        sources = _json.loads(row.cited_sources_json or "[]")
+    except Exception:
+        sources = []
+    cited_html = (
+        "<ul>" + "".join(f"<li>{_html.escape(s)}</li>" for s in sources) + "</ul>"
+        if sources
+        else "<em>no cited sources</em>"
+    )
+    if row.status == "pending":
+        decision_block = f"""\
+<form method="POST" action="/approvals/{row.id}/decide"
+      style="display:flex;gap:12px;margin-top:16px">
+  <button name="decision" value="approved"
+          style="background:#1B5E20;color:white;border:none;padding:12px 24px;
+                 font-size:16px;border-radius:4px;cursor:pointer">
+    Approve
+  </button>
+  <button name="decision" value="denied"
+          style="background:#B91C1C;color:white;border:none;padding:12px 24px;
+                 font-size:16px;border-radius:4px;cursor:pointer">
+    Deny
+  </button>
+</form>
+"""
+    else:
+        color = "#1B5E20" if row.status == "approved" else "#B91C1C"
+        decision_block = (
+            f'<p style="margin-top:16px"><strong style="color:{color}">'
+            f"Status: {_html.escape(row.status)}</strong> · decided by "
+            f"{_html.escape(row.decided_by or 'unknown')}</p>"
+        )
+
+    return f"""\
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>RoadGuard approval · {_html.escape(row.id)}</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;
+             padding:0 16px;color:#111">
+<h2 style="color:#B91C1C">RoadGuard · {_html.escape(row.action).upper()} awaiting approval</h2>
+<p><strong>Hazard</strong>: <code>{_html.escape(row.hazard_id)}</code></p>
+<p><strong>Priority</strong>: {row.priority}</p>
+<p><strong>Rationale</strong>: {_html.escape(row.rationale)}</p>
+<p><strong>Cited sources</strong>:</p>
+{cited_html}
+{decision_block}
+<hr style="margin-top:32px">
+<p style="font-size:12px;color:#6B7280">
+Nothing has been dispatched. No contractor has been contacted. No road
+has been closed. Approve creates the local draft work order; Deny
+closes the case without action.
+</p>
+</body></html>
+"""
 CORS_ORIGINS = [
     "https://orarr2.github.io",
     "http://localhost:5173",
@@ -410,6 +477,54 @@ def create_app() -> FastAPI:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail="report_not_wired_yet",
+        )
+
+    # ---- Approval gate (Charter §5-§6) ----------------------------------
+
+    @app.get("/approvals/{approval_id}", response_class=HTMLResponse)
+    def approval_page(approval_id: str, settings: Settings = Depends(get_settings)):
+        """Lightweight HTML page a supervisor opens from the email."""
+        from db.models import Database  # local import, DB not always wired in tests
+
+        try:
+            with Database(settings.roadguard_db_path) as db:
+                row = db.get_approval(approval_id)
+        except Exception:
+            row = None
+        if row is None:
+            return HTMLResponse(
+                "<h2>Approval not found</h2>", status_code=status.HTTP_404_NOT_FOUND
+            )
+        return HTMLResponse(_render_approval_html(row))
+
+    @app.post("/approvals/{approval_id}/decide")
+    @limiter.limit("10/minute")
+    def approval_decide(
+        request: Request,
+        approval_id: str,
+        decision: str = Form(...),
+        settings: Settings = Depends(get_settings),
+    ):
+        """Approve or deny a pending approval. Called by the HTML page."""
+        from db.models import Database
+
+        if decision not in ("approved", "denied"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="invalid_decision",
+            )
+        with Database(settings.roadguard_db_path) as db:
+            # In production we would attach the authenticated supervisor
+            # identity. For now the gate is anonymous but rate-limited.
+            ok = db.decide_approval(approval_id, decision, decided_by="supervisor")
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="approval_not_pending_or_missing",
+            )
+        return RedirectResponse(
+            url=f"/approvals/{approval_id}",
+            status_code=status.HTTP_303_SEE_OTHER,
         )
 
     # Mount the webapp at the repo root last, so API routes above take
