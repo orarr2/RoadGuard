@@ -405,7 +405,7 @@ def test_chat_use_panel_true_fires_panel_when_env_set(monkeypatch):
     monkeypatch.setattr(
         providers,
         "PROVIDERS",
-        {n: _factory(n) for n in ("groq", "anthropic", "openai_compat", "ollama")},
+        {n: _factory(n) for n in ("groq", "openai_compat", "ollama")},
     )
 
     chat_mod.chat([{"role": "user", "content": "x"}], use_panel=True)
@@ -431,7 +431,7 @@ def test_chat_default_single_provider_without_panel_flag(monkeypatch):
     monkeypatch.setattr(
         providers,
         "PROVIDERS",
-        {n: _factory(n) for n in ("groq", "anthropic", "openai_compat", "ollama")},
+        {n: _factory(n) for n in ("groq", "openai_compat", "ollama")},
     )
 
     chat_mod.chat([{"role": "user", "content": "x"}])

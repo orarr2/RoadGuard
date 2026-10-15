@@ -4,6 +4,11 @@ The VM is a Google Cloud `e2-micro` Free Tier instance in `us-east1-c`,
 hostname `turkey-collector`, running Debian 13. Scripts in this
 directory bring it from a clean slate to a running RoadGuard service.
 
+> **Day-to-day commands** live in [VM-COMMANDS.md](VM-COMMANDS.md) -
+> dataset download, verify-vm, SQLite inspection, enabling the LLM
+> panel, approving hazards from the shell, etc. This file covers the
+> one-shot setup and the systemd layout.
+
 ## One-shot setup
 
 On a freshly provisioned VM:

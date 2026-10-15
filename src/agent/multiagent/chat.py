@@ -6,9 +6,9 @@ eval the stub plays back a scripted policy so results are
 reproducible and free.
 
 Provider selection is env-driven and multi-vendor (Groq by default,
-Anthropic, any OpenAI-compatible endpoint, or Ollama) via
-`AGENT_LLM_PROVIDER` and `AGENT_LLM_MODEL`. Two extra modes layer on
-top of single-provider mode:
+any OpenAI-compatible endpoint such as Together AI or OpenRouter, or
+Ollama for local models) via `AGENT_LLM_PROVIDER` and `AGENT_LLM_MODEL`.
+Two extra modes layer on top of single-provider mode:
 
 - Committee (`AGENT_LLM_COMMITTEE=1`): two models judge each turn; on
   agreement the higher-confidence verdict wins, on disagreement the

@@ -4,7 +4,7 @@ Reads:  hazard_profile, metadata.road_type
 Writes: procedures, tool_result_ids, research_coverage
 Tools:  query_repair_standards (read-only)
 
-Includes the dual-LLM pattern (docs/multiagent-architecture.md section 7.4)
+Includes the dual-LLM pattern (AGENTS/architecture.md section 7.4)
 for vector 3 of the prompt-injection surface. The Research agent passes
 the raw RAG passage through a quarantine extractor that emits only a
 structured JSON summary. The Decision agent never sees the raw passage.

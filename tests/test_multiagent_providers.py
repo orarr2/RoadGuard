@@ -30,11 +30,11 @@ def test_resolve_provider_defaults_to_groq(monkeypatch):
 
 
 def test_resolve_provider_from_env(monkeypatch):
-    monkeypatch.setenv("AGENT_LLM_PROVIDER", "anthropic")
-    monkeypatch.setenv("AGENT_LLM_MODEL", "claude-x")
+    monkeypatch.setenv("AGENT_LLM_PROVIDER", "openai_compat")
+    monkeypatch.setenv("AGENT_LLM_MODEL", "llama-x")
     name, model = providers.resolve_provider_model()
-    assert name == "anthropic"
-    assert model == "claude-x"
+    assert name == "openai_compat"
+    assert model == "llama-x"
 
 
 def test_resolve_provider_colon_shorthand(monkeypatch):
@@ -77,7 +77,7 @@ def _install_fake_providers(monkeypatch, scripted):
     monkeypatch.setattr(
         providers,
         "PROVIDERS",
-        {name: _factory(name) for name in ("groq", "anthropic", "openai_compat", "ollama")},
+        {name: _factory(name) for name in ("groq", "openai_compat", "ollama")},
     )
     return calls
 
@@ -156,7 +156,7 @@ def test_chat_panel_majority_vote(monkeypatch):
     monkeypatch.setenv("ROADGUARD_USE_LIVE", "1")
     monkeypatch.setenv(
         "AGENT_LLM_PANEL",
-        "groq:llama-a,anthropic:claude-b,ollama:llama-c",
+        "groq:llama-a,openai_compat:llama-b,ollama:llama-c",
     )
     monkeypatch.delenv("AGENT_LLM_COMMITTEE", raising=False)
     monkeypatch.setattr(chat_mod, "USE_LIVE", True)
@@ -165,7 +165,7 @@ def test_chat_panel_majority_vote(monkeypatch):
         monkeypatch,
         {
             "groq:llama-a": [_msg("standard")],
-            "anthropic:claude-b": [_msg("standard")],
+            "openai_compat:llama-b": [_msg("standard")],
             "ollama:llama-c": [_msg("urgent")],
         },
     )
@@ -181,7 +181,7 @@ def test_chat_panel_dedupes_identical_specs(monkeypatch):
     monkeypatch.setenv("ROADGUARD_USE_LIVE", "1")
     monkeypatch.setenv(
         "AGENT_LLM_PANEL",
-        "groq:llama-a,groq:llama-a,anthropic:claude-b",
+        "groq:llama-a,groq:llama-a,openai_compat:llama-b",
     )
     monkeypatch.delenv("AGENT_LLM_COMMITTEE", raising=False)
     monkeypatch.setattr(chat_mod, "USE_LIVE", True)
@@ -190,7 +190,7 @@ def test_chat_panel_dedupes_identical_specs(monkeypatch):
         monkeypatch,
         {
             "groq:llama-a": [_msg("standard")],
-            "anthropic:claude-b": [_msg("urgent")],
+            "openai_compat:llama-b": [_msg("urgent")],
         },
     )
     chat_mod.chat(messages=[{"role": "user", "content": "x"}], use_panel=True)
@@ -216,7 +216,7 @@ def test_chat_panel_ignored_without_use_panel_flag(monkeypatch):
     monkeypatch.setenv("ROADGUARD_USE_LIVE", "1")
     monkeypatch.setenv(
         "AGENT_LLM_PANEL",
-        "groq:llama-a,anthropic:claude-b,ollama:llama-c",
+        "groq:llama-a,openai_compat:llama-b,ollama:llama-c",
     )
     monkeypatch.delenv("AGENT_LLM_COMMITTEE", raising=False)
     monkeypatch.delenv("AGENT_LLM_PROVIDER", raising=False)

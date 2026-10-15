@@ -1,6 +1,6 @@
 """Supervisor: lightweight Python router (not an LLM).
 
-Per the topology-cost analysis in docs/multiagent-architecture.md section 9:
+Per the topology-cost analysis in AGENTS/architecture.md section 9:
 keeping the supervisor as a pure Python function saves two LLM calls per
 run and is the reason this 3-agent setup is cheaper than the monolith.
 

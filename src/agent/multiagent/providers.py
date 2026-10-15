@@ -2,8 +2,8 @@
 
 The agent nodes call `chat()` from `.chat`, which routes through here.
 Switching provider is an env var change, not a code edit, so the same
-code runs against Groq, Anthropic, Ollama (local), or any
-OpenAI-compatible endpoint (LM Studio, vLLM, llamafile, Together, ...).
+code runs against Groq, any OpenAI-compatible endpoint (LM Studio, vLLM,
+llamafile, Together AI, OpenRouter, ...), or Ollama (local).
 
 Models and API keys stay in env vars. Nothing is persisted to disk by
 this module.
@@ -86,139 +86,7 @@ def _chat_groq(
 
 
 # ---------------------------------------------------------------------------
-# Anthropic (claude)
-# ---------------------------------------------------------------------------
-
-
-def _to_anthropic_tools(tools: Optional[list]) -> list[dict]:
-    """Translate OpenAI function-tool schemas to Anthropic's shape."""
-    if not tools:
-        return []
-    out = []
-    for t in tools:
-        fn = t.get("function", t)
-        out.append(
-            {
-                "name": fn["name"],
-                "description": fn.get("description", ""),
-                "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
-            }
-        )
-    return out
-
-
-def _split_anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
-    """Anthropic separates the system prompt from the user/assistant turns."""
-    system_parts = []
-    turns = []
-    for m in messages:
-        role = m.get("role")
-        content = m.get("content", "")
-        if role == "system":
-            system_parts.append(content if isinstance(content, str) else json.dumps(content))
-            continue
-        if role == "tool":
-            turns.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": m.get("tool_call_id") or m.get("id") or "unknown",
-                            "content": content if isinstance(content, str) else json.dumps(content),
-                        }
-                    ],
-                }
-            )
-            continue
-        if role == "assistant" and m.get("tool_calls"):
-            blocks: list[dict] = []
-            if content:
-                blocks.append({"type": "text", "text": content})
-            for call in m["tool_calls"]:
-                fn = call.get("function") or {}
-                args = fn.get("arguments")
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except json.JSONDecodeError:
-                        args = {"__raw__": args}
-                blocks.append(
-                    {
-                        "type": "tool_use",
-                        "id": call.get("id") or "call",
-                        "name": fn.get("name", ""),
-                        "input": args or {},
-                    }
-                )
-            turns.append({"role": "assistant", "content": blocks})
-            continue
-        turns.append(
-            {
-                "role": role or "user",
-                "content": content if isinstance(content, str) else json.dumps(content),
-            }
-        )
-    return "\n\n".join(system_parts), turns
-
-
-def _chat_anthropic(
-    messages: list[dict],
-    tools: Optional[list],
-    temperature: float,
-    model: str,
-) -> tuple[ChatMessage, int, int]:
-    try:
-        from anthropic import Anthropic  # lazy
-    except ImportError as exc:
-        raise RuntimeError(
-            "anthropic provider: `pip install anthropic` and set ANTHROPIC_API_KEY"
-        ) from exc
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("anthropic provider: ANTHROPIC_API_KEY not set")
-    system, turns = _split_anthropic_messages(messages)
-    client = Anthropic(api_key=api_key)
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "max_tokens": 1024,
-        "temperature": temperature,
-        "messages": turns,
-    }
-    if system:
-        kwargs["system"] = system
-    if tools:
-        kwargs["tools"] = _to_anthropic_tools(tools)
-    resp = client.messages.create(**kwargs)
-    content_text = ""
-    tool_calls: list[dict] = []
-    for block in resp.content or []:
-        btype = getattr(block, "type", None)
-        if btype == "text":
-            content_text += getattr(block, "text", "")
-        elif btype == "tool_use":
-            tool_calls.append(
-                {
-                    "id": getattr(block, "id", ""),
-                    "function": {
-                        "name": getattr(block, "name", ""),
-                        "arguments": json.dumps(getattr(block, "input", {})),
-                    },
-                }
-            )
-    finish = "tool_calls" if tool_calls else (resp.stop_reason or "stop")
-    usage = getattr(resp, "usage", None)
-    in_tok = getattr(usage, "input_tokens", 0) if usage else estimate_tokens(json.dumps(messages))
-    out_tok = getattr(usage, "output_tokens", 0) if usage else estimate_tokens(content_text or json.dumps(tool_calls))
-    return (
-        ChatMessage(finish_reason=finish, content=content_text or None, tool_calls=tool_calls),
-        int(in_tok or 0),
-        int(out_tok or 0),
-    )
-
-
-# ---------------------------------------------------------------------------
-# OpenAI-compatible endpoints (LM Studio, vLLM, Together, OpenRouter, ...)
+# OpenAI-compatible endpoints (LM Studio, vLLM, Together AI, OpenRouter, ...)
 # ---------------------------------------------------------------------------
 
 
@@ -336,15 +204,13 @@ ProviderFn = Callable[
 
 PROVIDERS: dict[str, ProviderFn] = {
     "groq": _chat_groq,
-    "anthropic": _chat_anthropic,
     "openai_compat": _chat_openai_compat,
     "ollama": _chat_ollama,
 }
 
 DEFAULT_MODEL_BY_PROVIDER = {
     "groq": "openai/gpt-oss-120b",
-    "anthropic": "claude-opus-4-7",
-    "openai_compat": "llama-3.3-70b-versatile",
+    "openai_compat": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
     "ollama": "llama3.2",
 }
 

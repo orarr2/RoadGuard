@@ -1,7 +1,7 @@
 """Orchestrator-Worker multi-agent subpackage.
 
 Perception + Research + Decision agents coordinated by a lightweight
-Python supervisor. See docs/multiagent-architecture.md for the full spec.
+Python supervisor. See AGENTS/architecture.md for the full spec.
 
 This subpackage is installed side-by-side with the monolith agent in
 src/agent/{loop,policy,tools,prompts}.py. The API still points at the

@@ -53,8 +53,9 @@ Cloudflare quick tunnel  ------->  FastAPI VM (e2-micro)
 - Boundary defence sanitizes free-text location, OCR text pulled from
   the image, and RAG passages (dual-LLM pattern).
 
-See [docs/multiagent-architecture.md](docs/multiagent-architecture.md)
-for the authoritative spec. The walk-through is
+See [AGENTS/architecture.md](AGENTS/architecture.md) for the
+authoritative spec and [AGENTS/README.md](AGENTS/README.md) for the
+one-page overview. The walk-through is
 [notebooks/agent_walkthrough.ipynb](notebooks/agent_walkthrough.ipynb)
 (deterministic, no network needed, runs end to end in a few seconds).
 
@@ -87,14 +88,16 @@ src/
   api/              FastAPI shell, auth, rate limits, decision_cache,
                     schemas (incl. LiveHazardSubmit + LiveHazardResponse)
   storage/          Supabase client (ready, not yet wired to a bucket)
-  db/               SQLite schema + models (ready, not yet queried)
-  jobs/             Daily email + nightly image cleanup
+  db/               SQLite schema + models + approvals table
+  jobs/             Daily email + nightly image cleanup + approval email
   tools/            Operational helpers (download_dataset.py, ...)
-tests/              pytest suite (201 tests; multiagent + api + db + jobs)
+tests/              pytest suite (260 tests; multiagent + api + db + jobs)
 notebooks/          agent_walkthrough.ipynb (standalone demo)
-docs/               CHARTER.md, agent-contract.md,
-                    multiagent-architecture.md (RTL Hebrew spec)
-deploy/             setup.sh, systemd units, Cloudflare tunnel notes
+AGENTS/             README, architecture.md, contract.md, diagrams.html
+                    (one place for everything about the agent layer)
+docs/               CHARTER.md, dataset-handoff.md
+deploy/             setup.sh, verify-vm.sh, VM-COMMANDS.md, systemd units,
+                    Cloudflare tunnel notes
 webapp/             GitHub Pages client (vanilla ES modules, dark design
                     system, live-drive flow, verdict toasts)
 tests/multiagent_eval_scenarios.json   50 scenarios across 4 approaches
@@ -110,7 +113,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Full suite: 201 tests, green.
+Full suite: 260 tests, green.
 
 ## VM provisioning
 
