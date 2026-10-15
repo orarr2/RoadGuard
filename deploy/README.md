@@ -68,6 +68,30 @@ curl -s http://127.0.0.1:8000/health | jq .
 Should return `{"status": "ok", ..., "agent_ready": true, "llm_fallback_ready": true}`
 once the env file is populated and the gguf is in place.
 
+## End-to-end verification
+
+`verify-vm.sh` is a read-only check that covers the services, the API,
+the approval gate, the dataset, and disk space in one pass. It never
+mutates state, so it is safe to rerun whenever something changes.
+
+```bash
+# Minimal (services + /health + dataset only)
+sudo bash /opt/roadguard/repo/deploy/verify-vm.sh
+
+# Full (also runs /hazards/submit and /hazards/live and checks that an
+# approval row was written for the urgent verdict)
+sudo bash /opt/roadguard/repo/deploy/verify-vm.sh \
+    --passphrase "$(systemd-ask-password 'RoadGuard passphrase:')"
+
+# Pass through the dataset path if it is not the default
+sudo bash /opt/roadguard/repo/deploy/verify-vm.sh \
+    --dataset-dir /opt/roadguard/datasets/road-damage-10k \
+    --passphrase "$MY_PASSPHRASE"
+```
+
+The script prints `PASS`/`WARN`/`FAIL` lines, ends with a count summary,
+and exits with the number of FAILs (0 means every required check passed).
+
 ## Logs
 
 ```bash
