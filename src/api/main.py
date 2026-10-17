@@ -9,9 +9,8 @@ import logging
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Optional
-
-from pathlib import Path as _Path
 
 from fastapi import Body, Depends, FastAPI, Form, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -155,6 +154,133 @@ def _supabase_ready(settings: Settings) -> bool:
     return bool(settings.supabase_url) and bool(settings.supabase_service_role_key)
 
 
+# ---------------------------------------------------------------------------
+# Request-body helpers (dedupe between /hazards/submit and /hazards/live)
+# ---------------------------------------------------------------------------
+
+
+def _now_iso() -> str:
+    """Reported-at timestamp in the shape every agent path expects."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _dump_image_quality(body: Any, *, missing: Any) -> Any:
+    """Serialize a HazardSubmit/LiveHazardSubmit image_quality block or
+    return `missing` when the client did not send one.
+
+    Both endpoints had the same `body.image_quality.model_dump(exclude_none=True)
+    if body.image_quality is not None else <default>` ternary - this is the one
+    place that owns it.
+    """
+    if body.image_quality is None:
+        return missing
+    return body.image_quality.model_dump(exclude_none=True)
+
+
+def _hazard_input_from_batch(body: Any, hazard_id: str, reported_at: str) -> dict[str, Any]:
+    """Build the flat hazard dict for /hazards/submit (batch flow)."""
+    return {
+        "hazard_id": hazard_id,
+        "class": body.hazard_class,
+        "confidence": float(body.confidence),
+        "bboxes": body.bboxes,
+        "road_type": body.road_type,
+        "lane_blocked": body.lane_blocked,
+        "location": body.location or "",
+        "image_object_key": body.image_object_key,
+        "reported_at": reported_at,
+        # Optional rich fields - absent on older clients
+        "top1_margin": body.top1_margin,
+        "area_ratio": body.area_ratio,
+        "n_detections_by_class": body.n_detections_by_class,
+        "center_y_rel": body.center_y_rel,
+        "image_quality": _dump_image_quality(body, missing=None),
+    }
+
+
+def _submit_dict_from_live(body: Any, reported_at: str) -> dict[str, Any]:
+    """Build the dict passed to multiagent_decide_live from /hazards/live."""
+    return {
+        "class": body.hazard_class,
+        "confidence": float(body.confidence),
+        "top1_margin": body.top1_margin,
+        "area_ratio": body.area_ratio,
+        "n_detections_by_class": body.n_detections_by_class,
+        "bbox": body.bbox,
+        "center_y_rel": body.center_y_rel,
+        "road_type": body.road_type,
+        "lane_blocked": body.lane_blocked,
+        "location": body.location or "",
+        "session_id": body.session_id,
+        "track_id": body.track_id or "",
+        "image_quality": _dump_image_quality(body, missing={}),
+        "reported_at": reported_at,
+    }
+
+
+def _live_fallback_hazard(body: Any, hazard_id: str, reported_at: str) -> dict[str, Any]:
+    """Build the monolith-shaped hazard dict for /hazards/live when
+    AGENT_ARCHITECTURE is not multiagent. The monolith has no idea what
+    the live-only fields mean, so this is the lossy down-shape."""
+    return {
+        "hazard_id": hazard_id,
+        "class": body.hazard_class,
+        "confidence": float(body.confidence),
+        "bboxes": [body.bbox] if body.bbox else [],
+        "road_type": body.road_type,
+        "lane_blocked": body.lane_blocked,
+        "location": body.location or "",
+        "image_object_key": f"live/{body.session_id}/{hazard_id}.jpg",
+        "reported_at": reported_at,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Shared DB handle (FastAPI dependency)
+# ---------------------------------------------------------------------------
+#
+# Database() opens a sqlite3 connection AND runs the schema migration from
+# schema.sql on every __init__. Each `with Database(path)` under an API
+# handler therefore paid that cost on every request. One Database per path
+# is safe across FastAPI's threadpool because the connection is opened with
+# check_same_thread=False and WAL journaling.
+#
+# A plain dict (not functools.lru_cache) keeps the cache clearable - tests
+# routinely rebuild the app against a fresh tmp DB path and want the old
+# handle released so the tmp dir can be deleted on Windows.
+_DB_CACHE: dict[str, Any] = {}
+
+
+def _get_shared_db(path: str):
+    """Return a long-lived Database for `path`, creating it on first call."""
+    cached = _DB_CACHE.get(path)
+    if cached is None:
+        from db.models import Database
+        cached = Database(path)
+        _DB_CACHE[path] = cached
+    return cached
+
+
+def get_db(settings: Settings = Depends(get_settings)):
+    """FastAPI dependency injecting the shared Database for this path."""
+    return _get_shared_db(settings.roadguard_db_path)
+
+
+def _reset_db_cache() -> None:
+    """Close any cached Databases and drop their handles.
+
+    create_app() calls this so a rebuilt app (what tests do between cases)
+    does not keep a connection pointing at a tmp DB that pytest is about
+    to delete.
+    """
+    for _db in list(_DB_CACHE.values()):
+        try:
+            _db.close()
+        except Exception:
+            pass
+    _DB_CACHE.clear()
+
+
 def _primary_provider(settings: Settings) -> loop.LLMProvider:
     if settings.agent_provider == "groq":
         return loop.GroqProvider(
@@ -194,6 +320,8 @@ def create_app() -> FastAPI:
         bucket = getattr(limiter, attr, None)
         if bucket is not None and hasattr(bucket, "clear"):
             bucket.clear()
+
+    _reset_db_cache()
 
     app = FastAPI(title="RoadGuard", version=VERSION)
     app.state.limiter = limiter
@@ -291,27 +419,7 @@ def create_app() -> FastAPI:
         settings: Settings = Depends(get_settings),
     ) -> HazardSubmitResponse:
         hazard_id = f"hz_{uuid.uuid4().hex[:12]}"
-        hazard_input: dict[str, Any] = {
-            "hazard_id": hazard_id,
-            "class": body.hazard_class,
-            "confidence": float(body.confidence),
-            "bboxes": body.bboxes,
-            "road_type": body.road_type,
-            "lane_blocked": body.lane_blocked,
-            "location": body.location or "",
-            "image_object_key": body.image_object_key,
-            "reported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            # Optional rich fields - absent on older clients
-            "top1_margin": body.top1_margin,
-            "area_ratio": body.area_ratio,
-            "n_detections_by_class": body.n_detections_by_class,
-            "center_y_rel": body.center_y_rel,
-            "image_quality": (
-                body.image_quality.model_dump(exclude_none=True)
-                if body.image_quality is not None
-                else None
-            ),
-        }
+        hazard_input = _hazard_input_from_batch(body, hazard_id, _now_iso())
         if settings.agent_architecture == "multiagent":
             decision = multiagent_decide(hazard_input)
         else:
@@ -377,42 +485,16 @@ def create_app() -> FastAPI:
             )
 
         hazard_id = f"hz_live_{uuid.uuid4().hex[:12]}"
-        submit_dict: dict[str, Any] = {
-            "class": body.hazard_class,
-            "confidence": float(body.confidence),
-            "top1_margin": body.top1_margin,
-            "area_ratio": body.area_ratio,
-            "n_detections_by_class": body.n_detections_by_class,
-            "bbox": body.bbox,
-            "center_y_rel": body.center_y_rel,
-            "road_type": body.road_type,
-            "lane_blocked": body.lane_blocked,
-            "location": body.location or "",
-            "session_id": body.session_id,
-            "track_id": body.track_id or "",
-            "image_quality": (
-                body.image_quality.model_dump(exclude_none=True)
-                if body.image_quality is not None
-                else {}
-            ),
-            "reported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
+        reported_at = _now_iso()
 
         if settings.agent_architecture == "multiagent":
-            decision = multiagent_decide_live(hazard_id=hazard_id, submit=submit_dict)
+            decision = multiagent_decide_live(
+                hazard_id=hazard_id,
+                submit=_submit_dict_from_live(body, reported_at),
+            )
         else:
             # Monolith does not consume the richer live fields; adapt down.
-            hazard_input: dict[str, Any] = {
-                "hazard_id": hazard_id,
-                "class": body.hazard_class,
-                "confidence": float(body.confidence),
-                "bboxes": [body.bbox] if body.bbox else [],
-                "road_type": body.road_type,
-                "lane_blocked": body.lane_blocked,
-                "location": body.location or "",
-                "image_object_key": f"live/{body.session_id}/{hazard_id}.jpg",
-                "reported_at": submit_dict["reported_at"],
-            }
+            hazard_input = _live_fallback_hazard(body, hazard_id, reported_at)
             primary = _primary_provider(settings)
             fallback = _fallback_provider(settings)
             ctx = tools.ToolContext()
@@ -482,13 +564,10 @@ def create_app() -> FastAPI:
     # ---- Approval gate (Charter §5-§6) ----------------------------------
 
     @app.get("/approvals/{approval_id}", response_class=HTMLResponse)
-    def approval_page(approval_id: str, settings: Settings = Depends(get_settings)):
+    def approval_page(approval_id: str, db=Depends(get_db)):
         """Lightweight HTML page a supervisor opens from the email."""
-        from db.models import Database  # local import, DB not always wired in tests
-
         try:
-            with Database(settings.roadguard_db_path) as db:
-                row = db.get_approval(approval_id)
+            row = db.get_approval(approval_id)
         except Exception:
             row = None
         if row is None:
@@ -503,20 +582,17 @@ def create_app() -> FastAPI:
         request: Request,
         approval_id: str,
         decision: str = Form(...),
-        settings: Settings = Depends(get_settings),
+        db=Depends(get_db),
     ):
         """Approve or deny a pending approval. Called by the HTML page."""
-        from db.models import Database
-
         if decision not in ("approved", "denied"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="invalid_decision",
             )
-        with Database(settings.roadguard_db_path) as db:
-            # In production we would attach the authenticated supervisor
-            # identity. For now the gate is anonymous but rate-limited.
-            ok = db.decide_approval(approval_id, decision, decided_by="supervisor")
+        # In production we would attach the authenticated supervisor
+        # identity. For now the gate is anonymous but rate-limited.
+        ok = db.decide_approval(approval_id, decision, decided_by="supervisor")
         if not ok:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -530,7 +606,7 @@ def create_app() -> FastAPI:
     # Mount the webapp at the repo root last, so API routes above take
     # precedence over the static fallback. Phones can then hit the same
     # cloudflared tunnel URL both for the API and for the webapp assets.
-    _webapp_dir = _Path(__file__).resolve().parents[2] / "webapp"
+    _webapp_dir = Path(__file__).resolve().parents[2] / "webapp"
     if _webapp_dir.is_dir():
         app.mount(
             "/", StaticFiles(directory=str(_webapp_dir), html=True), name="webapp"

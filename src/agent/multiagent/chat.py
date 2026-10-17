@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -168,11 +169,28 @@ def _call_specs(
     tools: list | None,
     temperature: float,
 ) -> list[tuple[ChatMessage, int, int, str, str]]:
-    """Call every spec once. Returns a list of (msg, in_tok, out_tok, provider, model)."""
-    out = []
-    for spec in specs:
-        out.append(call_provider(spec, messages, tools, temperature))
-    return out
+    """Call every spec once. Returns a list of (msg, in_tok, out_tok, provider, model).
+
+    When more than one spec is provided (panel/committee), the calls run in
+    parallel on a short-lived threadpool. A 3-model panel at ~2 s per
+    provider therefore completes in ~2 s instead of ~6 s. Order is
+    preserved so the tiebreak in _combine() stays deterministic.
+    """
+    spec_list = list(specs)
+    if not spec_list:
+        return []
+    if len(spec_list) == 1:
+        return [call_provider(spec_list[0], messages, tools, temperature)]
+
+    with ThreadPoolExecutor(
+        max_workers=len(spec_list),
+        thread_name_prefix="panel",
+    ) as pool:
+        futures = [
+            pool.submit(call_provider, spec, messages, tools, temperature)
+            for spec in spec_list
+        ]
+        return [f.result() for f in futures]
 
 
 def _combine(

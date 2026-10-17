@@ -7,11 +7,9 @@ image_quality, metadata), runs run_graph_locally, and reshapes the
 final state back into the AgentDecision dataclass the API already
 consumes. The API contract therefore does not change.
 
-The current HazardSubmit shape has no image-quality fields (blur, OCR,
-is_road_scene) and no top1_margin on YOLO. The adapter supplies safe
-defaults so the Perception node still produces a reasonable confidence
-label; later phases should push these fields into HazardSubmit itself
-when the browser-side pipeline starts emitting them.
+Both /hazards/submit (batch) and /hazards/live (streaming) land here.
+The two public entry points share one set of private normalizers so
+there is a single source of truth for every default value.
 """
 
 from __future__ import annotations
@@ -23,62 +21,48 @@ from agent.loop import AgentDecision
 from .graph import run_graph_locally
 
 
-def hazard_to_graph_inputs(hazard: dict[str, Any]) -> tuple[str, dict, dict, dict]:
-    """Map a flat HazardSubmit-style dict to the graph's three input blocks.
+# ---------------------------------------------------------------------------
+# Private normalizers - single source of truth for every default
+# ---------------------------------------------------------------------------
 
-    Returns (hazard_id, yolo_output, image_quality, metadata).
 
-    HazardSubmit now carries the optional rich fields (top1_margin,
-    area_ratio, n_detections_by_class, center_y_rel, image_quality). When
-    present, they override the defaults; when absent, the perception node
-    still has sensible fallbacks.
+_DEFAULT_COUNTS: dict[str, int] = {"D00": 0, "D10": 0, "D20": 0, "D40": 0}
+
+
+def _normalize_image_quality(quality_in: dict[str, Any] | None) -> dict[str, Any]:
+    """Fill the Perception node's image_quality block with safe defaults.
+
+    Clients that do not yet carry an in-browser quality probe hit this
+    with an empty dict; the Perception node still has values to reason
+    about. One place to change a default - not two.
     """
-    hazard_id = hazard["hazard_id"]
-    hazard_class = hazard["class"]
-    confidence = float(hazard["confidence"])
-    bboxes = hazard.get("bboxes") or []
-
-    detections = _bboxes_to_detections(bboxes, hazard_class, confidence)
-    # If the client sent area_ratio, surface it onto the top-1 detection so
-    # Perception's area-based severity gate sees it.
-    if hazard.get("area_ratio") is not None and detections:
-        detections[0]["area_ratio"] = float(hazard["area_ratio"])
-    if hazard.get("center_y_rel") is not None and detections:
-        detections[0].setdefault("position", {})["center_y_rel"] = float(
-            hazard["center_y_rel"]
-        )
-
-    yolo_output = {
-        "top1_class": hazard_class,
-        "top1_confidence": confidence,
-        "top1_margin": float(hazard.get("top1_margin") or 0.0),
-        "detections": detections,
-        "n_detections_by_class": (
-            hazard.get("n_detections_by_class") or _count_by_class(detections)
-        ),
+    q = quality_in or {}
+    is_road = q.get("is_road_scene")
+    return {
+        "blur_score": float(q.get("blur_score") or 150.0),
+        "brightness_mean": float(q.get("brightness_mean") or 0.5),
+        "is_road_scene": bool(is_road if is_road is not None else True),
+        "road_scene_confidence": float(q.get("road_scene_confidence") or 0.9),
+        "occlusion_estimate": q.get("occlusion_estimate") or "low",
+        "ocr_text_detected": q.get("ocr_text_detected") or "",
     }
 
-    quality_in = hazard.get("image_quality") or {}
-    image_quality = {
-        "blur_score": float(quality_in.get("blur_score") or 150.0),
-        "brightness_mean": float(quality_in.get("brightness_mean") or 0.5),
-        "is_road_scene": bool(
-            quality_in["is_road_scene"]
-            if quality_in.get("is_road_scene") is not None
-            else True
-        ),
-        "road_scene_confidence": float(quality_in.get("road_scene_confidence") or 0.9),
-        "occlusion_estimate": quality_in.get("occlusion_estimate") or "low",
-        "ocr_text_detected": quality_in.get("ocr_text_detected") or "",
-    }
 
-    metadata = {
-        "road_type": hazard["road_type"],
-        "lane_blocked": hazard["lane_blocked"],
-        "location": hazard.get("location") or "",
-        "reported_at": hazard.get("reported_at", ""),
+def _normalize_metadata(src: dict[str, Any], *, extra_keys: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Metadata block fed to the graph.
+
+    `extra_keys` lets the live-drive flow pass through `session_id` and
+    `track_id` without duplicating the base shape in two places.
+    """
+    out: dict[str, Any] = {
+        "road_type": src["road_type"],
+        "lane_blocked": src["lane_blocked"],
+        "location": src.get("location") or "",
+        "reported_at": src.get("reported_at", ""),
     }
-    return hazard_id, yolo_output, image_quality, metadata
+    for key in extra_keys:
+        out[key] = src.get(key) or ""
+    return out
 
 
 def _bboxes_to_detections(
@@ -120,7 +104,7 @@ def _bboxes_to_detections(
 
 
 def _count_by_class(detections: list[dict]) -> dict[str, int]:
-    counts: dict[str, int] = {"D00": 0, "D10": 0, "D20": 0, "D40": 0}
+    counts = dict(_DEFAULT_COUNTS)
     for d in detections:
         cls = d.get("class")
         if cls in counts:
@@ -139,6 +123,52 @@ def final_state_to_decision(final_state: dict[str, Any]) -> AgentDecision:
         provider="multiagent",
         trace=list(final_state.get("trace") or []),
         fallback_reason="guard_fired" if guard_fired else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public entry points
+# ---------------------------------------------------------------------------
+
+
+def hazard_to_graph_inputs(hazard: dict[str, Any]) -> tuple[str, dict, dict, dict]:
+    """Map a flat HazardSubmit-style dict to the graph's three input blocks.
+
+    HazardSubmit carries optional rich fields (top1_margin, area_ratio,
+    n_detections_by_class, center_y_rel, image_quality). When present
+    they override the defaults; when absent, Perception still has
+    sensible fallbacks via _normalize_image_quality.
+    """
+    hazard_id = hazard["hazard_id"]
+    hazard_class = hazard["class"]
+    confidence = float(hazard["confidence"])
+    bboxes = hazard.get("bboxes") or []
+
+    detections = _bboxes_to_detections(bboxes, hazard_class, confidence)
+    # If the client sent area_ratio, surface it onto the top-1 detection so
+    # Perception's area-based severity gate sees it.
+    if hazard.get("area_ratio") is not None and detections:
+        detections[0]["area_ratio"] = float(hazard["area_ratio"])
+    if hazard.get("center_y_rel") is not None and detections:
+        detections[0].setdefault("position", {})["center_y_rel"] = float(
+            hazard["center_y_rel"]
+        )
+
+    yolo_output = {
+        "top1_class": hazard_class,
+        "top1_confidence": confidence,
+        "top1_margin": float(hazard.get("top1_margin") or 0.0),
+        "detections": detections,
+        "n_detections_by_class": (
+            hazard.get("n_detections_by_class") or _count_by_class(detections)
+        ),
+    }
+
+    return (
+        hazard_id,
+        yolo_output,
+        _normalize_image_quality(hazard.get("image_quality")),
+        _normalize_metadata(hazard),
     )
 
 
@@ -161,20 +191,15 @@ def live_hazard_to_graph_inputs(
     """Shape a LiveHazardSubmit (dict form) for run_graph_locally.
 
     LiveHazardSubmit already carries the richer fields the Perception
-    node wants (top1_margin, area_ratio, n_detections_by_class,
-    image_quality), so no defaults are injected except where the client
-    skipped a field.
+    node wants; this builder keeps them on the top-1 detection and
+    reuses the same image_quality / metadata normalizers as the batch
+    path.
     """
-    hazard_class = submit["class"] if "class" in submit else submit["hazard_class"]
+    hazard_class = submit.get("class") or submit["hazard_class"]
     confidence = float(submit["confidence"])
     top1_margin = float(submit.get("top1_margin") or 0.0)
     area_ratio = float(submit.get("area_ratio") or 0.0)
-    counts = submit.get("n_detections_by_class") or {
-        "D00": 0,
-        "D10": 0,
-        "D20": 0,
-        "D40": 0,
-    }
+    counts = submit.get("n_detections_by_class") or dict(_DEFAULT_COUNTS)
     counts.setdefault(hazard_class, 0)
     if counts.get(hazard_class, 0) < 1:
         counts[hazard_class] = 1
@@ -197,31 +222,12 @@ def live_hazard_to_graph_inputs(
         "n_detections_by_class": counts,
     }
 
-    quality_in = submit.get("image_quality") or {}
-    image_quality = {
-        "blur_score": float(quality_in.get("blur_score") or 150.0),
-        "brightness_mean": float(quality_in.get("brightness_mean") or 0.5),
-        "is_road_scene": bool(
-            quality_in.get("is_road_scene")
-            if quality_in.get("is_road_scene") is not None
-            else True
-        ),
-        "road_scene_confidence": float(
-            quality_in.get("road_scene_confidence") or 0.9
-        ),
-        "occlusion_estimate": quality_in.get("occlusion_estimate") or "low",
-        "ocr_text_detected": quality_in.get("ocr_text_detected") or "",
-    }
-
-    metadata = {
-        "road_type": submit["road_type"],
-        "lane_blocked": submit["lane_blocked"],
-        "location": submit.get("location") or "",
-        "reported_at": submit.get("reported_at", ""),
-        "session_id": submit.get("session_id", ""),
-        "track_id": submit.get("track_id") or "",
-    }
-    return hazard_id, yolo_output, image_quality, metadata
+    return (
+        hazard_id,
+        yolo_output,
+        _normalize_image_quality(submit.get("image_quality")),
+        _normalize_metadata(submit, extra_keys=("session_id", "track_id")),
+    )
 
 
 def multiagent_decide_live(
