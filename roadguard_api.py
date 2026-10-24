@@ -1837,10 +1837,12 @@ def create_app() -> FastAPI:
         return _FileResponse(path, media_type="image/jpeg")
 
     def _build_live_digest_html(window_hours: int = 24) -> str:
-        """Build the digest HTML on demand from the current DB, so every
-        request reflects the newest hazards (no cron lag). Mirrors the
-        shape /usr/local/bin/rg-digest writes to disk for the archived
-        snapshots, with an added 'live' badge in the title."""
+        """Build the digest HTML on demand from the current DB.
+
+        Layout: a two-pane console - the hazards table on the left, a sticky
+        detail panel on the right that shows the selected row's photo,
+        rationale, pipeline and cited sources. Three tabs (Overview /
+        Cases / Timeline) keep everything on one scroll-free screen."""
         import sqlite3, json, html, os
         from datetime import datetime, timedelta, timezone
         NOW = datetime.now(timezone.utc)
@@ -1860,76 +1862,239 @@ def create_app() -> FastAPI:
             counts[k if k in counts else "other"] += 1
         approvals_pending = con.execute("SELECT COUNT(*) FROM approvals WHERE status='pending'").fetchone()[0]
         evidence_open = con.execute("SELECT COUNT(*) FROM evidence_requests WHERE status='pending'").fetchone()[0]
-        parts = []
-        parts.append("<!doctype html><html><head><meta charset='utf-8'>")
-        parts.append(f"<meta http-equiv='refresh' content='30'>")  # auto-refresh every 30s
-        parts.append(f"<title>RoadGuard Live Digest - {NOW.strftime('%Y-%m-%d %H:%M UTC')}</title>")
-        parts.append("<style>body{font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 20px;color:#111}"
-                     "table{border-collapse:collapse;margin:12px 0;width:100%}"
-                     "th,td{padding:6px 10px;border:1px solid #ddd;text-align:left;font-size:14px}"
-                     "th{background:#f3f4f6}"
-                     ".k{color:#6b7280}.urgent{color:#b91c1c;font-weight:600}"
-                     ".human{color:#1d4ed8}.standard{color:#047857}.evi{color:#b45309}"
-                     ".live{background:#dcfce7;color:#166534;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600}</style></head><body>")
-        parts.append(f"<h1>RoadGuard <span class='live'>LIVE</span> Digest</h1>")
-        parts.append(f"<p class='k'>{NOW.strftime('%Y-%m-%d %H:%M UTC')} - window: last {window_hours}h (since {CUT.strftime('%Y-%m-%d %H:%M UTC')}) - page auto-refreshes every 30 seconds</p>")
-        parts.append("<h2>Headline</h2><table>")
-        parts.append(f"<tr><td>New reports from the public</td><td><b>{len(rows)}</b></td></tr>")
-        parts.append(f"<tr><td>- urgent</td><td class='urgent'>{counts['urgent']}</td></tr>")
-        parts.append(f"<tr><td>- standard queue</td><td class='standard'>{counts['standard']}</td></tr>")
-        parts.append(f"<tr><td>- needs more evidence</td><td class='evi'>{counts['needs_more_evidence']}</td></tr>")
-        parts.append(f"<tr><td>- human review</td><td class='human'>{counts['human_review']}</td></tr>")
-        parts.append(f"<tr><td>Awaiting your approval (all time)</td><td><b>{approvals_pending}</b></td></tr>")
-        parts.append(f"<tr><td>Waiting for the reporter extra photo</td><td>{evidence_open}</td></tr>")
-        parts.append("</table>")
+
+        # Pre-build a JSON payload the right-pane JS can read without
+        # another round-trip. Each case carries everything the detail view
+        # needs; the table is just a tbody rendered from this list.
+        cases: list[dict] = []
+        for r in rows[:100]:
+            try:
+                trace = json.loads(r["agent_trace_json"] or "[]")
+                speakers = " -> ".join(dict.fromkeys(e.get("speaker", "?") for e in trace))
+            except Exception:
+                speakers = ""
+                trace = []
+            try:
+                cited = json.loads(r["cited_sources_json"] or "[]")
+            except Exception:
+                cited = []
+            img_rel = f"/images/{r['id']}" if os.path.isfile(f"/var/lib/roadguard/images/{r['id']}.jpg") else ""
+            cases.append({
+                "id": r["id"],
+                "decision": (r["agent_decision"] or "n/a").lower(),
+                "priority": r["priority"],
+                "status": r["status"] or "open",
+                "location": r["location"] or "(not provided)",
+                "reported_at": r["reported_at"] or 0,
+                "rationale": r["agent_rationale"] or "",
+                "speakers": speakers,
+                "cited": cited,
+                "image": img_rel,
+                "n_trace": len(trace),
+            })
+        con.close()
+        cases_json = json.dumps(cases)
+
+        # Row class name per decision colour. The JS keeps the same keys.
+        def _css_for(d: str) -> str:
+            d = (d or "").lower()
+            if d == "urgent": return "urgent"
+            if d == "human_review": return "human"
+            if d == "standard": return "standard"
+            if d == "needs_more_evidence": return "evi"
+            return "k"
+
+        tab_overview = (
+            "<div class='kpi-grid'>"
+            f"<div class='kpi'><div class='kpi-v'>{len(rows)}</div><div class='kpi-l'>New reports</div></div>"
+            f"<div class='kpi urgent'><div class='kpi-v'>{counts['urgent']}</div><div class='kpi-l'>Urgent</div></div>"
+            f"<div class='kpi standard'><div class='kpi-v'>{counts['standard']}</div><div class='kpi-l'>Standard queue</div></div>"
+            f"<div class='kpi human'><div class='kpi-v'>{counts['human_review']}</div><div class='kpi-l'>Human review</div></div>"
+            f"<div class='kpi evi'><div class='kpi-v'>{counts['needs_more_evidence']}</div><div class='kpi-l'>Needs more evidence</div></div>"
+            f"<div class='kpi'><div class='kpi-v'>{approvals_pending}</div><div class='kpi-l'>Approvals pending</div></div>"
+            f"<div class='kpi'><div class='kpi-v'>{evidence_open}</div><div class='kpi-l'>Awaiting reporter photo</div></div>"
+            "</div>"
+        )
+
         if rows:
-            parts.append("<h2>Summary table</h2><table><tr><th>#</th><th>id</th><th>decision</th><th>priority</th><th>location</th><th>time</th></tr>")
-            for i, r in enumerate(rows[:50], 1):
-                ts = datetime.fromtimestamp(r["reported_at"] or 0, timezone.utc).strftime("%H:%M")
-                d = html.escape(r["agent_decision"] or "n/a")
-                cls = "urgent" if d == "urgent" else ("human" if d == "human_review" else ("standard" if d == "standard" else "evi"))
-                parts.append(
-                    f"<tr><td>{i}</td><td><code>{html.escape(r['id'][:12])}</code></td>"
+            rows_html_parts = []
+            for i, c in enumerate(cases, 1):
+                ts = datetime.fromtimestamp(c["reported_at"], timezone.utc).strftime("%H:%M")
+                d = html.escape(c["decision"])
+                cls = _css_for(c["decision"])
+                rows_html_parts.append(
+                    f"<tr data-idx='{i-1}' class='row'>"
+                    f"<td>{i}</td>"
+                    f"<td><code>{html.escape(c['id'][:12])}</code></td>"
                     f"<td class='{cls}'>{d}</td>"
-                    f"<td>{r['priority'] or ''}</td>"
-                    f"<td>{html.escape(r['location'] or '')[:60]}</td>"
-                    f"<td>{ts}</td></tr>"
+                    f"<td>{c['priority'] or ''}</td>"
+                    f"<td>{html.escape(c['location'])[:60]}</td>"
+                    f"<td>{ts}</td>"
+                    f"</tr>"
                 )
-            parts.append("</table>")
-            parts.append("<h2>Per-case detail</h2>")
-            for i, r in enumerate(rows[:50], 1):
-                ts = datetime.fromtimestamp(r["reported_at"] or 0, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                d = html.escape(r["agent_decision"] or "n/a")
-                cls = "urgent" if d == "urgent" else ("human" if d == "human_review" else ("standard" if d == "standard" else "evi"))
-                try:
-                    trace = json.loads(r["agent_trace_json"] or "[]")
-                    speakers = " -> ".join(dict.fromkeys(e.get("speaker", "?") for e in trace))
-                except Exception:
-                    speakers = ""
-                try:
-                    cited = json.loads(r["cited_sources_json"] or "[]")
-                    cited_html = ", ".join(html.escape(str(c)) for c in cited) or "<i>none</i>"
-                except Exception:
-                    cited_html = ""
-                parts.append(f"<div style='border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin:12px 0'>")
-                parts.append(f"<h3 style='margin:0 0 6px 0'>Case {i} - <span class='{cls}'>{d}</span> (priority {r['priority'] or 'n/a'})</h3>")
-                parts.append(f"<p class='k' style='margin:0 0 8px 0'>id <code>{html.escape(r['id'])}</code>  &middot;  {ts}  &middot;  status: {html.escape(r['status'] or '')}</p>")
-                parts.append(f"<p><b>Location:</b> {html.escape(r['location'] or '(not provided)')[:200]}</p>")
-                parts.append(f"<p><b>Rationale:</b> {html.escape(r['agent_rationale'] or '(empty)')[:400]}</p>")
-                parts.append(f"<p><b>Pipeline:</b> {html.escape(speakers)}</p>")
-                parts.append(f"<p><b>Cited sources:</b> {cited_html}</p>")
-                img_path = f"/var/lib/roadguard/images/{r['id']}.jpg"
-                if os.path.isfile(img_path):
-                    parts.append(f"<p><img src='/images/{html.escape(r['id'])}' alt='citizen photo' "
-                                 f"style='max-width:420px;max-height:320px;border:1px solid #ddd;border-radius:6px'></p>")
-                else:
-                    parts.append(f"<p class='k'>(no image on disk - uploaded before image upload shipped, or expired after 7 days)</p>")
-                parts.append("</div>")
+            rows_html = "".join(rows_html_parts)
+            table_html = (
+                "<table class='cases'>"
+                "<thead><tr><th>#</th><th>id</th><th>decision</th><th>priority</th><th>location</th><th>time</th></tr></thead>"
+                f"<tbody id='rows'>{rows_html}</tbody>"
+                "</table>"
+            )
         else:
-            parts.append("<p><i>No hazards reported in the last 24 hours.</i></p>")
-        parts.append(f"<hr><p class='k'>Live build at {NOW.strftime('%Y-%m-%d %H:%M:%S UTC')}. Private page - gated to Tailscale / loopback only.</p>")
-        parts.append("</body></html>")
-        return "".join(parts)
+            table_html = "<p><i>No hazards reported in the last {h} hours.</i></p>".replace("{h}", str(window_hours))
+
+        # Timeline tab: a vertical list of the newest N cases with their speakers chain.
+        tl_parts = []
+        for i, c in enumerate(cases, 1):
+            ts = datetime.fromtimestamp(c["reported_at"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            d = html.escape(c["decision"])
+            cls = _css_for(c["decision"])
+            tl_parts.append(
+                f"<div class='tl-item'>"
+                f"<div class='tl-head'><span class='tl-i'>{i}</span>"
+                f"<span class='{cls}'>{d}</span>"
+                f"<span class='k'>priority {c['priority'] or 'n/a'} &middot; {ts} &middot; {html.escape(c['status'])}</span></div>"
+                f"<div class='tl-loc'>{html.escape(c['location'])}</div>"
+                f"<div class='tl-pipe'>{html.escape(c['speakers'])}</div>"
+                f"<div class='tl-r'>{html.escape((c['rationale'] or '(empty rationale)'))[:300]}</div>"
+                f"</div>"
+            )
+        timeline_html = "<div class='tl'>" + ("".join(tl_parts) or "<p><i>No cases to show.</i></p>") + "</div>"
+
+        header = (
+            f"<header class='topbar'>"
+            f"<h1>RoadGuard <span class='live'>LIVE</span> Digest</h1>"
+            f"<div class='nav-right'>"
+            f"<a href='/roadguard/trace' class='np'>Live trace &rarr;</a>"
+            f"<a href='/roadguard/supervisor' class='np'>Supervisor inbox &rarr;</a>"
+            f"<span class='k'>{NOW.strftime('%Y-%m-%d %H:%M UTC')} - last {window_hours}h - auto-refresh 30s</span>"
+            f"</div>"
+            f"</header>"
+            f"<nav class='tabs' id='tabs'>"
+            f"<button class='tab-btn active' data-tab='overview'>Overview</button>"
+            f"<button class='tab-btn' data-tab='cases'>Cases ({len(rows)})</button>"
+            f"<button class='tab-btn' data-tab='timeline'>Timeline</button>"
+            f"</nav>"
+        )
+
+        style = """
+        :root{--bg:#0f172a;--panel:#111827;--line:#1f2937;--text:#e5e7eb;--muted:#9ca3af;--brand:#38bdf8;--brand2:#22c55e;}
+        *{box-sizing:border-box}
+        html,body{margin:0;background:#f8fafc;color:#111;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+        .topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:#fff;border-bottom:1px solid #e5e7eb;position:sticky;top:0;z-index:5}
+        .topbar h1{margin:0;font-size:20px;font-weight:800;letter-spacing:-0.01em}
+        .live{background:#dcfce7;color:#166534;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;margin:0 6px}
+        .nav-right{display:flex;align-items:center;gap:14px;font-size:13px;color:#6b7280}
+        .np{color:#0ea5e9;text-decoration:none;font-weight:600}
+        .np:hover{text-decoration:underline}
+        .tabs{display:flex;gap:4px;padding:0 20px;background:#fff;border-bottom:1px solid #e5e7eb;position:sticky;top:49px;z-index:4}
+        .tab-btn{appearance:none;background:transparent;border:0;border-bottom:3px solid transparent;padding:10px 16px;font:inherit;font-size:14px;cursor:pointer;color:#6b7280;font-weight:600}
+        .tab-btn.active{color:#0ea5e9;border-bottom-color:#0ea5e9}
+        .tab-btn:hover{color:#111}
+        .tab-pane{display:none;padding:20px}
+        .tab-pane.active{display:block}
+        /* Overview */
+        .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+        .kpi{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;text-align:center}
+        .kpi-v{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:28px;font-weight:800;color:#0ea5e9}
+        .kpi.urgent .kpi-v{color:#b91c1c}
+        .kpi.human .kpi-v{color:#1d4ed8}
+        .kpi.standard .kpi-v{color:#047857}
+        .kpi.evi .kpi-v{color:#b45309}
+        .kpi-l{font-size:12px;color:#6b7280;margin-top:4px}
+        /* Cases split */
+        .split{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:16px;align-items:start}
+        @media (max-width:980px){.split{grid-template-columns:1fr}}
+        .cases{width:100%;background:#fff;border:1px solid #e5e7eb;border-radius:10px;border-collapse:separate;border-spacing:0;overflow:hidden}
+        .cases th,.cases td{padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:left;font-size:13px}
+        .cases th{background:#f8fafc;color:#6b7280;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:0.03em;position:sticky;top:85px;z-index:1}
+        .cases tr.row{cursor:pointer}
+        .cases tr.row:hover{background:#f1f5f9}
+        .cases tr.row.sel{background:#e0f2fe;border-left:3px solid #0ea5e9}
+        .urgent{color:#b91c1c;font-weight:600}
+        .human{color:#1d4ed8;font-weight:600}
+        .standard{color:#047857;font-weight:600}
+        .evi{color:#b45309;font-weight:600}
+        .k{color:#6b7280}
+        /* Detail panel */
+        .detail{position:sticky;top:95px;background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;max-height:calc(100vh - 120px);overflow-y:auto}
+        .detail h3{margin:0 0 8px;font-size:15px;letter-spacing:-0.01em}
+        .detail .d-img{width:100%;max-height:280px;object-fit:cover;border-radius:8px;background:#f1f5f9;margin-bottom:12px;display:block}
+        .detail .d-row{display:flex;justify-content:space-between;gap:12px;margin:6px 0;font-size:13px}
+        .detail .d-row b{color:#6b7280;font-weight:500}
+        .detail .d-rat{background:#f8fafc;border-radius:6px;padding:10px;font-size:13px;line-height:1.5;margin:8px 0}
+        .detail .d-sources{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#6b7280}
+        .detail .d-empty{color:#9ca3af;text-align:center;padding:40px 0;font-size:13px}
+        /* Timeline */
+        .tl{display:flex;flex-direction:column;gap:10px}
+        .tl-item{background:#fff;border:1px solid #e5e7eb;border-left:4px solid #e5e7eb;border-radius:8px;padding:12px 14px}
+        .tl-item .tl-head{display:flex;gap:10px;align-items:center;font-size:13px;margin-bottom:4px}
+        .tl-item .tl-i{color:#6b7280;font-family:ui-monospace,monospace;font-weight:700}
+        .tl-item .tl-loc{font-size:13px;color:#111;margin:2px 0}
+        .tl-item .tl-pipe{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#6b7280;margin:2px 0}
+        .tl-item .tl-r{font-size:13px;color:#374151;line-height:1.5;margin-top:6px}
+        """
+
+        script = """
+        const CASES = __CASES__;
+        const tabs = document.querySelectorAll('.tab-btn');
+        const panes = document.querySelectorAll('.tab-pane');
+        tabs.forEach(b => b.addEventListener('click', () => {
+          tabs.forEach(x => x.classList.toggle('active', x === b));
+          panes.forEach(p => p.classList.toggle('active', p.id === 'pane-' + b.dataset.tab));
+        }));
+        const detail = document.getElementById('detail');
+        const rows = document.querySelectorAll('.cases tr.row');
+        function pick(idx) {
+          rows.forEach(r => r.classList.toggle('sel', +r.dataset.idx === idx));
+          const c = CASES[idx];
+          if (!c) { detail.innerHTML = '<div class="d-empty">Pick a case on the left.</div>'; return; }
+          const img = c.image
+            ? `<img class="d-img" src="${c.image}" alt="citizen photo">`
+            : '<div class="d-img" style="display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:12px;height:160px">(photo not available)</div>';
+          const cited = c.cited && c.cited.length ? c.cited.map(s => `<code>${s}</code>`).join(', ') : '<i>none cited</i>';
+          const decCls = c.decision === 'urgent' ? 'urgent' : (c.decision === 'human_review' ? 'human' : (c.decision === 'standard' ? 'standard' : 'evi'));
+          detail.innerHTML = `
+            <h3>Case <code>${c.id}</code></h3>
+            ${img}
+            <div class="d-row"><b>Decision</b><span class="${decCls}">${c.decision}</span></div>
+            <div class="d-row"><b>Priority</b><span>${c.priority ?? 'n/a'}</span></div>
+            <div class="d-row"><b>Status</b><span>${c.status}</span></div>
+            <div class="d-row"><b>Location</b><span>${c.location}</span></div>
+            <div class="d-row"><b>Pipeline</b><span class="d-sources">${c.speakers || '(empty)'}</span></div>
+            <div class="d-rat">${c.rationale || '<i>empty rationale</i>'}</div>
+            <div class="d-row"><b>Cited sources</b><span class="d-sources">${cited}</span></div>
+          `;
+        }
+        rows.forEach(r => r.addEventListener('click', () => pick(+r.dataset.idx)));
+        if (rows.length) pick(0);
+        // Clicking Cases tab also focuses the first row for consistency.
+        document.querySelector('[data-tab=cases]').addEventListener('click', () => {
+          const sel = document.querySelector('.cases tr.sel');
+          if (!sel && rows.length) pick(0);
+        });
+        setTimeout(() => location.reload(), 30000);
+        """.replace("__CASES__", cases_json)
+
+        html_doc = (
+            "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            f"<title>RoadGuard Live Digest - {NOW.strftime('%Y-%m-%d %H:%M UTC')}</title>"
+            f"<style>{style}</style>"
+            "</head><body>"
+            f"{header}"
+            f"<section id='pane-overview' class='tab-pane active'>{tab_overview}</section>"
+            "<section id='pane-cases' class='tab-pane'>"
+            "<div class='split'>"
+            f"<div>{table_html}</div>"
+            "<aside class='detail' id='detail'>"
+            "<div class='d-empty'>Pick a case on the left.</div>"
+            "</aside>"
+            "</div></section>"
+            f"<section id='pane-timeline' class='tab-pane'>{timeline_html}</section>"
+            f"<script>{script}</script>"
+            "</body></html>"
+        )
+        return html_doc
 
     @app.get("/stats/public")
     def stats_public() -> dict:
