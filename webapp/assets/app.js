@@ -44,6 +44,17 @@ const LEVEL_BY_ACTION = {
   known_image: "info",
 };
 
+// Human-readable labels for the four RDD2022 pavement defect classes.
+// The server speaks the D-codes; the UI shows the descriptions so a
+// citizen without civil-engineering vocabulary can tell what the detector
+// just flagged.
+const HAZARD_CLASS_LABELS = {
+  D00: "Longitudinal crack",
+  D10: "Transverse crack",
+  D20: "Alligator cracking",
+  D40: "Pothole",
+};
+
 // ============================================================ BOOT
 window.addEventListener("DOMContentLoaded", async () => {
   wireLanding();
@@ -641,15 +652,16 @@ async function openUploadWithFile(file) {
       _overlayBoxes(ctx, result.detections, canvas.width);
       if (result.detections && result.detections.length) {
         const top = result.detections[0];
+        const topLabel = HAZARD_CLASS_LABELS[top.class] || top.class;
         show(`
           <div class="upload-verdict-ready">
             <div class="upload-verdict-stage">YOLO on-device found <strong>${result.detections.length}</strong> detection${result.detections.length === 1 ? "" : "s"}.</div>
-            <div class="upload-verdict-top">Top class: <strong>${top.class}</strong> at confidence <strong>${top.confidence.toFixed(2)}</strong></div>
+            <div class="upload-verdict-top">Top class: <strong>${topLabel}</strong> (<code>${top.class}</code>) at confidence <strong>${top.confidence.toFixed(2)}</strong></div>
             <div class="upload-verdict-cta">Press <em>Triage with agent</em> to send to the signal_extractor &rarr; profile_builder &rarr; rag_retriever &rarr; decision pipeline.</div>
           </div>`);
         submitBtn.disabled = false;
       } else {
-        show(`<div class="upload-verdict-empty">YOLO did not find any D00/D10/D20/D40 damage on this image. You can still send it to the agent for a human_review verdict.</div>`);
+        show(`<div class="upload-verdict-empty">YOLO did not find any road damage (potholes, cracks or alligator cracking) on this image. You can still send it to the agent for a human_review verdict.</div>`);
         submitBtn.disabled = false;
       }
     } catch (err) {
@@ -839,7 +851,7 @@ function _overlayBoxes(ctx, detections, width) {
     ctx.strokeStyle = "#ff8800";
     ctx.fillStyle = "rgba(255, 136, 0, 0.9)";
     ctx.strokeRect(d.x1, d.y1, d.x2 - d.x1, d.y2 - d.y1);
-    const label = `${d.class} ${(d.confidence * 100).toFixed(0)}%`;
+    const label = `${HAZARD_CLASS_LABELS[d.class] || d.class} ${(d.confidence * 100).toFixed(0)}%`;
     const metrics = ctx.measureText(label);
     const padding = 6;
     const textH = parseInt(ctx.font, 10) + padding;
