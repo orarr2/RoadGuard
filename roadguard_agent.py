@@ -3544,6 +3544,19 @@ def _build_decision_prompt() -> str:
         "near match is clear enough. A high similarity to a catalogued\n"
         "defect of the SAME class the detector picked is a strong signal\n"
         "the detector was right even on low confidence.\n\n"
+        "Detector sanity (bbox quality)\n"
+        "The hazard_profile may carry `quality_warnings`, including notes\n"
+        "about the top-1 detection's bounding box: a tiny area (<0.5%% of\n"
+        "the frame) is often a texture / shadow false positive; an extreme\n"
+        "aspect ratio (very long and thin) is often a crack line or shadow\n"
+        "not a defect; a bbox that hugs the frame edge usually means the\n"
+        "hazard is cropped. When you see one of these notes, downweight\n"
+        "the detector call: say in rationale that the box looks like a\n"
+        "possible false positive and prefer `needs_more_evidence` (a\n"
+        "clean closer-shot photo) over a confident urgent / standard\n"
+        "verdict. The reporter's text is the tiebreaker: if they describe\n"
+        "a real defect that matches what you see in the image, trust the\n"
+        "description even when the bbox looks noisy.\n\n"
         "Clusters (recurring issues)\n"
         "When the submission is on a main road, shows alligator cracking,\n"
         "or you want to know whether this location is already a known\n"
@@ -6778,6 +6791,40 @@ def profile_builder_node(state: RoadGuardState) -> dict:
         quality_warnings.append(
             "suspicious text in the reporter's description (approval gate forced)"
         )
+    # #14: bbox-level sanity notes for the top-1 detection. These are
+    # observations, not thresholds that override the LLM: Decision reads
+    # them and decides whether to downweight the detector call. A tiny box
+    # or a very long/narrow one on asphalt is the classic texture / shadow
+    # false positive; a box pressed against the frame edge usually means
+    # the hazard was cropped and the class guess is unreliable.
+    if detections:
+        top1 = detections[0] or {}
+        bbox = top1.get("bbox") or []
+        area = float(top1.get("area_ratio") or 0.0)
+        if 0 < area < 0.005:
+            quality_warnings.append(
+                f"top-1 bbox area {area*100:.2f}% of frame - unusually small, possible texture / shadow false positive"
+            )
+        if len(bbox) == 4:
+            x1, y1, x2, y2 = bbox
+            w = max(1e-6, float(x2) - float(x1))
+            h = max(1e-6, float(y2) - float(y1))
+            aspect = w / h
+            if aspect > 6 or aspect < (1 / 6):
+                quality_warnings.append(
+                    f"top-1 bbox aspect ratio {aspect:.2f} is unusual for a road defect (long thin band is often a line or shadow)"
+                )
+            # Edge proximity: using the detections' own coordinate frame.
+            # top1 is often normalised 0..1 by the webapp; also handle the
+            # live-drive flow that may pass unnormalised pixels against a
+            # 640x640 letterbox - in that case the thresholds still catch
+            # most 'bbox hugs the image frame' cases.
+            frame_hi = 1.0 if max(x2, y2) <= 1.5 else 640.0
+            edge_pad = 0.01 * frame_hi
+            if min(x1, y1) <= edge_pad or (frame_hi - max(x2, y2)) <= edge_pad:
+                quality_warnings.append(
+                    "top-1 bbox hugs the image edge - the hazard may be cropped, class guess less reliable"
+                )
 
     base_profile: HazardProfile = {
         "primary_class": top1_class,
