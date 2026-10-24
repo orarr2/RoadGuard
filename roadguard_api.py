@@ -1815,7 +1815,7 @@ def create_app() -> FastAPI:
             rag_ready=_rag_ready(settings),
         )
 
-    @app.post("/telemetry/event", status_code=status.HTTP_204_NO_CONTENT)
+    @app.post("/telemetry/event")
     def telemetry_event(body: dict, request: Request) -> dict:
         """Light-weight client telemetry sink: the webapp posts {event, meta}
         for every button click, field change and navigation transition. We
