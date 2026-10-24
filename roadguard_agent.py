@@ -2711,8 +2711,58 @@ def set_live_trace_sink(sink: Any) -> None:
     _LIVE_SINK.fn = sink
 
 
+_LIVE_TAG = {
+    "llm_call": "LIVE-LLM ",
+    "react_step": "LIVE-TOOL",
+    "supervisor_plan": "LIVE-SUP ",
+}
+
+
+def _live_journal_line(entry: dict) -> str:
+    """Compact one-liner so journalctl -u roadguard shows the event the
+    moment the node emits it (feeds rg-trace in real time)."""
+    kind = entry.get("kind", "?")
+    tag = _LIVE_TAG.get(kind, "LIVE     ")
+    sp = entry.get("speaker", kind)
+    ts = time.strftime("%H:%M:%S", time.localtime(entry.get("ts", time.time())))
+    content = entry.get("content") or {}
+    if not isinstance(content, dict):
+        content = {"value": str(content)[:120]}
+    # Keep the line short: a few key fields depending on kind.
+    if kind == "llm_call":
+        parts = [
+            f"model={content.get('model','?')}",
+            f"latency={content.get('latency_s','?')}s",
+            f"tokens={content.get('tokens_in','?')}/{content.get('tokens_out','?')}",
+            f"ok={content.get('ok','?')}",
+        ]
+    elif kind == "react_step":
+        parts = [
+            f"speaker={sp}",
+            f"hop={content.get('hop','?')}",
+            f"tool={content.get('tool','?')}",
+            f"ok={content.get('ok','?')}",
+        ]
+    elif kind == "supervisor_plan":
+        parts = [
+            f"concern={content.get('pipeline_concern','?')}",
+            f"difficulty={content.get('expected_difficulty','?')}",
+            f"force={content.get('force_action','?')}",
+        ]
+    else:
+        parts = [f"{k}={v}" for k, v in list(content.items())[:4]]
+    return f"[{tag}] {ts} {' '.join(parts)}"
+
+
 def emit_live_trace(entry: dict) -> None:
     entry.setdefault("ts", time.time())
+    # ALWAYS print to stdout first: this is what makes rg-trace real-time.
+    # journald captures the uvicorn stdout line immediately, so the operator
+    # sees per-LLM-call and per-tool events as they happen, not at run end.
+    try:
+        print(_live_journal_line(entry), flush=True)
+    except Exception:
+        pass
     fn = getattr(_LIVE_SINK, "fn", None)
     if fn is None:
         return
