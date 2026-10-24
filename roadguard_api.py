@@ -1836,21 +1836,118 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="image not found or expired")
         return _FileResponse(path, media_type="image/jpeg")
 
+    def _build_live_digest_html(window_hours: int = 24) -> str:
+        """Build the digest HTML on demand from the current DB, so every
+        request reflects the newest hazards (no cron lag). Mirrors the
+        shape /usr/local/bin/rg-digest writes to disk for the archived
+        snapshots, with an added 'live' badge in the title."""
+        import sqlite3, json, html, os
+        from datetime import datetime, timedelta, timezone
+        NOW = datetime.now(timezone.utc)
+        CUT = NOW - timedelta(hours=window_hours)
+        cutoff_epoch = CUT.timestamp()
+        con = sqlite3.connect("/var/lib/roadguard/roadguard.db")
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            "SELECT id, agent_decision, priority, agent_rationale, reported_at, location, "
+            "status, cited_sources_json, agent_trace_json "
+            "FROM hazards WHERE reported_at >= ? ORDER BY reported_at DESC",
+            (cutoff_epoch,),
+        ).fetchall()
+        counts = {"urgent": 0, "standard": 0, "needs_more_evidence": 0, "human_review": 0, "other": 0}
+        for r in rows:
+            k = (r["agent_decision"] or "other").lower()
+            counts[k if k in counts else "other"] += 1
+        approvals_pending = con.execute("SELECT COUNT(*) FROM approvals WHERE status='pending'").fetchone()[0]
+        evidence_open = con.execute("SELECT COUNT(*) FROM evidence_requests WHERE status='pending'").fetchone()[0]
+        parts = []
+        parts.append("<!doctype html><html><head><meta charset='utf-8'>")
+        parts.append(f"<meta http-equiv='refresh' content='30'>")  # auto-refresh every 30s
+        parts.append(f"<title>RoadGuard Live Digest - {NOW.strftime('%Y-%m-%d %H:%M UTC')}</title>")
+        parts.append("<style>body{font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 20px;color:#111}"
+                     "table{border-collapse:collapse;margin:12px 0;width:100%}"
+                     "th,td{padding:6px 10px;border:1px solid #ddd;text-align:left;font-size:14px}"
+                     "th{background:#f3f4f6}"
+                     ".k{color:#6b7280}.urgent{color:#b91c1c;font-weight:600}"
+                     ".human{color:#1d4ed8}.standard{color:#047857}.evi{color:#b45309}"
+                     ".live{background:#dcfce7;color:#166534;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600}</style></head><body>")
+        parts.append(f"<h1>RoadGuard <span class='live'>LIVE</span> Digest</h1>")
+        parts.append(f"<p class='k'>{NOW.strftime('%Y-%m-%d %H:%M UTC')} - window: last {window_hours}h (since {CUT.strftime('%Y-%m-%d %H:%M UTC')}) - page auto-refreshes every 30 seconds</p>")
+        parts.append("<h2>Headline</h2><table>")
+        parts.append(f"<tr><td>New reports from the public</td><td><b>{len(rows)}</b></td></tr>")
+        parts.append(f"<tr><td>- urgent</td><td class='urgent'>{counts['urgent']}</td></tr>")
+        parts.append(f"<tr><td>- standard queue</td><td class='standard'>{counts['standard']}</td></tr>")
+        parts.append(f"<tr><td>- needs more evidence</td><td class='evi'>{counts['needs_more_evidence']}</td></tr>")
+        parts.append(f"<tr><td>- human review</td><td class='human'>{counts['human_review']}</td></tr>")
+        parts.append(f"<tr><td>Awaiting your approval (all time)</td><td><b>{approvals_pending}</b></td></tr>")
+        parts.append(f"<tr><td>Waiting for the reporter extra photo</td><td>{evidence_open}</td></tr>")
+        parts.append("</table>")
+        if rows:
+            parts.append("<h2>Summary table</h2><table><tr><th>#</th><th>id</th><th>decision</th><th>priority</th><th>location</th><th>time</th></tr>")
+            for i, r in enumerate(rows[:50], 1):
+                ts = datetime.fromtimestamp(r["reported_at"] or 0, timezone.utc).strftime("%H:%M")
+                d = html.escape(r["agent_decision"] or "n/a")
+                cls = "urgent" if d == "urgent" else ("human" if d == "human_review" else ("standard" if d == "standard" else "evi"))
+                parts.append(
+                    f"<tr><td>{i}</td><td><code>{html.escape(r['id'][:12])}</code></td>"
+                    f"<td class='{cls}'>{d}</td>"
+                    f"<td>{r['priority'] or ''}</td>"
+                    f"<td>{html.escape(r['location'] or '')[:60]}</td>"
+                    f"<td>{ts}</td></tr>"
+                )
+            parts.append("</table>")
+            parts.append("<h2>Per-case detail</h2>")
+            for i, r in enumerate(rows[:50], 1):
+                ts = datetime.fromtimestamp(r["reported_at"] or 0, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                d = html.escape(r["agent_decision"] or "n/a")
+                cls = "urgent" if d == "urgent" else ("human" if d == "human_review" else ("standard" if d == "standard" else "evi"))
+                try:
+                    trace = json.loads(r["agent_trace_json"] or "[]")
+                    speakers = " -> ".join(dict.fromkeys(e.get("speaker", "?") for e in trace))
+                except Exception:
+                    speakers = ""
+                try:
+                    cited = json.loads(r["cited_sources_json"] or "[]")
+                    cited_html = ", ".join(html.escape(str(c)) for c in cited) or "<i>none</i>"
+                except Exception:
+                    cited_html = ""
+                parts.append(f"<div style='border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin:12px 0'>")
+                parts.append(f"<h3 style='margin:0 0 6px 0'>Case {i} - <span class='{cls}'>{d}</span> (priority {r['priority'] or 'n/a'})</h3>")
+                parts.append(f"<p class='k' style='margin:0 0 8px 0'>id <code>{html.escape(r['id'])}</code>  &middot;  {ts}  &middot;  status: {html.escape(r['status'] or '')}</p>")
+                parts.append(f"<p><b>Location:</b> {html.escape(r['location'] or '(not provided)')[:200]}</p>")
+                parts.append(f"<p><b>Rationale:</b> {html.escape(r['agent_rationale'] or '(empty)')[:400]}</p>")
+                parts.append(f"<p><b>Pipeline:</b> {html.escape(speakers)}</p>")
+                parts.append(f"<p><b>Cited sources:</b> {cited_html}</p>")
+                img_path = f"/var/lib/roadguard/images/{r['id']}.jpg"
+                if os.path.isfile(img_path):
+                    parts.append(f"<p><img src='/images/{html.escape(r['id'])}' alt='citizen photo' "
+                                 f"style='max-width:420px;max-height:320px;border:1px solid #ddd;border-radius:6px'></p>")
+                else:
+                    parts.append(f"<p class='k'>(no image on disk - uploaded before image upload shipped, or expired after 7 days)</p>")
+                parts.append("</div>")
+        else:
+            parts.append("<p><i>No hazards reported in the last 24 hours.</i></p>")
+        parts.append(f"<hr><p class='k'>Live build at {NOW.strftime('%Y-%m-%d %H:%M:%S UTC')}. Private page - gated to Tailscale / loopback only.</p>")
+        parts.append("</body></html>")
+        return "".join(parts)
+
     @app.get("/digest/latest", response_class=HTMLResponse)
-    def digest_latest() -> HTMLResponse:
-        """Serve today's digest HTML (built by /usr/local/bin/rg-digest; cron
-        at 05:00 and 17:00 UTC). Returns 404 if today's file does not exist yet."""
-        from pathlib import Path as _Path
-        import datetime as _dt
-        day = _dt.datetime.utcnow().strftime("%Y-%m-%d")
-        path = _Path("/var/lib/roadguard/digests") / f"{day}.html"
-        if not path.is_file():
-            raise HTTPException(status_code=404, detail=f"digest for {day} not available yet")
-        return HTMLResponse(content=path.read_text(encoding="utf-8"))
+    def digest_latest(request: Request) -> HTMLResponse:
+        """Live digest - rebuilt from the DB on every request, so each
+        new hazard shows up as soon as the pipeline writes its verdict.
+        Private: gated to Tailscale / loopback (ROADGUARD_PRIVATE_HOSTS)
+        exactly like /trace and /supervisor, so only internal operators
+        see the full case detail."""
+        if not _is_private_host(request):
+            raise HTTPException(status_code=404, detail="not found")
+        return HTMLResponse(content=_build_live_digest_html(window_hours=24))
 
     @app.get("/digest/{date}", response_class=HTMLResponse)
-    def digest_html(date: str) -> HTMLResponse:
-        """Serve the digest HTML for a specific date (YYYY-MM-DD)."""
+    def digest_html(date: str, request: Request) -> HTMLResponse:
+        """Serve the archived digest HTML for a specific date (YYYY-MM-DD),
+        built by rg-digest cron at 05:00 and 17:00 UTC. Also private."""
+        if not _is_private_host(request):
+            raise HTTPException(status_code=404, detail="not found")
         from pathlib import Path as _Path
         import re as _re
         if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", date or ""):
