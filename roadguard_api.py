@@ -1837,17 +1837,27 @@ def create_app() -> FastAPI:
         return _FileResponse(path, media_type="image/jpeg")
 
     @app.get("/digest/latest", response_class=HTMLResponse)
-    @app.get("/digest/{date}", response_class=HTMLResponse)
-    def digest_html(date: str | None = None) -> HTMLResponse:
-        """Serve the pre-generated daily digest HTML (built by /usr/local/bin/rg-digest,
-        cron at 05:00 and 17:00 UTC). /digest/latest = today, /digest/YYYY-MM-DD = that date.
-        Returns 404 if the file does not exist yet."""
+    def digest_latest() -> HTMLResponse:
+        """Serve today's digest HTML (built by /usr/local/bin/rg-digest; cron
+        at 05:00 and 17:00 UTC). Returns 404 if today's file does not exist yet."""
         from pathlib import Path as _Path
         import datetime as _dt
-        day = (date or _dt.datetime.utcnow().strftime("%Y-%m-%d"))
+        day = _dt.datetime.utcnow().strftime("%Y-%m-%d")
         path = _Path("/var/lib/roadguard/digests") / f"{day}.html"
         if not path.is_file():
             raise HTTPException(status_code=404, detail=f"digest for {day} not available yet")
+        return HTMLResponse(content=path.read_text(encoding="utf-8"))
+
+    @app.get("/digest/{date}", response_class=HTMLResponse)
+    def digest_html(date: str) -> HTMLResponse:
+        """Serve the digest HTML for a specific date (YYYY-MM-DD)."""
+        from pathlib import Path as _Path
+        import re as _re
+        if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", date or ""):
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+        path = _Path("/var/lib/roadguard/digests") / f"{date}.html"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail=f"digest for {date} not available")
         return HTMLResponse(content=path.read_text(encoding="utf-8"))
 
     @app.post("/telemetry/event")
