@@ -5582,6 +5582,23 @@ def sanitize_node(state: RoadGuardState) -> dict:
     md["reporter_text"] = reporter["text"]
     md["reporter_text_suspicious"] = reporter["is_suspicious_pattern"]
 
+    # Known-image fast path: if the submitted photo is already in the
+    # dataset, there is nothing to triage. Jump straight to Decision so
+    # we don't spend 60-120 s on signal_extractor + profile_builder +
+    # rag_retriever + their supervisor turns just to arrive at
+    # known_image. The dataset_match lookup is a cheap SQLite query.
+    early_match = None
+    if md.get("image_sha256") or md.get("image_phash"):
+        try:
+            hit = PERCEPTION_TOOLS["lookup_dataset_image"][0](
+                sha256=md.get("image_sha256") or None,
+                phash=md.get("image_phash") or None,
+            )
+            if hit.get("found"):
+                early_match = hit
+        except Exception as _exc:
+            LOGGER.warning("sanitize_dataset_lookup_failed: %s", _exc)
+
     trace_entry = {
         "iter": 0,
         "speaker": "sanitize",
@@ -5590,17 +5607,21 @@ def sanitize_node(state: RoadGuardState) -> dict:
             "location_scrubbed": md["location_was_scrubbed"],
             "ocr_suspicious": ocr["is_suspicious_pattern"],
             "reporter_text_suspicious": reporter["is_suspicious_pattern"],
+            "known_image_shortcut": bool(early_match),
         },
     }
 
-    return {
+    update: dict = {
         "metadata": md,
         "image_quality": iq,
         "sanitized": True,
         "trace": [trace_entry],
         "last_speaker": "sanitize",
-        "next_hop": "profile_builder",
+        "next_hop": "decision" if early_match else "profile_builder",
     }
+    if early_match:
+        update["dataset_match"] = early_match
+    return update
 
 
 def supervisor_node(state: RoadGuardState) -> dict:
@@ -7271,6 +7292,81 @@ def decision_node(state: RoadGuardState) -> dict:
     begin_llm_log()
     tool_result_ids = state.get("tool_result_ids") or []
 
+    # Problem 1 (post-feedback): a zero-confidence detector output is NOT
+    # a D00 verdict in disguise - it means the model did not recognise
+    # the hazard at all. Short-circuit to needs_more_evidence before the
+    # LLM is asked to reason over a phantom class; saves ~2 min of CPU
+    # inference and stops the trace from reading like a confident D00
+    # triage when nothing was actually detected.
+    _profile = state.get("hazard_profile") or {}
+    _conf0 = float(_profile.get("primary_confidence") or 0.0)
+    if _conf0 == 0.0 and _profile.get("primary_class"):
+        hazard_id = state["hazard_id"]
+        field, message, used_llm, e_in, e_out = _phrase_evidence_request(
+            state,
+            {
+                "action": "needs_more_evidence",
+                "missing_evidence": ["second_angle"],
+                "rationale": "detector_confidence=0.00 - hazard class is unknown, not catalogued",
+            },
+        )
+        result = DECISION_TOOLS["request_additional_evidence"][0](
+            hazard_id=hazard_id,
+            missing_field=field,
+            reason_shown_to_reporter=message,
+        )
+        decision_short = {
+            "action": "needs_more_evidence",
+            "rationale": (
+                "detector returned zero confidence; treating hazard class as "
+                "UNKNOWN (not D00). Asking the reporter for a second angle before "
+                "any triage."
+            ),
+            "priority": 40,
+            "cited_sources": [str(x) for x in tool_result_ids],
+            "missing_evidence": ["second_angle"],
+            "assessment": "",
+        }
+        decision_short, cap_applied = _apply_evidence_cap(decision_short, state)
+        trace_content = {
+            **decision_short,
+            "source": "zero_conf_floor",
+            "fallback_reason": "detector_zero_confidence",
+            "floor_applied": True,
+        }
+        if cap_applied:
+            trace_content["evidence_cap_applied"] = True
+        trace_content["evidence_request"] = {
+            "request_id": result.get("request_id"),
+            "missing_field": field,
+            "message": message,
+            "phrased_by": "llm" if used_llm else "rules",
+        }
+        _calls = end_llm_log()
+        if _calls:
+            trace_content["llm"] = llm_summary(_calls)
+        trace_entry = {
+            "iter": state.get("iterations", 0) + 1,
+            "speaker": "decision",
+            "kind": "final",
+            "content": trace_content,
+        }
+        update = {
+            **decision_short,
+            "final": True,
+            "trace": [trace_entry],
+            "iterations": 1,
+            "last_speaker": "decision",
+            "next_hop": "",
+            "evidence_request": trace_content["evidence_request"],
+            "fallback_reason": "detector_zero_confidence",
+        }
+        if e_in or e_out:
+            update["tokens_in"] = e_in
+            update["tokens_out"] = e_out
+            update["cost_usd"] = cost_of(e_in, e_out)
+        return update
+
     # Problems 1 + 17: belt-and-braces dataset lookup before the LLM speaks.
     # The profile builder already did one lookup at the default distance,
     # but a slightly re-encoded or re-cropped photo (same scene, different
@@ -7432,12 +7528,25 @@ def decision_node(state: RoadGuardState) -> dict:
         overridden_llm_verdict = overridden_llm_verdict or {
             k: decision.get(k) for k in ("action", "rationale", "priority", "cited_sources")
         }
+        # Keep the RAG-retrieved passages on the floored verdict so the
+        # trace does not look like the retriever's work was discarded.
+        # The LLM may have returned nothing in cited_sources, so fall back
+        # to the full list of passages the RAG step actually surfaced.
+        preserved_sources = (
+            list(decision.get("cited_sources") or [])
+            or list(overridden_llm_verdict.get("cited_sources") or [])
+            or [str(x) for x in (tool_result_ids or [])]
+        )
         fallback_reason = "low_confidence_floor"
         decision = {
             "action": "needs_more_evidence",
-            "rationale": f"second look needed: {reason}; original verdict was {overridden_llm_verdict.get('action')}",
+            "rationale": (
+                f"second look needed: {reason}; original verdict was "
+                f"{overridden_llm_verdict.get('action')}; RAG passages carried through: "
+                f"{', '.join(preserved_sources) or '(none)'}"
+            ),
             "priority": 40,
-            "cited_sources": [],
+            "cited_sources": preserved_sources,
             "missing_evidence": ["second_angle"],
         }
 

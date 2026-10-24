@@ -863,6 +863,7 @@ async function submitUploadedImage() {
   verdictBox.innerHTML = pending
     ? `<div class="upload-verdict-empty">${spinnerHtml}Sending the new photo, the agent continues from where it paused...</div>`
     : `<div class="upload-verdict-empty">${spinnerHtml}Submitted. Agents are working on your case; the verdict will appear below in 1-3 minutes.</div>`;
+  const resumingHazardId = pending ? pending.hazard_id : null;
   try {
     const resp = await fetchJson(path, {
       method: "POST",
@@ -891,6 +892,21 @@ async function submitUploadedImage() {
       // auth.js has already dropped the token and opened the sign-in modal.
       state.pendingAfterSignin = () => submitUploadedImage();
       verdictBox.innerHTML = `<div class="upload-verdict-empty">Your session expired. Sign in to send this photo.</div>`;
+    } else if (pending && resumingHazardId) {
+      // Evidence resume is a synchronous call that can run 2-3 minutes
+      // while the resumed graph re-executes; the Cloudflare quick tunnel
+      // caps a single HTTP request at ~100 s and returns 502/504. The
+      // agent is still running on the server, so fall over to polling
+      // /report/{hazard_id} the same way the async submit does. If the
+      // agent paused for another round of evidence (unlikely - cap is
+      // one per case), the pending request stays. Otherwise clear it.
+      verdictBox.innerHTML = `<div class="upload-verdict-empty">Server took the photo but kept the connection too long (the tunnel caps at 100s). Waiting for the resumed agent to finish...</div>`;
+      try {
+        const pausedForEvidence = await pollAsyncHazard(resumingHazardId, verdictBox);
+        if (!pausedForEvidence) clearPendingEvidence();
+      } catch (pollErr) {
+        verdictBox.innerHTML = `<div class="upload-verdict-empty">Could not reach the server after the second photo was sent. The agent may still be finishing on its own; check back in a minute.</div>`;
+      }
     } else {
       verdictBox.innerHTML = `<div class="upload-verdict-empty">Agent call failed: ${(err && err.message) || err}</div>`;
     }

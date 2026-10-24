@@ -160,7 +160,7 @@ async function get(path) {
   return r.json();
 }
 
-let current = null, printed = 0, active = false, timer = null, lastErr = "", idleShown = false;
+let current = null, printed = 0, active = false, timer = null, lastErr = "", idleShown = false, justCompleted = false;
 
 async function tick() {
   try {
@@ -174,7 +174,7 @@ async function tick() {
         if (!idleShown) { print("(no hazards yet - upload one from the webapp)"); idleShown = true; }
         return;
       }
-      if (newest !== current) { current = newest; printed = 0; active = true; print(""); }
+      if (newest !== current) { current = newest; printed = 0; active = true; justCompleted = false; print(""); }
       else return;
     }
     const rep = await get("/report/" + encodeURIComponent(current));
@@ -182,11 +182,18 @@ async function tick() {
     for (let i = printed; i < lines.length; i++) print(lines[i], classOf(lines[i]));
     printed = lines.length;
     const st = (rep.verdict || {}).status;
+    const wasActive = active;
     active = (st === "queued" || st === "processing");
+    if (wasActive && !active) justCompleted = true;
     cursor.classList.toggle("on", active);
     lastErr = "";
   } catch (err) {
     if (err.message === "401") { showPrompt(); return; }
+    // After a run finishes, the tunnel's 100 s idle timeout can throw
+    // 502/504 on the next poll. Those are transient and come after a
+    // successful DONE line, so swallow them silently; only surface a
+    // real error during an active run.
+    if (justCompleted && (err.message === "502" || err.message === "504" || err.message === "Failed to fetch")) return;
     if (err.message !== lastErr) { print("error: " + err.message, "err"); lastErr = err.message; }
   }
 }
