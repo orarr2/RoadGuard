@@ -97,8 +97,9 @@ sample_images_real/
 # Office lock files
 ~$*
 
-# Tunnel-specific metadata (exposes current public URL / VM provider / region)
-webapp/tunnel-url.json
+# Tunnel URL is needed by the webapp at runtime, so it stays tracked.
+# Keep the file lean: just {"origin": "..."}; no infra notes, no region, no provider.
+# webapp/tunnel-url.json  (intentionally NOT ignored)
 
 # Local assistant scratchpad (per-session config)
 .claude/
