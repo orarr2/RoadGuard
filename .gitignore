@@ -103,3 +103,9 @@ webapp/tunnel-url.json
 # Local assistant scratchpad (per-session config)
 .claude/
 
+# VM-specific deployment scripts (reveal Oracle A1.Flex setup)
+deploy/
+
+# Team-internal meeting binaries (large, not needed for repo)
+docs/team-meeting/
+
