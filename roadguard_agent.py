@@ -3532,6 +3532,16 @@ def _build_decision_prompt() -> str:
         "near match is clear enough. A high similarity to a catalogued\n"
         "defect of the SAME class the detector picked is a strong signal\n"
         "the detector was right even on low confidence.\n\n"
+        "System health (own-state awareness)\n"
+        "When a run feels unusually fast or unusually slow, or your tool\n"
+        "calls fail, call `check_system_health`. It reports which ollama\n"
+        "models are loaded, how much host RAM is in use, whether the\n"
+        "pipeline has silently fallen back to the offline stub, and the\n"
+        "ollama reachability. If `status` is 'degraded', name it in your\n"
+        "assessment (e.g. 'host memory at 92%%, verdict made under\n"
+        "constrained conditions') so the supervisor can decide whether to\n"
+        "re-triage later. If `stub_mode` is true, the LLM calls are not\n"
+        "real; your verdict should warn the supervisor explicitly.\n\n"
         "Tool calls\n"
         "When you call a tool, write one sentence of reasoning in the message\n"
         "content (why this tool now); it is shown in the live trace.\n\n"
@@ -5057,6 +5067,93 @@ def lookup_dataset_image(
     }
 
 
+SYSTEM_HEALTH_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "check_system_health",
+        "description": (
+            "Report the system's current operating condition: ollama loaded "
+            "models and their memory footprint, host RAM usage, whether the "
+            "pipeline is running on real LLMs or has silently fallen back to "
+            "the offline stub, and recent LLM latency. Use this when a "
+            "verdict feels off and you want to know whether the pipeline is "
+            "healthy, or to flag in the assessment that the system is "
+            "degraded (so the supervisor knows the call was made under "
+            "constrained conditions)."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
+
+def check_system_health() -> dict[str, Any]:
+    """Snapshot the host + ollama state. Never raises."""
+    import urllib.request as _ureq
+    import urllib.error as _uerr
+
+    status = "ok"
+    notes: list[str] = []
+
+    # 1. ollama probe
+    ollama_url = os.environ.get("OLLAMA_BASE_URL") or "http://127.0.0.1:11434"
+    loaded_models: list[dict[str, Any]] = []
+    ollama_reachable = False
+    try:
+        req = _ureq.Request(ollama_url.rstrip("/") + "/api/ps")
+        with _ureq.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8") or "{}")
+        ollama_reachable = True
+        for m in (data.get("models") or [])[:10]:
+            loaded_models.append({
+                "name": m.get("name"),
+                "size_mb": round(int(m.get("size", 0)) / (1024 * 1024), 1),
+                "quantization": (m.get("details") or {}).get("quantization_level"),
+            })
+    except (_uerr.URLError, OSError, ValueError, TimeoutError) as exc:
+        notes.append(f"ollama unreachable: {type(exc).__name__}")
+        status = "degraded"
+
+    # 2. Host RAM (works on Linux via /proc/meminfo; no dependency on psutil).
+    mem_total_mb = mem_available_mb = mem_used_pct = None
+    try:
+        meminfo: dict[str, int] = {}
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2:
+                    meminfo[parts[0].rstrip(":")] = int(parts[1])  # kB
+        if "MemTotal" in meminfo:
+            mem_total_mb = round(meminfo["MemTotal"] / 1024, 0)
+            avail_kb = meminfo.get("MemAvailable", meminfo.get("MemFree", 0))
+            mem_available_mb = round(avail_kb / 1024, 0)
+            mem_used_pct = round((1 - avail_kb / meminfo["MemTotal"]) * 100, 1)
+            if mem_used_pct >= 90:
+                notes.append(f"host memory high: {mem_used_pct}%")
+                status = "degraded"
+    except (OSError, ValueError) as exc:
+        notes.append(f"meminfo unavailable: {type(exc).__name__}")
+
+    # 3. Stub-mode (silent fallback) check. If ROADGUARD_USE_LIVE is off,
+    # every chat() call is answered by the offline stub and the trace will
+    # look normal while nothing real is happening.
+    stub_mode = not _use_live()
+    if stub_mode:
+        notes.append("LLM calls are being answered by the offline stub (ROADGUARD_USE_LIVE=0)")
+        status = "degraded"
+
+    return {
+        "status": status,
+        "stub_mode": stub_mode,
+        "ollama_reachable": ollama_reachable,
+        "ollama_models_loaded": len(loaded_models),
+        "ollama_models": loaded_models,
+        "host_memory_total_mb": mem_total_mb,
+        "host_memory_available_mb": mem_available_mb,
+        "host_memory_used_pct": mem_used_pct,
+        "notes": notes,
+    }
+
+
 RANK_SIMILARITY_SCHEMA = {
     "type": "function",
     "function": {
@@ -5171,7 +5268,12 @@ def _known_image_decision(match: dict) -> dict:
     }
 
 
-_READ_ONLY_DECISION_TOOLS = ("check_hazard_severity", "lookup_dataset_image", "rank_similarity_to_catalog")
+_READ_ONLY_DECISION_TOOLS = (
+    "check_hazard_severity",
+    "lookup_dataset_image",
+    "rank_similarity_to_catalog",
+    "check_system_health",
+)
 
 
 def _short_json(obj: Any, limit: int) -> str:
@@ -5210,6 +5312,7 @@ DECISION_TOOLS = {
     "check_hazard_severity": (check_hazard_severity, SEVERITY_SCHEMA),
     "lookup_dataset_image": (lookup_dataset_image, DATASET_SCHEMA),
     "rank_similarity_to_catalog": (rank_similarity_to_catalog, RANK_SIMILARITY_SCHEMA),
+    "check_system_health": (check_system_health, SYSTEM_HEALTH_SCHEMA),
     "request_additional_evidence": (request_additional_evidence, EVIDENCE_SCHEMA),
     "create_draft_work_order": (create_draft_work_order, DRAFT_SCHEMA),
     "flag_for_urgent_review": (flag_for_urgent_review, FLAG_SCHEMA),

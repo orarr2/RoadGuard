@@ -1827,6 +1827,17 @@ def create_app() -> FastAPI:
             rag_ready=_rag_ready(settings),
         )
 
+    @app.get("/health/system")
+    def health_system(request: Request) -> dict:
+        """Deeper health snapshot: loaded ollama models and their memory
+        footprint, host RAM usage, stub-mode flag. Not for the citizen page -
+        shown on the operator trace / digest and callable by the Decision
+        agent as a tool (check_system_health) when a verdict feels off."""
+        if not _is_private_host(request):
+            raise HTTPException(status_code=404, detail="Not Found")
+        from roadguard_agent import check_system_health as _chk
+        return _chk()
+
     @app.get("/images/{hazard_id}")
     def hazard_image(hazard_id: str) -> Any:
         """Serve the stored citizen photo for a hazard. Returns 404 if the
