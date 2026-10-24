@@ -71,57 +71,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
   resolveApiOrigin().catch(() => {});
   track("page_load", { url: location.pathname, ua: navigator.userAgent.slice(0, 80) });
-  loadPublicStats();
   loadMyReports();
 });
-
-// ============================================================ PUBLIC STATS
-async function loadPublicStats() {
-  const totalEl   = document.getElementById("stats-total");
-  const openEl    = document.getElementById("stats-open");
-  const closedEl  = document.getElementById("stats-closed");
-  const medianEl  = document.getElementById("stats-median");
-  const decEl     = document.getElementById("stats-by-decision");
-  const classEl   = document.getElementById("stats-by-class");
-  const asOfEl    = document.getElementById("stats-asof");
-  if (!totalEl) return;
-  try {
-    const origin = await resolveApiOrigin();
-    const r = await fetch(`${origin}/stats/public`, { credentials: "omit" });
-    if (!r.ok) throw new Error(`http ${r.status}`);
-    const s = await r.json();
-    totalEl.textContent  = String(s.total_reports ?? 0);
-    openEl.textContent   = String(s.open_now ?? 0);
-    closedEl.textContent = String(s.closed_this_week ?? 0);
-    medianEl.textContent = s.median_resolve_hours == null ? "-" : String(s.median_resolve_hours);
-    renderStatsBars(decEl, s.by_decision || {});
-    renderStatsBars(classEl, s.by_class || {});
-    if (asOfEl) asOfEl.textContent = `as of ${s.as_of || "-"}`;
-  } catch (err) {
-    if (asOfEl) asOfEl.textContent = "stats unavailable right now";
-  }
-}
-
-function renderStatsBars(host, obj) {
-  if (!host) return;
-  host.innerHTML = "";
-  const entries = Object.entries(obj).sort((a, b) => b[1] - a[1]);
-  if (!entries.length) {
-    host.innerHTML = '<div class="stats-bar-row" style="color:var(--text-mid)"><em>no data yet</em></div>';
-    return;
-  }
-  const max = Math.max(...entries.map(e => e[1]));
-  for (const [k, v] of entries) {
-    const row = document.createElement("div");
-    row.className = "stats-bar-row";
-    const pct = max > 0 ? Math.round((v / max) * 100) : 0;
-    row.innerHTML =
-      `<span class="stats-bar-key">${escapeHtml(k)}</span>` +
-      `<span class="stats-bar-track"><span class="stats-bar-fill" style="width:${pct}%"></span></span>` +
-      `<span class="stats-bar-val">${v}</span>`;
-    host.appendChild(row);
-  }
-}
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -170,51 +121,12 @@ async function loadMyReports() {
 function wireHeroSlideshow() {
   const slides = document.querySelectorAll(".hero-slide");
   if (!slides.length) return;
-  // Rotate through the 25 real pavement images with crossfade + per-slide
-  // metadata on the HUD so it reads as a live detector feed, not a static shot.
-  const META = [
-    { count: 2, pct: 72, pill: "D40 - standard",           level: "warn" },
-    { count: 1, pct: 86, pill: "D40 - urgent",             level: "bad"  },
-    { count: 1, pct: 54, pill: "D20 - standard",           level: "good" },
-    { count: 3, pct: 88, pill: "D40 - urgent",             level: "bad"  },
-    { count: 1, pct: 48, pill: "D10 - standard",           level: "good" },
-    { count: 1, pct: 65, pill: "D40 - needs more evidence",level: "warn" },
-    { count: 2, pct: 92, pill: "D20 - standard",           level: "good" },
-    { count: 1, pct: 76, pill: "D40 - urgent",             level: "bad"  },
-    { count: 1, pct: 59, pill: "D00 - standard",           level: "good" },
-    { count: 2, pct: 83, pill: "D20 - standard",           level: "good" },
-    { count: 1, pct: 94, pill: "D40 - urgent",             level: "bad"  },
-    { count: 1, pct: 42, pill: "D10 - needs more evidence",level: "warn" },
-    { count: 1, pct: 71, pill: "D40 - urgent",             level: "bad"  },
-    { count: 2, pct: 68, pill: "D20 - standard",           level: "good" },
-    { count: 1, pct: 55, pill: "D00 - standard",           level: "good" },
-    { count: 1, pct: 81, pill: "D40 - urgent",             level: "bad"  },
-    { count: 1, pct: 63, pill: "D10 - standard",           level: "good" },
-    { count: 3, pct: 89, pill: "D40 - urgent",             level: "bad"  },
-    { count: 1, pct: 50, pill: "D20 - needs more evidence",level: "warn" },
-    { count: 1, pct: 77, pill: "D40 - urgent",             level: "bad"  },
-    { count: 2, pct: 85, pill: "D20 - standard",           level: "good" },
-    { count: 1, pct: 46, pill: "D00 - standard",           level: "good" },
-    { count: 1, pct: 95, pill: "D40 - urgent",             level: "bad"  },
-    { count: 1, pct: 58, pill: "D10 - standard",           level: "good" },
-  ];
-  const PILL_LVL = { bad: "bad", warn: "warn", good: "good" };
-  const countEl  = document.getElementById("hero-hud-count");
-  const fillEl   = document.getElementById("hero-hud-fill");
-  const pillEl   = document.getElementById("hero-hud-pill");
   let i = 0;
   const update = () => {
     const next = (i + 1) % slides.length;
     slides[i].classList.remove("hero-slide--active");
     slides[next].classList.add("hero-slide--active");
     i = next;
-    const m = META[i] || META[0];
-    if (countEl) countEl.textContent = String(m.count);
-    if (fillEl)  fillEl.style.width = m.pct + "%";
-    if (pillEl) {
-      pillEl.textContent = m.pill;
-      pillEl.className = "hero-hud-pill hero-hud-pill--" + (PILL_LVL[m.level] || "bad");
-    }
   };
   setInterval(update, 3500);
 }

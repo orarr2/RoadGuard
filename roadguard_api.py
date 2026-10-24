@@ -1904,15 +1904,17 @@ def create_app() -> FastAPI:
             if d == "needs_more_evidence": return "evi"
             return "k"
 
-        tab_overview = (
-            "<div class='kpi-grid'>"
+        # Overview tiles are inlined above the Cases table so the operator
+        # sees the headline numbers and the cases themselves on one scroll.
+        kpi_strip = (
+            "<div class='kpi-strip'>"
             f"<div class='kpi'><div class='kpi-v'>{len(rows)}</div><div class='kpi-l'>New reports</div></div>"
             f"<div class='kpi urgent'><div class='kpi-v'>{counts['urgent']}</div><div class='kpi-l'>Urgent</div></div>"
             f"<div class='kpi standard'><div class='kpi-v'>{counts['standard']}</div><div class='kpi-l'>Standard queue</div></div>"
             f"<div class='kpi human'><div class='kpi-v'>{counts['human_review']}</div><div class='kpi-l'>Human review</div></div>"
             f"<div class='kpi evi'><div class='kpi-v'>{counts['needs_more_evidence']}</div><div class='kpi-l'>Needs more evidence</div></div>"
             f"<div class='kpi'><div class='kpi-v'>{approvals_pending}</div><div class='kpi-l'>Approvals pending</div></div>"
-            f"<div class='kpi'><div class='kpi-v'>{evidence_open}</div><div class='kpi-l'>Awaiting reporter photo</div></div>"
+            f"<div class='kpi'><div class='kpi-v'>{evidence_open}</div><div class='kpi-l'>Awaiting photo</div></div>"
             "</div>"
         )
 
@@ -1942,36 +1944,37 @@ def create_app() -> FastAPI:
         else:
             table_html = "<p><i>No hazards reported in the last {h} hours.</i></p>".replace("{h}", str(window_hours))
 
-        # Timeline tab: a vertical list of the newest N cases with their speakers chain.
+        # Timeline tab: an accordion - each case shows only its headline
+        # line, click to expand and see the rationale + pipeline chain.
         tl_parts = []
         for i, c in enumerate(cases, 1):
             ts = datetime.fromtimestamp(c["reported_at"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             d = html.escape(c["decision"])
             cls = _css_for(c["decision"])
             tl_parts.append(
-                f"<div class='tl-item'>"
-                f"<div class='tl-head'><span class='tl-i'>{i}</span>"
+                f"<details class='tl-item'>"
+                f"<summary class='tl-head'><span class='tl-i'>{i}</span>"
                 f"<span class='{cls}'>{d}</span>"
-                f"<span class='k'>priority {c['priority'] or 'n/a'} &middot; {ts} &middot; {html.escape(c['status'])}</span></div>"
-                f"<div class='tl-loc'>{html.escape(c['location'])}</div>"
+                f"<span class='k'>priority {c['priority'] or 'n/a'} &middot; {ts} &middot; {html.escape(c['status'])} &middot; {html.escape(c['location'])}</span></summary>"
+                f"<div class='tl-body'>"
                 f"<div class='tl-pipe'>{html.escape(c['speakers'])}</div>"
-                f"<div class='tl-r'>{html.escape((c['rationale'] or '(empty rationale)'))[:300]}</div>"
+                f"<div class='tl-r'>{html.escape((c['rationale'] or '(empty rationale)'))[:600]}</div>"
                 f"</div>"
+                f"</details>"
             )
         timeline_html = "<div class='tl'>" + ("".join(tl_parts) or "<p><i>No cases to show.</i></p>") + "</div>"
 
         header = (
             f"<header class='topbar'>"
-            f"<h1>RoadGuard <span class='live'>LIVE</span> Digest</h1>"
+            f"<h1>RoadGuard <span class='live'>LIVE</span></h1>"
             f"<div class='nav-right'>"
             f"<a href='/roadguard/trace' class='np'>Live trace &rarr;</a>"
             f"<a href='/roadguard/supervisor' class='np'>Supervisor inbox &rarr;</a>"
-            f"<span class='k'>{NOW.strftime('%Y-%m-%d %H:%M UTC')} - last {window_hours}h - auto-refresh 30s</span>"
+            f"<span class='k'>{NOW.strftime('%Y-%m-%d %H:%M UTC')} - last {window_hours}h <span id='refresh-dot'>&middot; auto-refresh 30s</span></span>"
             f"</div>"
             f"</header>"
             f"<nav class='tabs' id='tabs'>"
-            f"<button class='tab-btn active' data-tab='overview'>Overview</button>"
-            f"<button class='tab-btn' data-tab='cases'>Cases ({len(rows)})</button>"
+            f"<button class='tab-btn active' data-tab='cases'>Cases ({len(rows)})</button>"
             f"<button class='tab-btn' data-tab='timeline'>Timeline</button>"
             f"</nav>"
         )
@@ -1980,43 +1983,43 @@ def create_app() -> FastAPI:
         :root{--bg:#0f172a;--panel:#111827;--line:#1f2937;--text:#e5e7eb;--muted:#9ca3af;--brand:#38bdf8;--brand2:#22c55e;}
         *{box-sizing:border-box}
         html,body{margin:0;background:#f8fafc;color:#111;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
-        .topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:#fff;border-bottom:1px solid #e5e7eb;position:sticky;top:0;z-index:5}
-        .topbar h1{margin:0;font-size:20px;font-weight:800;letter-spacing:-0.01em}
+        .topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:#fff;border-bottom:1px solid #e5e7eb;position:sticky;top:0;z-index:5;min-height:49px}
+        .topbar h1{margin:0;font-size:20px;font-weight:800;letter-spacing:-0.01em;white-space:nowrap}
         .live{background:#dcfce7;color:#166534;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;margin:0 6px}
-        .nav-right{display:flex;align-items:center;gap:14px;font-size:13px;color:#6b7280}
-        .np{color:#0ea5e9;text-decoration:none;font-weight:600}
+        .nav-right{display:flex;align-items:center;gap:14px;font-size:13px;color:#6b7280;flex-wrap:wrap;justify-content:flex-end}
+        .np{color:#0ea5e9;text-decoration:none;font-weight:600;white-space:nowrap}
         .np:hover{text-decoration:underline}
-        .tabs{display:flex;gap:4px;padding:0 20px;background:#fff;border-bottom:1px solid #e5e7eb;position:sticky;top:49px;z-index:4}
+        .tabs{display:flex;gap:4px;padding:0 20px;background:#fff;border-bottom:1px solid #e5e7eb;position:sticky;top:49px;z-index:4;min-height:44px}
         .tab-btn{appearance:none;background:transparent;border:0;border-bottom:3px solid transparent;padding:10px 16px;font:inherit;font-size:14px;cursor:pointer;color:#6b7280;font-weight:600}
         .tab-btn.active{color:#0ea5e9;border-bottom-color:#0ea5e9}
         .tab-btn:hover{color:#111}
         .tab-pane{display:none;padding:20px}
         .tab-pane.active{display:block}
-        /* Overview */
-        .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
-        .kpi{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;text-align:center}
-        .kpi-v{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:28px;font-weight:800;color:#0ea5e9}
+        /* KPI strip above the Cases table */
+        .kpi-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:16px}
+        .kpi{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:10px 12px;text-align:center}
+        .kpi-v{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:22px;font-weight:800;color:#0ea5e9;line-height:1.1}
         .kpi.urgent .kpi-v{color:#b91c1c}
         .kpi.human .kpi-v{color:#1d4ed8}
         .kpi.standard .kpi-v{color:#047857}
         .kpi.evi .kpi-v{color:#b45309}
-        .kpi-l{font-size:12px;color:#6b7280;margin-top:4px}
+        .kpi-l{font-size:11px;color:#6b7280;margin-top:2px}
         /* Cases split */
         .split{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:16px;align-items:start}
         @media (max-width:980px){.split{grid-template-columns:1fr}}
         .cases{width:100%;background:#fff;border:1px solid #e5e7eb;border-radius:10px;border-collapse:separate;border-spacing:0;overflow:hidden}
         .cases th,.cases td{padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:left;font-size:13px}
-        .cases th{background:#f8fafc;color:#6b7280;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:0.03em;position:sticky;top:85px;z-index:1}
+        .cases th{background:#f8fafc;color:#6b7280;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:0.03em}
         .cases tr.row{cursor:pointer}
         .cases tr.row:hover{background:#f1f5f9}
-        .cases tr.row.sel{background:#e0f2fe;border-left:3px solid #0ea5e9}
+        .cases tr.row.sel{background:#e0f2fe;box-shadow:inset 3px 0 0 #0ea5e9}
         .urgent{color:#b91c1c;font-weight:600}
         .human{color:#1d4ed8;font-weight:600}
         .standard{color:#047857;font-weight:600}
         .evi{color:#b45309;font-weight:600}
         .k{color:#6b7280}
         /* Detail panel */
-        .detail{position:sticky;top:95px;background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;max-height:calc(100vh - 120px);overflow-y:auto}
+        .detail{position:sticky;top:110px;background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;max-height:calc(100vh - 130px);overflow-y:auto}
         .detail h3{margin:0 0 8px;font-size:15px;letter-spacing:-0.01em}
         .detail .d-img{width:100%;max-height:280px;object-fit:cover;border-radius:8px;background:#f1f5f9;margin-bottom:12px;display:block}
         .detail .d-row{display:flex;justify-content:space-between;gap:12px;margin:6px 0;font-size:13px}
@@ -2024,13 +2027,16 @@ def create_app() -> FastAPI:
         .detail .d-rat{background:#f8fafc;border-radius:6px;padding:10px;font-size:13px;line-height:1.5;margin:8px 0}
         .detail .d-sources{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#6b7280}
         .detail .d-empty{color:#9ca3af;text-align:center;padding:40px 0;font-size:13px}
-        /* Timeline */
-        .tl{display:flex;flex-direction:column;gap:10px}
-        .tl-item{background:#fff;border:1px solid #e5e7eb;border-left:4px solid #e5e7eb;border-radius:8px;padding:12px 14px}
-        .tl-item .tl-head{display:flex;gap:10px;align-items:center;font-size:13px;margin-bottom:4px}
-        .tl-item .tl-i{color:#6b7280;font-family:ui-monospace,monospace;font-weight:700}
-        .tl-item .tl-loc{font-size:13px;color:#111;margin:2px 0}
-        .tl-item .tl-pipe{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#6b7280;margin:2px 0}
+        /* Timeline (accordion) */
+        .tl{display:flex;flex-direction:column;gap:8px}
+        .tl-item{background:#fff;border:1px solid #e5e7eb;border-left:4px solid #e5e7eb;border-radius:8px;overflow:hidden}
+        .tl-item summary{display:flex;gap:10px;align-items:center;font-size:13px;padding:12px 14px;cursor:pointer;list-style:none}
+        .tl-item summary::-webkit-details-marker{display:none}
+        .tl-item summary::before{content:'\\25B8';display:inline-block;margin-right:4px;color:#9ca3af;transition:transform 0.15s}
+        .tl-item[open] summary::before{transform:rotate(90deg)}
+        .tl-item .tl-i{color:#6b7280;font-family:ui-monospace,monospace;font-weight:700;min-width:24px}
+        .tl-item .tl-body{padding:0 14px 12px 38px;border-top:1px solid #f1f5f9}
+        .tl-item .tl-pipe{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#6b7280;margin:8px 0 4px}
         .tl-item .tl-r{font-size:13px;color:#374151;line-height:1.5;margin-top:6px}
         """
 
@@ -2067,23 +2073,39 @@ def create_app() -> FastAPI:
         }
         rows.forEach(r => r.addEventListener('click', () => pick(+r.dataset.idx)));
         if (rows.length) pick(0);
-        // Clicking Cases tab also focuses the first row for consistency.
-        document.querySelector('[data-tab=cases]').addEventListener('click', () => {
-          const sel = document.querySelector('.cases tr.sel');
-          if (!sel && rows.length) pick(0);
-        });
-        setTimeout(() => location.reload(), 30000);
+        // Silent background refresh: re-fetch the page HTML, swap in the
+        // KPIs + table + timeline sections only, preserve the user's active
+        // tab, selected row, and scroll position so the page never jumps.
+        async function refresh() {
+          try {
+            const html = await fetch(location.href, {cache: 'no-store'}).then(r => r.text());
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const parts = ['.kpi-strip', 'tbody#rows', '#pane-timeline .tl'];
+            for (const sel of parts) {
+              const next = doc.querySelector(sel);
+              const cur = document.querySelector(sel);
+              if (next && cur) cur.replaceWith(next);
+            }
+            const dot = document.getElementById('refresh-dot');
+            if (dot) dot.textContent = '· refreshed ' + new Date().toLocaleTimeString();
+            // Re-wire row clicks on the new tbody.
+            const newRows = document.querySelectorAll('.cases tr.row');
+            const selId = (CASES[0] || {}).id;
+            newRows.forEach(r => r.addEventListener('click', () => pick(+r.dataset.idx)));
+          } catch (e) { /* silent */ }
+        }
+        setInterval(refresh, 30000);
         """.replace("__CASES__", cases_json)
 
         html_doc = (
             "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            f"<title>RoadGuard Live Digest - {NOW.strftime('%Y-%m-%d %H:%M UTC')}</title>"
+            f"<title>RoadGuard LIVE - {NOW.strftime('%Y-%m-%d %H:%M UTC')}</title>"
             f"<style>{style}</style>"
             "</head><body>"
             f"{header}"
-            f"<section id='pane-overview' class='tab-pane active'>{tab_overview}</section>"
-            "<section id='pane-cases' class='tab-pane'>"
+            "<section id='pane-cases' class='tab-pane active'>"
+            f"{kpi_strip}"
             "<div class='split'>"
             f"<div>{table_html}</div>"
             "<aside class='detail' id='detail'>"
