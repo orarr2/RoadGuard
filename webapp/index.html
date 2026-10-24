@@ -19,19 +19,23 @@
   <!-- ========================= NAV ========================= -->
   <header class="nav">
     <div class="nav-brand">
-      <svg class="brand-mark" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+      <svg class="brand-mark" viewBox="0 0 140 40" fill="none" aria-hidden="true" style="height:40px;width:auto">
         <defs>
-          <linearGradient id="brandShield" x1="0" y1="0" x2="40" y2="40">
+          <linearGradient id="brandShield" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
             <stop offset="0" stop-color="#38bdf8"/>
             <stop offset="1" stop-color="#1d4ed8"/>
+          </linearGradient>
+          <linearGradient id="brandWord" x1="0" y1="0" x2="100" y2="0" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#1d4ed8"/>
+            <stop offset="1" stop-color="#22c55e"/>
           </linearGradient>
         </defs>
         <path d="M20 3 L34 10 V22 C34 29 28 35 20 37 C12 35 6 29 6 22 V10 Z"
               fill="url(#brandShield)" stroke="#1e40af" stroke-width="1.5" stroke-linejoin="round"/>
         <path d="M13 20.5 L17.5 25 L27 15" stroke="#22c55e" stroke-width="3.5"
               stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <text x="44" y="27" font-family="Inter,system-ui,sans-serif" font-size="22" font-weight="800" fill="url(#brandWord)">RoadGuard</text>
       </svg>
-      <span class="brand-text">RoadGuard</span>
     </div>
     <nav class="nav-actions">
       <button class="nav-btn nav-btn--ghost" id="nav-session" title="Session status" hidden>
@@ -51,21 +55,21 @@
       <div class="hero-copy">
         <div class="hero-badge">
           <span class="hero-dot"></span>
-          Detection in your browser, triage on the server
+          A public-service road-safety reporting system
         </div>
         <h1 class="hero-title">
-          Four <span class="hero-grad">road damage classes</span>,
-          one triage agent.
+          See a hazard? <span class="hero-grad">Report it in one tap</span>,
+          the city handles the rest.
         </h1>
         <p class="hero-sub">
-          RoadGuard classifies the four RDD2022 pavement damage types -
-          <strong>D00 longitudinal cracks</strong>,
-          <strong>D10 transverse cracks</strong>,
-          <strong>D20 alligator cracking</strong>, and
-          <strong>D40 potholes</strong> - from the back camera or an uploaded
-          image. A tool-using agent then recommends one of four actions:
-          urgent, standard queue, needs more evidence, or human review -
-          grounded in the local maintenance-standard corpus.
+          Help keep your streets safe. Snap a photo of a pothole, a crack,
+          or any broken piece of pavement and send it in. A detector in your
+          browser plus a multi-agent AI pipeline on the municipal server
+          classify the damage, cross-check it against the current repair
+          standards, and either queue it for regular maintenance or escalate
+          it to a supervisor. Every report is tracked, every verdict a
+          supervisor sees is grounded in a specific procedure, and a human
+          always has the final say before any crew is dispatched.
         </p>
         <div class="hero-cta">
           <button class="btn btn--primary btn--lg" id="start-btn">
@@ -84,16 +88,20 @@
         </div>
         <div class="hero-trust">
           <div class="trust-item">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            <span>Video never leaves your device</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+            <span>On-device detector runs in your browser (no app install)</span>
           </div>
           <div class="trust-item">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-            <span>Detection runs in the browser</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 L2 7 L12 12 L22 7 Z"/><path d="M2 17 L12 22 L22 17"/><path d="M2 12 L12 17 L22 12"/></svg>
+            <span>5-agent AI pipeline (signal, perception, research, decision, supervisor)</span>
           </div>
           <div class="trust-item">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-            <span>Every verdict cites a corpus procedure</span>
+            <span>Every verdict is grounded in the city's own repair standards</span>
+          </div>
+          <div class="trust-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7 V12 L15 15"/></svg>
+            <span>Image kept 7 days on the municipal server, then auto-deleted</span>
           </div>
         </div>
       </div>
@@ -146,18 +154,87 @@
       <div class="how-grid">
         <div class="how-card">
           <div class="how-num">01</div>
-          <h3>Camera or upload + YOLO</h3>
-          <p>Back-camera stream or a still image you upload feeds a YOLOv8 ONNX model running on-device via onnxruntime-web. Four RDD2022 classes - D00, D10, D20, D40 - and nothing else leaves the device.</p>
+          <h3>Snap a photo in the browser</h3>
+          <p>Open the site on your phone, point the back camera at the hazard, or upload a photo you already took. A YOLOv8 object detector trained on the <strong>RDD2022</strong> road-damage dataset runs <em>on your device</em> using onnxruntime-web and finds the four pavement defect types the municipality cares about: longitudinal cracks, transverse cracks, alligator cracking and potholes. The photo is sent to the city server with your report so a supervisor can see what you saw.</p>
         </div>
         <div class="how-card">
           <div class="how-num">02</div>
-          <h3>Tracker + dedup</h3>
-          <p>An IoU tracker in the browser collapses the same hazard across a few frames into one submission. A short-TTL cache on the server dedups the resurface so you never pay the LLM twice for the same pothole.</p>
+          <h3>5 AI agents triage your report</h3>
+          <p>On the server, a pipeline of five cooperating agents, each running a different open-source language model, analyses the report: an <strong>intake</strong> agent reads your description, a <strong>perception</strong> agent interprets the detector output, a <strong>research</strong> agent looks up the matching municipal repair standard, a <strong>decision</strong> agent picks one of four actions, and a <strong>supervisor</strong> agent short-circuits obviously-hard cases straight to a human. The whole chain is logged step by step.</p>
         </div>
         <div class="how-card">
           <div class="how-num">03</div>
-          <h3>Agent verdict</h3>
-          <p>Perception then Research then Decision agents cite the exact maintenance procedure from the local corpus and recommend one of four actions: urgent, standard, needs more evidence, or human review.</p>
+          <h3>Humans stay in the loop</h3>
+          <p>The agent recommends: <strong>urgent dispatch</strong> (crew notified now), <strong>standard queue</strong> (routine maintenance), <strong>needs more evidence</strong> (we ask you for one more photo) or <strong>human review</strong> (a municipal supervisor decides). Nothing is ever dispatched automatically. Every urgent and human-review case is a recommendation the supervisor must approve, and the approval is tracked against the case for accountability.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="how" id="why">
+      <div class="section-head">
+        <h2>What RoadGuard sees</h2>
+        <p>Four classes from the RDD2022 benchmark - the four most common pavement defects in city streets.</p>
+      </div>
+      <div class="how-grid">
+        <div class="how-card">
+          <h3>Longitudinal crack <code>(D00)</code></h3>
+          <p>A crack running along the road's travel direction. Usually caused by poor joint construction or temperature stress. Early repair is cheap; left untreated, water seeps in and the pavement fails.</p>
+        </div>
+        <div class="how-card">
+          <h3>Transverse crack <code>(D10)</code></h3>
+          <p>A crack running across the travel direction. Often starts at a construction joint or reflects a crack in the base layer. Routine maintenance queue when caught early.</p>
+        </div>
+        <div class="how-card">
+          <h3>Alligator cracking <code>(D20)</code></h3>
+          <p>Interconnected cracks forming a scaly pattern - the pavement's base layer is failing. Typically needs partial-depth patching before it becomes a pothole.</p>
+        </div>
+        <div class="how-card">
+          <h3>Pothole <code>(D40)</code></h3>
+          <p>A localized hole where surface material has broken away. The most dangerous class for vehicles and cyclists - on a main road with lane obstruction, this is an urgent-dispatch case.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="how" id="what-you-get">
+      <div class="section-head">
+        <h2>What happens after you report</h2>
+        <p>Your part is one tap. Here is what the city sees on the other side.</p>
+      </div>
+      <div class="how-grid">
+        <div class="how-card">
+          <div class="how-num">a</div>
+          <h3>Live operator trace</h3>
+          <p>A private operations page shows every agent step - which prompt was asked, which standard was cited, which action was recommended - so the municipality can audit any decision.</p>
+        </div>
+        <div class="how-card">
+          <div class="how-num">b</div>
+          <h3>Twice-daily digest</h3>
+          <p>At 08:00 and 20:00 the system builds a report of every citizen hazard with the photos, the recommended action, the cited standard and the current status. It goes to the supervisor on duty.</p>
+        </div>
+        <div class="how-card">
+          <div class="how-num">c</div>
+          <h3>Signed approval links</h3>
+          <p>Every urgent and human-review verdict creates an approval row with a signed one-click link. The supervisor approves or denies with a reason, and the decision is attached to the case forever.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="how" id="faq">
+      <div class="section-head">
+        <h2>Frequently asked</h2>
+      </div>
+      <div class="how-grid">
+        <div class="how-card">
+          <h3>Who sees my photo?</h3>
+          <p>Only the municipal operations team, through a private page gated to the city's internal network. The photo is kept for 7 days on the city server for comparison and then deleted automatically.</p>
+        </div>
+        <div class="how-card">
+          <h3>Will something actually get fixed?</h3>
+          <p>RoadGuard is a decision-support tool. It routes your report to the right queue and gives the supervisor the context to decide. The actual fix is a work order the municipality dispatches - we show you the agent's recommendation and the case reference, nothing more is promised.</p>
+        </div>
+        <div class="how-card">
+          <h3>Why does it take 1-3 minutes for the verdict?</h3>
+          <p>The AI agents run entirely on local open-source models (no cloud API bill) on a modest ARM server. Each agent takes 5-30 seconds. Your part finishes in seconds; the server works in the background and the page updates when the verdict is ready.</p>
         </div>
       </div>
     </section>
