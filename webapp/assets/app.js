@@ -832,7 +832,7 @@ async function submitUploadedImage() {
   // Partial submits produced thin cases the agent could not reason about.
   const missing = [];
   if (!roadType) missing.push("Road type");
-  if (!laneBlocked) missing.push("Lane obstruction");
+  if (!laneBlocked) missing.push("Blocks a traffic lane?");
   if (!risk) missing.push("Risk level");
   if (!location) missing.push("Location");
   if (!reporterText) missing.push("Describe what you see");

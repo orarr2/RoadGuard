@@ -7271,6 +7271,36 @@ def decision_node(state: RoadGuardState) -> dict:
     begin_llm_log()
     tool_result_ids = state.get("tool_result_ids") or []
 
+    # Problems 1 + 17: belt-and-braces dataset lookup before the LLM speaks.
+    # The profile builder already did one lookup at the default distance,
+    # but a slightly re-encoded or re-cropped photo (same scene, different
+    # phash) was being treated as "new" and the LLM re-triaged it from
+    # scratch. If we have no match yet, retry with a looser distance; the
+    # tool returns the nearest row within the window, so if nothing comes
+    # back the image genuinely is not in the catalogue.
+    md_for_lookup = state.get("metadata") or {}
+    if not state.get("dataset_match") and (
+        md_for_lookup.get("image_sha256") or md_for_lookup.get("image_phash")
+    ):
+        try:
+            relaxed = PERCEPTION_TOOLS["lookup_dataset_image"][0](
+                sha256=md_for_lookup.get("image_sha256") or None,
+                phash=md_for_lookup.get("image_phash") or None,
+                max_distance=16,
+            )
+            if relaxed.get("found"):
+                state["dataset_match"] = relaxed
+                emit_live_trace({
+                    "kind": "tool_call",
+                    "speaker": "decision",
+                    "hop": 0,
+                    "tool": "lookup_dataset_image",
+                    "ok": True,
+                    "note": f"relaxed catalogue hit pic_id={relaxed.get('pic_id')} dist={relaxed.get('distance')}",
+                })
+        except Exception as _exc:
+            LOGGER.warning("decision_relaxed_lookup_failed: %s", _exc)
+
     rule_hint = _decide_rule_based(state)
 
     # A catalogued dataset image is answered as known_image without any
@@ -7374,6 +7404,43 @@ def decision_node(state: RoadGuardState) -> dict:
         # the model may not declare a photo known on its own
         fallback_reason = "known_image_without_match"
         decision = _decide_rule_based(state)
+
+    # Problem 10: confidence / contradiction floor. Any verdict that walks
+    # a case forward (urgent, standard) is downgraded to needs_more_evidence
+    # when either the detector itself is below 0.50 confidence or the
+    # signal_extractor already flagged a hazard_class contradiction between
+    # the reporter's text and the detector's top-1 class. This is a
+    # deterministic second-check so a fast but shaky verdict never ships
+    # straight to a work order.
+    profile_conf = float((state.get("hazard_profile") or {}).get("primary_confidence") or 0.0)
+    intake = state.get("reporter_intake") or {}
+    contradictions = intake.get("contradictions") or []
+    has_class_conflict = any(
+        (isinstance(c, dict) and c.get("field") == "hazard_class")
+        or (isinstance(c, str) and c == "hazard_class")
+        for c in contradictions
+    )
+    LOW_CONFIDENCE = 0.50
+    if decision["action"] in ("urgent", "standard") and (
+        profile_conf < LOW_CONFIDENCE or has_class_conflict
+    ):
+        reason = (
+            f"detector_confidence={profile_conf:.2f} below {LOW_CONFIDENCE:.2f}"
+            if profile_conf < LOW_CONFIDENCE
+            else "reporter text contradicts the detector's top-1 class"
+        )
+        overridden_llm_verdict = overridden_llm_verdict or {
+            k: decision.get(k) for k in ("action", "rationale", "priority", "cited_sources")
+        }
+        fallback_reason = "low_confidence_floor"
+        decision = {
+            "action": "needs_more_evidence",
+            "rationale": f"second look needed: {reason}; original verdict was {overridden_llm_verdict.get('action')}",
+            "priority": 40,
+            "cited_sources": [],
+            "missing_evidence": ["second_angle"],
+        }
+
     decision["assessment"] = assessment
     decision, cap_applied = _apply_evidence_cap(decision, state)
 

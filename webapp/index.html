@@ -366,18 +366,22 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
         <span>Back</span>
       </button>
-      <div class="upload-single" style="max-width:640px;margin:0 auto">
+      <div class="upload-single" style="max-width:1200px;margin:0 auto">
         <h2>Your report</h2>
-        <div class="upload-canvas-wrap">
-          <canvas id="upload-canvas" style="max-width:100%;height:auto"></canvas>
-          <div class="upload-empty" id="upload-empty">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            <p>Pick an image to send</p>
-            <button class="btn btn--primary" id="upload-pick-again">Choose file</button>
+        <div class="upload-split">
+          <div class="upload-col-image">
+            <div class="upload-canvas-wrap">
+              <canvas id="upload-canvas" style="max-width:100%;height:auto"></canvas>
+              <div class="upload-empty" id="upload-empty">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <p>Pick an image to send</p>
+                <button class="btn btn--primary" id="upload-pick-again">Choose file</button>
+              </div>
+            </div>
           </div>
-        </div>
-        <div class="upload-verdict" id="upload-verdict" style="margin-top:12px">
-          <div class="upload-verdict-empty">Pick an image, fill in the details below, and press Send to Agent.</div>
+          <div class="upload-col-form">
+        <div class="upload-verdict" id="upload-verdict" style="margin-top:0">
+          <div class="upload-verdict-empty">Pick an image, fill in the details, and press Send to Agent.</div>
         </div>
         <div class="upload-controls" style="margin-top:12px">
           <label class="upload-field">
@@ -390,11 +394,12 @@
             </select>
           </label>
           <label class="upload-field">
-            <span>Lane obstruction <span style="color:#dc2626;font-weight:700" aria-hidden="true">*</span></span>
+            <span>Blocks a traffic lane? <span style="color:#dc2626;font-weight:700" aria-hidden="true">*</span></span>
+            <small class="upload-hint">Does the damage make a car swerve or avoid the lane?</small>
             <select id="upload-lane-blocked">
-              <option value="none">None</option>
-              <option value="partial">Partial</option>
-              <option value="full">Full</option>
+              <option value="none">No - cars drive over or around it fine</option>
+              <option value="partial">Partially - cars have to swerve</option>
+              <option value="full">Yes - the lane is unusable</option>
             </select>
           </label>
           <label class="upload-field">
@@ -422,6 +427,8 @@
             <span class="upload-submit-label">Send to Agent</span>
           </button>
           <button class="btn btn--ghost" id="upload-pick-another">Pick another</button>
+        </div>
+          </div>
         </div>
         <div class="upload-trace" id="upload-trace" hidden><h3>Agent trace</h3><pre id="upload-trace-pre"></pre></div>
       </div>
@@ -532,11 +539,11 @@
           </select>
         </label>
         <label class="side-control">
-          <span>Lane obstruction (default)</span>
+          <span>Blocks a traffic lane? (default)</span>
           <select id="drive-lane-blocked">
-            <option value="none">None</option>
-            <option value="partial">Partial</option>
-            <option value="full">Full</option>
+            <option value="none">No</option>
+            <option value="partial">Partially</option>
+            <option value="full">Yes</option>
           </select>
         </label>
       </div>

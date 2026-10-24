@@ -1,0 +1,219 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - img [aria-hidden] [ref=e4]:
+      - generic [ref=e7]: RoadGuard
+    - navigation [ref=e8]:
+      - button "Sign in" [ref=e9] [cursor=pointer]
+  - main [ref=e14]:
+    - generic [ref=e15]:
+      - generic [ref=e16]:
+        - generic [ref=e17]: A public-service road-safety reporting system
+        - heading "See a hazard? Report it in one tap, the city handles the rest." [level=1] [ref=e19]
+        - paragraph [ref=e20]: Help keep your streets safe. Snap a photo of a pothole, a crack, or any broken piece of pavement and send it in. A detector in your browser plus a multi-agent AI pipeline on the municipal server classify the damage, cross-check it against the current repair standards, and either queue it for regular maintenance or escalate it to a supervisor. Every report is tracked, every verdict a supervisor sees is grounded in a specific procedure, and a human always has the final say before any crew is dispatched.
+        - generic [ref=e21]:
+          - button "Start live drive" [ref=e22] [cursor=pointer]
+          - button "Upload image" [ref=e26] [cursor=pointer]
+          - link "How it works" [ref=e30] [cursor=pointer]:
+            - /url: "#how"
+        - generic [ref=e33]:
+          - generic [ref=e34]: On-device detector runs in your browser (no app install)
+          - generic [ref=e38]: 5-agent AI pipeline (signal, perception, research, decision, supervisor)
+          - generic [ref=e44]: Every verdict is grounded in the city's own repair standards
+          - generic [ref=e48]: Image kept 7 days on the municipal server, then auto-deleted
+      - generic [ref=e55]:
+        - generic "Real pavement damage from the test corpus - 24 rotating examples" [ref=e56]:
+          - img "Road damage example 1" [ref=e57]
+          - img "Road damage example 3" [ref=e58]
+          - img "Road damage example 4" [ref=e59]
+          - img "Road damage example 5" [ref=e60]
+          - img "Road damage example 6" [ref=e61]
+          - img "Road damage example 7" [ref=e62]
+          - img "Road damage example 8" [ref=e63]
+          - img "Road damage example 9" [ref=e64]
+          - img "Road damage example 10" [ref=e65]
+          - img "Road damage example 11" [ref=e66]
+          - img "Road damage example 12" [ref=e67]
+          - img "Road damage example 13" [ref=e68]
+          - img "Road damage example 14" [ref=e69]
+          - img "Road damage example 15" [ref=e70]
+          - img "Road damage example 16" [ref=e71]
+          - img "Road damage example 17" [ref=e72]
+          - img "Road damage example 18" [ref=e73]
+          - img "Road damage example 19" [ref=e74]
+          - img "Road damage example 20" [ref=e75]
+          - img "Road damage example 21" [ref=e76]
+          - img "Road damage example 22" [ref=e77]
+          - img "Road damage example 23" [ref=e78]
+          - img "Road damage example 24" [ref=e79]
+          - img "Road damage example 25" [ref=e80]
+        - generic [ref=e81]:
+          - generic [ref=e82]:
+            - generic [ref=e83]: Detections
+            - generic [ref=e84]: "2"
+          - generic [ref=e87]: D40 - standard
+    - generic [ref=e88]:
+      - generic [ref=e89]:
+        - heading "How it works" [level=2] [ref=e90]
+        - paragraph [ref=e91]: Three moving parts, all working together.
+      - generic [ref=e92]:
+        - generic [ref=e93]:
+          - generic [ref=e94]: "01"
+          - heading "Snap a photo in the browser" [level=3] [ref=e95]
+          - paragraph [ref=e96]:
+            - text: Open the site on your phone, point the back camera at the hazard, or upload a photo you already took. A YOLOv8 object detector trained on the
+            - strong [ref=e97]: RDD2022
+            - text: road-damage dataset runs
+            - emphasis [ref=e98]: on your device
+            - text: "using onnxruntime-web and finds the four pavement defect types the municipality cares about: longitudinal cracks, transverse cracks, alligator cracking and potholes. The photo is sent to the city server with your report so a supervisor can see what you saw."
+        - generic [ref=e99]:
+          - generic [ref=e100]: "02"
+          - heading "5 AI agents triage your report" [level=3] [ref=e101]
+          - paragraph [ref=e102]:
+            - text: "On the server, a pipeline of five cooperating agents, each running a different open-source language model, analyses the report: an"
+            - strong [ref=e103]: intake
+            - text: agent reads your description, a
+            - strong [ref=e104]: perception
+            - text: agent interprets the detector output, a
+            - strong [ref=e105]: research
+            - text: agent looks up the matching municipal repair standard, a
+            - strong [ref=e106]: decision
+            - text: agent picks one of four actions, and a
+            - strong [ref=e107]: supervisor
+            - text: agent short-circuits obviously-hard cases straight to a human. The whole chain is logged step by step.
+        - generic [ref=e108]:
+          - generic [ref=e109]: "03"
+          - heading "Humans stay in the loop" [level=3] [ref=e110]
+          - paragraph [ref=e111]:
+            - text: "The agent recommends:"
+            - strong [ref=e112]: urgent dispatch
+            - text: (crew notified now),
+            - strong [ref=e113]: standard queue
+            - text: (routine maintenance),
+            - strong [ref=e114]: needs more evidence
+            - text: (we ask you for one more photo) or
+            - strong [ref=e115]: human review
+            - text: (a municipal supervisor decides). Nothing is ever dispatched automatically. Every urgent and human-review case is a recommendation the supervisor must approve, and the approval is tracked against the case for accountability.
+    - generic [ref=e116]:
+      - generic [ref=e117]:
+        - heading "What RoadGuard sees" [level=2] [ref=e118]
+        - paragraph [ref=e119]: Four classes from the RDD2022 benchmark - the four most common pavement defects in city streets.
+      - generic [ref=e120]:
+        - generic [ref=e121]:
+          - heading [level=3] [ref=e122]:
+            - text: Longitudinal crack
+            - code [ref=e123]: (D00)
+          - paragraph [ref=e124]: A crack running along the road's travel direction. Usually caused by poor joint construction or temperature stress. Early repair is cheap; left untreated, water seeps in and the pavement fails.
+        - generic [ref=e125]:
+          - heading [level=3] [ref=e126]:
+            - text: Transverse crack
+            - code [ref=e127]: (D10)
+          - paragraph [ref=e128]: A crack running across the travel direction. Often starts at a construction joint or reflects a crack in the base layer. Routine maintenance queue when caught early.
+        - generic [ref=e129]:
+          - heading [level=3] [ref=e130]:
+            - text: Alligator cracking
+            - code [ref=e131]: (D20)
+          - paragraph [ref=e132]: Interconnected cracks forming a scaly pattern - the pavement's base layer is failing. Typically needs partial-depth patching before it becomes a pothole.
+        - generic [ref=e133]:
+          - heading [level=3] [ref=e134]:
+            - text: Pothole
+            - code [ref=e135]: (D40)
+          - paragraph [ref=e136]: A localized hole where surface material has broken away. The most dangerous class for vehicles and cyclists - on a main road with lane obstruction, this is an urgent-dispatch case.
+    - generic [ref=e137]:
+      - generic [ref=e138]:
+        - heading "What happens after you report" [level=2] [ref=e139]
+        - paragraph [ref=e140]: Your part is one tap. Here is what the city sees on the other side.
+      - generic [ref=e141]:
+        - generic [ref=e142]:
+          - generic [ref=e143]: a
+          - heading "Live operator trace" [level=3] [ref=e144]
+          - paragraph [ref=e145]: A private operations page shows every agent step - which prompt was asked, which standard was cited, which action was recommended - so the municipality can audit any decision.
+        - generic [ref=e146]:
+          - generic [ref=e147]: b
+          - heading "Twice-daily digest" [level=3] [ref=e148]
+          - paragraph [ref=e149]: At 08:00 and 20:00 the system builds a report of every citizen hazard with the photos, the recommended action, the cited standard and the current status. It goes to the supervisor on duty.
+        - generic [ref=e150]:
+          - generic [ref=e151]: c
+          - heading "Signed approval links" [level=3] [ref=e152]
+          - paragraph [ref=e153]: Every urgent and human-review verdict creates an approval row with a signed one-click link. The supervisor approves or denies with a reason, and the decision is attached to the case forever.
+    - generic [ref=e154]:
+      - generic [ref=e155]:
+        - heading "How the system is doing right now" [level=2] [ref=e156]
+        - paragraph [ref=e157]: Live aggregated numbers from the municipal server. Rebuilt on every page load; no PII, no case ids.
+      - generic [ref=e158]:
+        - generic [ref=e159]:
+          - generic [ref=e160]: "-"
+          - generic [ref=e161]: Total reports received
+        - generic [ref=e162]:
+          - generic [ref=e163]: "-"
+          - generic [ref=e164]: Open cases right now
+        - generic [ref=e165]:
+          - generic [ref=e166]: "-"
+          - generic [ref=e167]: Closed this week
+        - generic [ref=e168]:
+          - generic [ref=e169]: "-"
+          - generic [ref=e170]: Median resolution (hours)
+      - generic [ref=e171]:
+        - heading "By agent decision" [level=3] [ref=e173]
+        - heading "By defect class" [level=3] [ref=e175]
+      - paragraph [ref=e176]: stats unavailable right now
+    - generic [ref=e177]:
+      - generic [ref=e178]:
+        - heading "About RoadGuard" [level=2] [ref=e179]
+        - paragraph [ref=e180]: A longer walk-through for citizens and reviewers who want to see what is actually running behind each verdict.
+      - generic [ref=e181]:
+        - generic [ref=e182]:
+          - heading "Five-agent pipeline" [level=3] [ref=e183]
+          - list [ref=e184]:
+            - listitem [ref=e185]: Sanitizer - validates the submission, strips tracking fields, keeps only what the agents need.
+            - listitem [ref=e186]: Signal extractor - reads the free-text description and the YOLO detection, lists the signals that matter.
+            - listitem [ref=e187]: "Supervisor - routes the case: direct answer, more evidence, or deep agentic workup. Routing is LLM-decided, not a rule tree."
+            - listitem [ref=e188]: Profile builder - normalises the hazard into a defect profile (class, severity, confidence) the retriever can match on.
+            - listitem [ref=e189]: RAG retriever - pulls the municipal standards and safety references that apply to this exact defect.
+            - listitem [ref=e190]: "Decision - produces the final verdict: urgent, standard, needs more evidence, or human review, with a cited rationale."
+            - listitem [ref=e191]: Approval gate - writes a signed approval row for the supervisor on duty to decide.
+        - generic [ref=e192]:
+          - heading "What the detector sees" [level=3] [ref=e193]
+          - paragraph [ref=e194]: "A YOLOv8 model runs in your browser (ONNX Runtime Web), trained on the RDD2022 road-damage dataset. It names the defects by the dataset's own class ids:"
+          - list [ref=e195]:
+            - listitem [ref=e196]: D00 - longitudinal crack (along the direction of travel).
+            - listitem [ref=e197]: D10 - transverse crack (across the road).
+            - listitem [ref=e198]: D20 - alligator cracking (interconnected network, a structural warning sign).
+            - listitem [ref=e199]: D40 - pothole (localised break-up of the surface).
+          - paragraph [ref=e200]: The citizen view shows a plain-language verdict; the operator view shows the class, confidence, bounding boxes, and the full agent trace.
+        - generic [ref=e201]:
+          - heading "Models in production" [level=3] [ref=e202]
+          - list [ref=e203]:
+            - listitem [ref=e204]: qwen2.5:7b - signal extractor, decision writer.
+            - listitem [ref=e205]: llama3.1:8b - supervisor routing.
+            - listitem [ref=e206]: qwen2.5:3b - profile builder.
+            - listitem [ref=e207]: llama3.2:3b - RAG retriever reasoning.
+            - listitem [ref=e208]: granite3.3:2b - sanitizer and short-form helpers.
+          - paragraph [ref=e209]: All five are open-source weights served locally through Ollama on an Oracle A1.Flex ARM server (4 OCPU, 23 GB RAM). Zero cloud-API cost, zero data leaving the municipal network.
+        - generic [ref=e210]:
+          - heading "Standards grounding" [level=3] [ref=e211]
+          - paragraph [ref=e212]: Every verdict cites the specific entries from the municipal maintenance playbook that justified it. The retriever pulls from a vector index of standards passages; the decision agent must quote at least one, or the verdict is downgraded to human review.
+        - generic [ref=e213]:
+          - heading "What is kept, for how long" [level=3] [ref=e214]
+          - list [ref=e215]:
+            - listitem [ref=e216]: "Submitted photo: 7 days on the municipal server, then auto-deleted."
+            - listitem [ref=e217]: "Case record (decision, rationale, cited sources, trace): kept with the hazard id for audit."
+            - listitem [ref=e218]: "Hard cap: 5 GB total image storage; the oldest photos are evicted first."
+        - generic [ref=e219]:
+          - heading "Open design" [level=3] [ref=e220]
+          - paragraph [ref=e221]:
+            - text: The source lives at
+            - link "github.com/orarr2/RoadGuard" [ref=e222] [cursor=pointer]:
+              - /url: https://github.com/orarr2/RoadGuard
+            - text: . The agent prompts, the RAG passages, the routing policy and the verdict schema are all in the repo. The whole trace of a case can be audited by the supervisor on duty.
+    - generic [ref=e223]:
+      - heading "Frequently asked" [level=2] [ref=e225]
+      - generic [ref=e226]:
+        - generic [ref=e227]:
+          - heading "Who sees my photo?" [level=3] [ref=e228]
+          - paragraph [ref=e229]: Only the municipal operations team, through a private page gated to the city's internal network. The photo is kept for 7 days on the city server for comparison and then deleted automatically.
+        - generic [ref=e230]:
+          - heading "Will something actually get fixed?" [level=3] [ref=e231]
+          - paragraph [ref=e232]: RoadGuard is a decision-support tool. It routes your report to the right queue and gives the supervisor the context to decide. The actual fix is a work order the municipality dispatches - we show you the agent's recommendation and the case reference, nothing more is promised.
+        - generic [ref=e233]:
+          - heading "Why does it take 1-3 minutes for the verdict?" [level=3] [ref=e234]
+          - paragraph [ref=e235]: The AI agents run entirely on local open-source models (no cloud API bill) on a modest ARM server. Each agent takes 5-30 seconds. Your part finishes in seconds; the server works in the background and the page updates when the verdict is ready.
