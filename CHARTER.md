@@ -94,23 +94,58 @@ workflow cannot be reduced to a static script or a fixed `if-else` rule
 chain. The operational sequence and tool usage must adapt dynamically at
 runtime based on unstructured and variable inputs.
 
-**Tools.**
+**Tools.** The Decision agent can call any of the following during its
+ReAct loop; the other workers each hold a smaller subset.
 
+Action tools (write):
 - `check_hazard_severity` calculates operational priority using
   transparent rules.
-- `query_repair_standards` retrieves the relevant guidance and source
-  from the corpus.
 - `request_additional_evidence` requests another photograph or missing
-  information.
+  information (capped at one request per hazard).
 - `create_draft_work_order` creates a local draft task only.
 - `flag_for_urgent_review` alerts a human supervisor and does not close
   a road.
 
+Read-only tools (observation):
+- `query_repair_standards` retrieves relevant guidance and source
+  passages from the ChromaDB corpus.
+- `lookup_dataset_image` exact-matches the submitted photo against the
+  RDD2022 catalogue; a hit short-circuits to `known_image` with no LLM
+  triage.
+- `rank_similarity_to_catalog` returns the top-K nearest catalogued
+  images with a similarity percentage, so the agent can hedge
+  ("looks ~82% like catalogued D40 pic_id=1024") instead of a binary
+  known / new.
+- `check_recent_cluster` counts same-class reports at the same
+  free-text location; returns `cluster_flag` = none / emerging /
+  strong, so recurring issues get flagged.
+- `check_system_health` reports ollama RAM, loaded models and the
+  stub-mode flag so the agent knows when the pipeline is degraded.
+- `lookup_similar_cases` (profile builder) returns prior hazards of
+  the same class at the same location.
+
 **Fallback.** If the image is insufficient, confidence is low, no
 supporting procedure is found, or a tool fails, the agent does not create
-a work order. The case is transferred to human review. Without the
-agent, the system still displays bounding boxes and a findings list, but
-does not prioritize cases automatically.
+a work order. The case is transferred to human review with a plain-language
+rationale explaining what could not be determined. Without the agent, the
+system still displays bounding boxes and a findings list, but does not
+prioritize cases automatically.
+
+**Agent character.** The Decision prompt frames the LLM as a seasoned
+municipal road-safety inspector with explicit "take ownership and decide"
+guidance - low detector confidence is not by itself a reason to escalate,
+contradictions are signals to use judgement, exaggeration should be
+named, non-road images and non-Israeli submissions should be called out.
+Determinstic floor rules that pre-empted the LLM (zero confidence, below
+0.5 confidence, contradiction) were removed after they were shown to
+route ~60% of real submissions to human review.
+
+**Input hardening.** All free text (reporter description, location, OCR
+of in-image signage) runs through sanitize before any LLM sees it:
+injection patterns are neutralised, the reporter text is wrapped in
+`[USER_SUPPLIED_UNVERIFIED]` markers, and PII (phone, email, Israeli
+national id, IBAN, credit-card-shaped numbers) is redacted before the
+hazard row is stored or shown on an operator page.
 
 ## 6. Risks and cut-down version
 

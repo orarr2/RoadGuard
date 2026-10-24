@@ -6,6 +6,16 @@
 > Paths such as `src/agent/multiagent/nodes/decision.py` below name the
 > former modules; each appears as a `# section:` block of the same name
 > inside those two files. `policy.yaml` sits next to them.
+>
+> Deployment note (24.10.2026): the production deployment on Oracle A1.Flex
+> runs every LLM on a local Ollama instance in Docker. The historical panel
+> providers (Groq, Gemini, Mistral) remain available for benchmarks but are
+> not used in production. The current per-worker assignment is
+> `AGENT_SIGNAL_LLM=ollama:llama3.2:3b`,
+> `AGENT_PERCEPTION_LLM=ollama:qwen2.5:3b`,
+> `AGENT_RESEARCH_LLM=ollama:granite3.3:2b`,
+> `AGENT_LLM_PROVIDER=ollama:qwen2.5:3b` (Decision; swapped from `7b` to `3b`
+> on 24.10.2026, 3-5x latency win measured on this ARM host).
 
 This document is the authoritative specification for the RoadGuard
 decision agents. It fixes the inputs, the tools, the graph, the policy
@@ -84,7 +94,7 @@ await_evidence -> sanitize  (resumed run)
 | `supervisor` | no | `state["budget"]` | `guard_fired`, routing | - |
 | `perception` | opt-in: one call only with `AGENT_PROFILE_BUILDER_LLM=1` (default `0`, section 6) | `yolo_output`, `image_quality`, `metadata` | `hazard_profile`, `perception_confidence`, `similar_cases` | `lookup_similar_cases` |
 | `research` | opt-in: one call only with `AGENT_RAG_RETRIEVER_LLM=1` (default `0`, section 6) | `hazard_profile`, `road_type` | `procedures`, `tool_result_ids`, `research_coverage` | `query_repair_standards` |
-| `decision` | panel (3 providers) or ReAct loop | everything above, `reporter_intake`, `reporter_signals`, `evidence_round` | `action`, `rationale`, `priority`, `cited_sources`, `assessment`, `evidence_request` | `check_hazard_severity`, `request_additional_evidence`, `create_draft_work_order`, `flag_for_urgent_review` |
+| `decision` | panel (3 providers) or ReAct loop; production: single-provider ReAct against `ollama:qwen2.5:3b` | everything above, `reporter_intake`, `reporter_signals`, `evidence_round` | `action`, `rationale`, `priority`, `cited_sources`, `assessment`, `evidence_request` | 4 action tools (`check_hazard_severity`, `request_additional_evidence`, `create_draft_work_order`, `flag_for_urgent_review`) + 4 read-only tools (`lookup_dataset_image`, `rank_similarity_to_catalog`, `check_system_health`, `check_recent_cluster`) |
 | `approval_gate` | no | verdict | `approvals` row, email | - |
 | `await_evidence` | no | new inputs from `update_state` | fresh budget (offset by the tokens already spent), `evidence_round += 1` | - |
 
@@ -111,10 +121,10 @@ exhaustion (Gemini "Quota exceeded ... limit", Mistral code 1300) is not
 retried: the vendor is remembered as dead for `AGENT_LLM_DEAD_SECONDS`
 (default 300) and skipped.
 
-Least privilege is enforced by the tool maps in
-`src/agent/multiagent/tools/__init__.py`: Perception sees only
-`lookup_similar_cases`, Research only `query_repair_standards`, Decision
-the remaining four.
+Least privilege is enforced by the tool maps in `roadguard_agent.py`:
+Perception sees only `lookup_similar_cases`, Research only
+`query_repair_standards`, Decision the remaining eight (4 action + 4
+read-only; sections 4.4-4.11).
 
 ### 3.1 Intake output
 
@@ -214,14 +224,78 @@ Python callable. All of them, `flag_for_urgent_review` included, honour
   approval gate opens the single supervisor row); in ReAct mode a call
   from the model is recorded, not executed.
 
+### 4.7 `lookup_dataset_image` (Decision, read-only)
+
+- Input: `{ sha256, phash }`.
+- Output: `{ hit, pic_id, class, country, bboxes, path }` on a hit, else
+  `{ hit: false }`.
+- Source: the 17,099-row RDD2022 catalogue
+  (`/opt/roadguard/data/dataset_catalog.sqlite`), exact match on sha256 OR
+  perceptual hash (hamming distance 0 only).
+- Side effect: on a hit the Decision agent short-circuits to the
+  `known_image` verdict and emits `fallback_reason=known_image_in_dataset`;
+  no LLM triage runs.
+
+### 4.8 `rank_similarity_to_catalog` (Decision, read-only)
+
+- Input: `{ sha256, phash, k=3 }`.
+- Output: `{ matches: [{ pic_id, class, country, similarity_pct, phash_distance }] }`,
+  top-K catalogue rows sorted by ascending phash distance. `similarity_pct`
+  is `max(0, 100 - int(distance * 100 / 64))` (distance 0 is 100%, distance
+  24 is roughly 62%). Returns an empty list when the catalogue is absent.
+- Side effect: none. The agent uses the ranked near-matches to hedge
+  verdicts in prose ("this looks ~82% like catalogued D40 pic_id=1024") so
+  the operator sees a shade of grey instead of a binary known / new.
+
+### 4.9 `check_system_health` (Decision, read-only)
+
+- Input: `{}`.
+- Output: `{ ollama_running: bool, loaded_models: [{ name, size_gb, parameters }], host_memory_used_pct, stub_mode: bool }`.
+- Source: `ollama ps` via the local HTTP endpoint plus `/proc/meminfo`; stub
+  mode is on when `ROADGUARD_USE_LIVE=0` or when every provider in the
+  fallback chain is unreachable.
+- Side effect: none. The agent calls this when it sees signs of a degraded
+  pipeline (missing passages, unexpectedly thin RAG results, slow earlier
+  tool calls) so the assessment can name "pipeline is degraded (model X not
+  loaded, host memory 94%)" instead of fabricating certainty.
+
+### 4.10 `check_recent_cluster` (Decision, read-only)
+
+- Input: `{ location, hazard_class, window_hours=168 }`.
+- Output: `{ count, cluster_flag: enum[none, emerging, strong], recent_hazard_ids }`.
+- Source: SQLite `hazards` table, same class + token-containment location
+  match, within the window. `cluster_flag` is `none` for 0-2 reports,
+  `emerging` for 3-5, `strong` for 6+.
+- Side effect: none. The agent uses the flag to escalate recurring issues
+  that would otherwise triage as one-offs ("3 D40 reports on Weizmann
+  Street this week; cluster flag = emerging").
+
+### 4.11 Decision tool budget
+
+Decision calls at most `DECISION_REACT_MAX_HOPS=2` tools per ReAct run (the
+hop count is the same whether the agent calls an action tool or a
+read-only one). The read-only tools do not count against the one evidence
+request cap and do not create approvals or draft work orders. A failing
+tool call returns an error dict (`{ error, retriable }`); the agent may
+try a different tool but may not retry the same call.
+
 ## 5. The four final actions
 
 | Action | Trigger (rule tree, in order) | Citations | Human in the loop |
 |---|---|---|---|
-| `human_review` | `perception_confidence == low` (blur, non-road scene, suspicious OCR, suspicious reporter text, scrubbed location); the reporter's description contradicts the detector's class; `research_coverage == no_match`; a budget cap; a grounding failure (the LLM is asked once); a second `needs_more_evidence` after the reporter's evidence | none | `approvals` row, supervisor decides |
-| `needs_more_evidence` | detector confidence in [0.4, 0.6) and no recurring location, first round only | none | reporter answers one request (section 7) |
-| `urgent` | D40 on a main road, lane partially or fully blocked, confidence >= 0.6 | at least one id from `tool_result_ids` | `approvals` row, supervisor decides |
+| `known_image` | `lookup_dataset_image` hit on sha256 or exact phash | none | none; the dataset image already carries a verdict |
+| `human_review` | `perception_confidence == low` (blur, non-road scene, suspicious OCR, suspicious reporter text, scrubbed location); the reporter's description contradicts the detector's class; `research_coverage == no_match`; a budget cap; a grounding failure (the LLM is asked once); a second `needs_more_evidence` after the reporter's evidence; `jurisdiction_hint != "il"` on the signal extractor | none | `approvals` row, supervisor decides |
+| `needs_more_evidence` | the LLM asks for one more piece of evidence; the rule tree never triggers this on its own | none | reporter answers one request (section 7) |
+| `urgent` | D40 on a main road, lane partially or fully blocked | at least one id from `tool_result_ids` | `approvals` row, supervisor decides |
 | `standard` | everything else | at least one id from `tool_result_ids` | none; draft work order only |
+
+Note on confidence floors (24.10.2026): the historical `confidence < 0.5`
+floor to `human_review` and the zero-confidence floor to
+`needs_more_evidence` were removed. Measurement showed they routed ~60% of
+real submissions to human review regardless of other signals (bbox size,
+quality warnings, cluster flag, catalogue hit). The Decision persona now
+reads the detector confidence as one signal among many and decides; the
+`known_image` and the sanitiser-triggered `human_review` floors remain.
 
 Every verdict carries `action`, `rationale`, `priority` (the LLM's
 value clamped to 0-100 when the verdict comes from the LLM, the
@@ -264,27 +338,46 @@ the offline path.
 
 ## 6. Decision LLM path
 
-Default (`AGENT_DECISION_REACT=0`): one call to the panel
+Production (`AGENT_DECISION_REACT=1`, `AGENT_LLM_PROVIDER=ollama:qwen2.5:3b`):
+single-provider ReAct against a local Ollama model. The agent receives
+the eight tool schemas; every `tool_call` is executed, its result
+appended as a tool message, and the model called again, at most
+`DECISION_REACT_MAX_HOPS=2` executions counted on the budget tracker,
+the last call without tools. `hazard_id` always comes from state. A
+work order created in the loop is not created again; the evidence tool
+respects the cap; `flag_for_urgent_review` is recorded, not executed.
+ReAct replaces the panel for that hazard (decided 22.10.2026); the
+Decision model was `qwen2.5:7b` until 24.10.2026, swapped to `3b` after a
+3-5x latency win measured on this ARM host without a degradation on the
+scenario harness.
+
+Panel fallback (`AGENT_DECISION_REACT=0`): one call to the panel
 (`AGENT_LLM_PANEL`, three providers in parallel, majority vote with a
 severity tiebreak), each seat with exponential backoff and the
 `AGENT_LLM_FALLBACK` chain; tools are declared for knowledge only, the
-code calls them. Production seats:
+code calls them. Reference seats:
 `groq:openai/gpt-oss-120b,gemini:gemini-flash-lite-latest,mistral:mistral-small-latest`;
 chain:
-`gemini:gemini-flash-lite-latest,groq:openai/gpt-oss-20b,gemini:gemini-3.5-flash`
-(`gemini-3.5-flash` last because its free tier is 20 requests per day,
-measured). The panel votes with the seats that answered and falls back
-to the rule tree only when no seat answers.
+`gemini:gemini-flash-lite-latest,groq:openai/gpt-oss-20b,gemini:gemini-3.5-flash`.
+The panel votes with the seats that answered and falls back to the rule
+tree only when no seat answers. This path is kept for the benchmark
+harness and for the fallback when the Ollama container is unavailable;
+production runs the ReAct path.
 
-ReAct (`AGENT_DECISION_REACT=1`, off until the live benchmark): a single
-provider receives the four tool schemas; every `tool_call` is executed,
-its result appended as a tool message, and the model called again, at
-most `DECISION_REACT_MAX_HOPS=2` executions counted on the budget
-tracker, the last call without tools. `hazard_id` always comes from
-state. A work order created in the loop is not created again; the
-evidence tool respects the cap; `flag_for_urgent_review` is recorded,
-not executed. ReAct replaces the panel for that hazard (decided
-22.10.2026).
+Decision prompt character (24.10.2026): the system prompt was rewritten
+to frame the LLM as a seasoned municipal road-safety inspector with
+explicit "take ownership and decide" guidance. The inspector:
+- names the hazard class and the location in prose;
+- uses the detector confidence as one signal; low confidence is not by
+  itself a reason to escalate to a human;
+- names exaggeration ("the reporter claims this is a sinkhole, but the
+  detector shows a 40 cm pothole and the bbox hugs the frame bottom");
+- names contradictions between fields ("the lane_blocked field says
+  `none` but the reporter's text says `can't pass`");
+- flags non-road images and non-Israeli submissions when the signals say
+  so;
+- writes 2-3 sentences of free-text rationale and a `uncertainty` field
+  that names what the inspector would want to check on site.
 
 Decision reply contract (both paths): one JSON object with `reasoning`,
 `action`, `rationale` (kept to 500 characters), `priority` (clamped to
@@ -365,7 +458,7 @@ YOLO weights and a real corpus arrive.
 The webapp shows the request, switches the submit button to "Send the
 new photo" and posts the next upload to the fulfill endpoint.
 
-## 8. Policy fallbacks
+## 8. Policy fallbacks and input hardening
 
 Any of the following ends with `human_review`:
 
@@ -381,13 +474,44 @@ Any of the following ends with `human_review`:
 - the scene is not a road or the image is too blurred,
 - Research finds no matching procedure,
 - Intake records a class contradiction with the detector,
+- the signal extractor emits `jurisdiction_hint != "il"` (non-Israeli
+  submission routed to a human instead of into the normal urgent /
+  standard queue),
 - the reporter's evidence leaves the case ambiguous (cap).
+
+Any of the following ends with `known_image`:
+
+- `lookup_dataset_image` reports a sha256 or exact phash hit against the
+  catalogue (`fallback_reason=known_image_in_dataset`); no LLM triage
+  runs and no citizen-facing verdict is created.
 
 The deterministic paths that keep the system working without an LLM:
 the rule tree in every node (the default path of Perception and
 Research, section 6), keyword extraction in Intake, default evidence
 sentences, the rule-written patterns paragraph in the digest, and the
 rule tree as the eval baseline.
+
+Input hardening (24.10.2026): all free text (reporter description,
+location, OCR of in-image signage) runs through `sanitize_text` before
+any LLM sees it:
+
+1. Injection patterns are neutralised (lines of the form
+   `ignore previous instructions`, `you are now`, `system:`, control
+   codes, markdown fence tricks).
+2. The reporter text is wrapped in
+   `[USER_SUPPLIED_UNVERIFIED_BEGIN]...[USER_SUPPLIED_UNVERIFIED_END]`
+   markers so every downstream prompt reads it as evidence, not as
+   instructions.
+3. PII is redacted before the hazard row is stored or shown on an
+   operator page: Israeli phone numbers (`050-...`), email addresses,
+   Israeli national id numbers (9 digits with checksum), IBAN strings,
+   and credit-card-shaped sequences (13-19 digits with Luhn checksum).
+   Redaction replaces the match with `[redacted:phone]`, `[redacted:email]`,
+   etc. The raw text never reaches disk.
+4. `profile_builder` appends bbox-level sanity notes to
+   `quality_warnings` when a detection has tiny area (`< 0.2%` of the
+   frame), extreme aspect ratio (`> 10:1`), or hugs a frame edge; the
+   Decision prompt tells the LLM to downweight those detections.
 
 ## 9. Evaluation protocol
 

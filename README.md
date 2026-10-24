@@ -74,23 +74,34 @@ the reporter for one more piece of evidence.
 | supervisor | Python router; four budget caps (iterations, tool hops, cost, wall clock) | no | - | - |
 | profile_builder | YOLO + image quality + metadata -> hazard profile | yes, may only lower confidence | lookup_similar_cases (read) | - |
 | rag_retriever | ChromaDB lookup of repair standards; passages neutralised first | yes, labels coverage | query_repair_standards (read) | - |
-| decision | ReAct loop (max 2 tool hops): action, priority, rationale, citations | yes | check_hazard_severity, request_additional_evidence, create_draft_work_order, flag_for_urgent_review | evidence request, DRAFT work order, approval row |
+| decision | ReAct loop (max 2 tool hops): action, priority, inspector-prose rationale, citations | yes, inspector persona | 8 read-only + action tools (see below) | evidence request, DRAFT work order, approval row |
 | approval_gate | pending approval row + signed link | no | - | approvals |
 | await_evidence | pauses on a checkpoint until the reporter answers | no | - | - |
 
 Only Decision is an agent in the strict sense (the model chooses its next step);
 the other LLM-backed nodes are workers whose next step the code fixes.
 
-Guardrails: human approval before any urgent or human-review case moves on;
-deterministic floors (the rule tree's `urgent` / `human_review` verdict overrides
-the model); grounding check (`cited_sources` must be a subset of the tools'
-`tool_result_ids`, otherwise the rule tree decides); injection patterns neutralised
-in the location, OCR text, reporter text and RAG passages; budget caps; one evidence
-request per hazard.
+**Decision tools** (what the LLM can call mid-ReAct):
 
-Every LLM call runs on a local Ollama model (`AGENT_LLM_PROVIDER`, production:
-`ollama:qwen2.5:7b`); a panel of models can vote when `AGENT_DECISION_REACT=0`.
-Groq, Gemini and Mistral remain available as providers.
+- `check_hazard_severity`, `request_additional_evidence`, `create_draft_work_order`, `flag_for_urgent_review` - the original action tools.
+- `lookup_dataset_image` - exact phash hit in the RDD2022 catalogue; known_image fast path.
+- `rank_similarity_to_catalog` - top-K near matches with a similarity % (distance 0 = 100%, distance 24 = 62%). Lets the agent say "looks ~82% like catalogued D40 pic_id=1024" instead of a binary known / new.
+- `check_system_health` - ollama ps + /proc/meminfo + stub-mode flag, so the agent can tell when the pipeline is degraded and reflect that in the assessment.
+- `check_recent_cluster` - count of same-class reports at the same free-text location in the window; returns `cluster_flag` = none / emerging / strong, so recurring issues get flagged instead of triaged as one-offs.
+
+**Guardrails** (what the LLM does NOT decide):
+
+- Human approval before any urgent or human-review case moves on.
+- Deterministic floors kept only where they correct the LLM, not pre-empt it: the rule tree's `known_image`, `human_review` on suspicious OCR / sanitize hits, and the policy's `urgent` preconditions. The old zero-conf and `confidence<0.5` floors were removed - the Decision persona reads those signals in context and decides.
+- Grounding check: `cited_sources` must be a subset of the retriever's `tool_result_ids`, otherwise the rule tree decides.
+- Boundary defence on all free text: injection patterns neutralised, reporter text wrapped in `[USER_SUPPLIED_UNVERIFIED]` markers so downstream prompts treat it as evidence not instructions, PII redacted (phone / email / national id / IBAN / card) before the row is stored or shown.
+- Signal extractor emits `jurisdiction_hint` for non-Israeli submissions so the Decision agent can route them to a human instead of into the normal urgent / standard queue.
+- Profile builder appends bbox-level sanity notes (tiny area, extreme aspect, bbox hugs frame edge) to `quality_warnings`; Decision prompt tells the LLM to downweight the detector call when they appear.
+- Budget caps on iterations, tool hops, cost and wall clock.
+- One evidence request per hazard.
+
+Every LLM call runs on a local Ollama model. Per-worker assignment:
+`AGENT_SIGNAL_LLM` / `AGENT_PERCEPTION_LLM` / `AGENT_RESEARCH_LLM` / `AGENT_LLM_PROVIDER` (Decision) - production currently runs qwen2.5:3b on Decision after an own-measurement swap from 7b that cut per-case latency 3-5x on this ARM host. `AGENT_LLM_PANEL` can vote when `AGENT_DECISION_REACT=0`. Groq, Gemini and Mistral remain available as providers.
 
 ## API
 
@@ -104,7 +115,17 @@ lines), `GET /approvals/{id}`, `POST /approvals/{id}/decide`,
 Operator pages, served only on the hosts listed in `ROADGUARD_PRIVATE_HOSTS`
 (loopback by default): `/trace` (a terminal that follows the newest hazard and
 prints each node's decision as it happens), `/supervisor`, `GET /status` (host
-load, models, RAG, database, images, tunnel, shortcuts, open items).
+load, models, RAG, database, images, tunnel, shortcuts, open items),
+`/digest/latest` (two-tab console: Cases with KPI strip + red-bordered Clusters
+panel + split image/detail view; Timeline accordion), `/digest/{YYYY-MM-DD}`
+(archived snapshot from the twice-daily cron), `/health/system` (ollama RAM,
+loaded models, stub-mode, host memory used %), `/stats/public` (aggregates for
+the public landing: open cases, closed this week, by decision, by class,
+median resolution hours).
+
+The twice-daily digest is written to `/var/lib/roadguard/digests/<date>.html`
+and - when the `RG_DIGEST_SMTP_*` env vars are set - emailed to
+`RG_DIGEST_MAIL_TO` via Gmail SMTP; see `deploy/README.md`.
 
 ## Deployment used by the project
 

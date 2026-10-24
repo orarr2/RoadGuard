@@ -2,6 +2,23 @@
 
 > הערת מבנה (24.10.2026): קוד הריצה מאוחד בשני קבצים בשורש הריפו: `roadguard_agent.py` (ליבת הסוכן, הגדרות, שכבת SQLite, כלים, prompts) ו-`roadguard_api.py` (שירות FastAPI ודפי האופרטור). נתיבים כמו `src/agent/multiagent/nodes/decision.py` במסמך מציינים את המודולים הקודמים; כל אחד מהם מופיע כבלוק `# section:` באותו שם בתוך שני הקבצים. `policy.yaml` יושב לידם.
 
+> הערת פריסה (24.10.2026): הפרודקשן רץ על Oracle `VM.Standard.A1.Flex` (4 OCPU ARM, 24 GB RAM, Always Free). כל ה-LLMs הם Ollama לוקאלי ב-Docker, בפריסה הבאה:
+> - `AGENT_SIGNAL_LLM=ollama:llama3.2:3b` (signal_extractor)
+> - `AGENT_PERCEPTION_LLM=ollama:qwen2.5:3b` (profile_builder)
+> - `AGENT_RESEARCH_LLM=ollama:granite3.3:2b` (rag_retriever)
+> - `AGENT_LLM_PROVIDER=ollama:qwen2.5:3b` (Decision; הוחלף מ-`qwen2.5:7b` ל-`3b` ב-24.10.2026 אחרי שה-latency ירד 3-5x על ה-host הזה בלי regression בסבב ה-eval)
+> - `nomic-embed-text` ל-RAG embeddings
+>
+> `OLLAMA_NUM_PARALLEL=4` על ה-container מאפשר לארבעת המודלים לרוץ במקביל. ספקי ה-API החיצוניים (Groq / Gemini / Mistral) נותרים זמינים כ-fallback ב-benchmark, אך לא בשימוש בפרודקשן.
+
+> הערת כלים ל-Decision (24.10.2026): סוכן ה-Decision מחזיק 8 כלים (לא 4 כפי שמתואר בטבלאות הישנות למטה):
+> - **פעולה (write):** `check_hazard_severity`, `request_additional_evidence`, `create_draft_work_order`, `flag_for_urgent_review`
+> - **קריאה בלבד (read):** `lookup_dataset_image` (fast-path ל-`known_image` על hit), `rank_similarity_to_catalog` (top-K near-matches ב-%), `check_system_health` (ollama ps + /proc/meminfo + stub flag), `check_recent_cluster` (same-class same-location, 7 ימים חזרה; `cluster_flag=none|emerging|strong`)
+>
+> החלטה חשובה (24.10.2026): ה-floors הדטרמיניסטיים של `confidence < 0.5` ו-zero confidence הוסרו. הם ניתבו ~60% מההגשות האמיתיות ל-human_review בלי קשר ליתר האותות. ה-persona החדשה של Decision היא "פקח כבישים עירוני ותיק" שכותב 2-3 משפטים חופשיים ב-`rationale`, שדה `uncertainty` נפרד, ולוקח בעלות על ההחלטה. ה-floors שנשארו: `known_image` על hit ב-catalog, `human_review` על suspicious OCR / sanitize / `jurisdiction_hint != "il"`, ו-`urgent` preconditions ב-policy.
+
+> הערת הגנה בכניסה (24.10.2026): כל טקסט חופשי (reporter description, location, OCR של שלטים בתמונה) עובר דרך `sanitize_text` לפני שאיזשהו LLM רואה אותו: patterns של injection מנוטרלים, הטקסט של המדווח עטוף ב-`[USER_SUPPLIED_UNVERIFIED_BEGIN]...[END]` כדי שה-prompts במורד הזרם יקראו אותו כ-evidence ולא כ-instructions, ו-PII נמחק (טלפון, אימייל, ת"ז ישראלית, IBAN, מספרי כרטיסי אשראי) לפני ששורת ה-hazard נשמרת ב-DB או מוצגת בדף אופרטור. בנוסף, `profile_builder` מצרף ל-`quality_warnings` הערות bbox-level (שטח זעיר, יחס extreme, מגע עם קצה פריים), וה-prompt של Decision מורה ל-LLM להוריד את משקל הדטקטור כשהן מופיעות.
+
 # RoadGuard - ארכיטקטורת הסוכנים ומדריך המימוש
 
 מדריך מלא לשכבת הסוכנים של RoadGuard. מכסה את התיאור הארכיטקטוני, את המימוש של כל רכיב, את ה־system prompts, את מנגנוני ה־fallback, את טבלאות השליטה והבקרה, ואת מצב המערכת.
