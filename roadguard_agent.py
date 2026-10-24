@@ -855,6 +855,51 @@ class Database:
                 return {**dict(best[1]), "match": "phash", "distance": best[0]}
         return None
 
+    def find_near_dataset_images(
+        self,
+        sha256: str | None,
+        phash: str | None,
+        k: int = 3,
+        max_distance: int = 24,
+    ) -> list[dict[str, Any]]:
+        """Return the K nearest catalogued images, sorted by phash distance
+        ascending. Used by the Decision agent to put a similarity percentage
+        on a photo that is not an exact catalogue hit - instead of the
+        binary 'known vs new' answer. SHA-256 identity still wins and is
+        reported with distance 0 (similarity 100 %)."""
+        hits: list[dict[str, Any]] = []
+        if sha256:
+            row = self._conn.execute(
+                "SELECT * FROM dataset_images WHERE sha256 = ? LIMIT 1", (sha256.lower(),)
+            ).fetchone()
+            if row is not None:
+                hits.append({**dict(row), "match": "sha256", "distance": 0})
+        if phash:
+            try:
+                target = int(phash, 16)
+            except ValueError:
+                target = None
+            if target is not None:
+                # One sweep of the catalogue keeping the K smallest distances.
+                for row in self._conn.execute("SELECT * FROM dataset_images"):
+                    try:
+                        d = bin(target ^ int(row["phash"], 16)).count("1")
+                    except ValueError:
+                        continue
+                    if d > max_distance:
+                        continue
+                    hits.append({**dict(row), "match": "phash", "distance": d})
+        # Dedupe by pic_id (sha256 hit may also appear by phash), keep the
+        # smallest distance, sort ascending, truncate to K.
+        best_by_pic: dict[Any, dict[str, Any]] = {}
+        for h in hits:
+            pid = h.get("pic_id")
+            if pid in best_by_pic and best_by_pic[pid]["distance"] <= h["distance"]:
+                continue
+            best_by_pic[pid] = h
+        ordered = sorted(best_by_pic.values(), key=lambda h: h["distance"])
+        return ordered[:k]
+
     def append_hazard_trace_entry(self, hazard_id: str, entry: dict[str, Any]) -> None:
         """Append one trace entry to the row right now (live ReAct steps)."""
         row = self._conn.execute(
@@ -3475,6 +3520,18 @@ def _build_decision_prompt() -> str:
         "known_image: rationale = the catalogued labels and the recorded\n"
         "prediction, cited_sources [], priority 0. Never answer known_image\n"
         "without a dataset_match.\n\n"
+        "Similarity to the catalogue (new photos)\n"
+        "When the submission is NOT an exact catalogue hit but you want to\n"
+        "know whether it still looks like a known defect, call the tool\n"
+        "`rank_similarity_to_catalog` (k=3). It returns the top-3 nearest\n"
+        "catalogued photos with a similarity percentage: distance 0 = 100%%,\n"
+        "distance 8 ~= 87%%, distance 16 = 75%%, distance 24 = 62%%. Use\n"
+        "this to put a hedged line in your rationale and assessment -\n"
+        "'looks ~82%% like catalogued D40 pic_id=1024' - and to let\n"
+        "yourself decide instead of asking for another photo when the\n"
+        "near match is clear enough. A high similarity to a catalogued\n"
+        "defect of the SAME class the detector picked is a strong signal\n"
+        "the detector was right even on low confidence.\n\n"
         "Tool calls\n"
         "When you call a tool, write one sentence of reasoning in the message\n"
         "content (why this tool now); it is shown in the live trace.\n\n"
@@ -5000,6 +5057,80 @@ def lookup_dataset_image(
     }
 
 
+RANK_SIMILARITY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "rank_similarity_to_catalog",
+        "description": (
+            "Return the top-K catalogued reference images that most resemble "
+            "the submitted photo, ranked by perceptual-hash distance, with "
+            "a similarity percentage. Use this when the photo is not an "
+            "exact catalogue hit but you want to know whether it looks like "
+            "a known defect of a given class. Read-only; the submission's "
+            "hashes are used if no arguments are supplied."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sha256": {"type": "string", "description": "optional override"},
+                "phash": {"type": "string", "description": "optional override"},
+                "k": {"type": "integer", "description": "how many near matches to return (default 3, max 10)"},
+            },
+            "required": [],
+        },
+    },
+}
+
+
+def rank_similarity_to_catalog(
+    sha256: str | None = None,
+    phash: str | None = None,
+    k: int = 3,
+) -> dict[str, Any]:
+    """Top-K near matches with a similarity %, so Decision can say
+    `looks like catalogued D40 pic_id=1024 at 82% similarity` instead
+    of a binary known / not-known answer. 64-bit phash: similarity =
+    1 - (hamming_distance / 64)."""
+    k = max(1, min(10, int(k) if isinstance(k, int) else 3))
+    if not sha256 and not phash:
+        return {"found": False, "reason": "the submission carries no image hashes", "matches": []}
+    try:
+        settings = get_settings()
+        with Database(settings.roadguard_db_path) as db:
+            rows = db.find_near_dataset_images(sha256, phash, k=k, max_distance=24)
+    except Exception as exc:
+        LOGGER.warning("rank_similarity_skipped: %s", exc)
+        return {"found": False, "reason": f"catalogue unavailable ({type(exc).__name__})", "matches": []}
+    if not rows:
+        return {"found": False, "reason": "no catalogued image within 24-bit hamming distance", "matches": []}
+    matches = []
+    for row in rows:
+        distance = int(row.get("distance", 64))
+        similarity_pct = round((1 - distance / 64.0) * 100, 1)
+        pred = None
+        if row.get("model_top1_class"):
+            pred = f"{row['model_top1_class']} {float(row.get('model_top1_confidence') or 0):.2f}"
+        matches.append({
+            "pic_id": row.get("pic_id"),
+            "file_name": row.get("file_name"),
+            "split": row.get("split"),
+            "distance": distance,
+            "similarity_pct": similarity_pct,
+            "classes": row.get("classes") or "",
+            "n_labels": row.get("n_labels") or 0,
+            "model_prediction": pred,
+            "match": row.get("match"),
+        })
+    top1 = matches[0]
+    return {
+        "found": True,
+        "best_similarity_pct": top1["similarity_pct"],
+        "best_class": top1["classes"],
+        "n_matches": len(matches),
+        "matches": matches,
+    }
+
+
 def _dataset_lookup_summary(hit: dict | None) -> dict[str, Any]:
     hit = hit or {}
     if not hit.get("found"):
@@ -5040,7 +5171,7 @@ def _known_image_decision(match: dict) -> dict:
     }
 
 
-_READ_ONLY_DECISION_TOOLS = ("check_hazard_severity", "lookup_dataset_image")
+_READ_ONLY_DECISION_TOOLS = ("check_hazard_severity", "lookup_dataset_image", "rank_similarity_to_catalog")
 
 
 def _short_json(obj: Any, limit: int) -> str:
@@ -5078,6 +5209,7 @@ RESEARCH_TOOLS = {
 DECISION_TOOLS = {
     "check_hazard_severity": (check_hazard_severity, SEVERITY_SCHEMA),
     "lookup_dataset_image": (lookup_dataset_image, DATASET_SCHEMA),
+    "rank_similarity_to_catalog": (rank_similarity_to_catalog, RANK_SIMILARITY_SCHEMA),
     "request_additional_evidence": (request_additional_evidence, EVIDENCE_SCHEMA),
     "create_draft_work_order": (create_draft_work_order, DRAFT_SCHEMA),
     "flag_for_urgent_review": (flag_for_urgent_review, FLAG_SCHEMA),
