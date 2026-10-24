@@ -737,6 +737,16 @@ async function submitUploadedImage() {
     image_phash: fingerprints.phash,
   };
 
+  // Deduplicate: refuse to re-send the SAME image bytes in the same session.
+  // Prevents accidental double-click floods and the user re-uploading an image
+  // the agent is already working on. User can pick a different image to proceed.
+  if (fingerprints.sha256 && uploadState.inflightHashes && uploadState.inflightHashes.has(fingerprints.sha256)) {
+    verdictBox.innerHTML = `<div class="upload-verdict-empty" style="color:#b45309;font-weight:600">This exact image is already in flight or was just submitted. Pick a different photo (or wait for the current case to finish) to send another one.</div>`;
+    return;
+  }
+  if (!uploadState.inflightHashes) uploadState.inflightHashes = new Set();
+  if (fingerprints.sha256) uploadState.inflightHashes.add(fingerprints.sha256);
+
   // Answering the agent's evidence request resumes the paused case
   // instead of opening a new one.
   const pending = uploadState.pendingEvidence;
@@ -798,10 +808,16 @@ async function submitUploadedImage() {
 async function pollAsyncHazard(hazardId, verdictBox) {
   const maxWait = 300000;
   const started = Date.now();
+  // Transient fetch failures (tunnel hiccup, mobile network wobble) are
+  // retried in-place; only after N consecutive misses do we surface the
+  // "Failed to fetch" line to the user. Each successful fetch resets.
+  const MAX_CONSECUTIVE_ERRORS = 5;
+  let consecutiveErrors = 0;
   while (Date.now() - started < maxWait) {
     await new Promise(r => setTimeout(r, 3000));
     try {
       const report = await fetchJson(`/report/${encodeURIComponent(hazardId)}`);
+      consecutiveErrors = 0;
       const v = report.verdict || {};
       const inProgress = !v.status || v.status === "queued" || v.status === "processing";
       if (!inProgress) {
@@ -829,12 +845,24 @@ async function pollAsyncHazard(hazardId, verdictBox) {
       }
       const elapsed = Math.round((Date.now() - started) / 1000);
       const steps = (report.trace || []).length;
+      const queuePos = Number(report.queue_position || 0);
       const spin = `<div class="rg-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;border:2px solid #cbd5e1;border-top-color:#0ea5e9;border-radius:50%;animation:rg-spin 0.9s linear infinite;vertical-align:middle;margin-right:8px"></div>`;
-      verdictBox.innerHTML = v.status === "queued"
-        ? `<div class="upload-verdict-empty">${spin}Queued behind another case... ${elapsed}s elapsed.</div>`
-        : `<div class="upload-verdict-empty">${spin}Working... ${elapsed}s elapsed, ${steps} pipeline steps done (local agents on CPU can take 1-5 minutes).</div>`;
+      if (v.status === "queued") {
+        const posTxt = queuePos > 0 ? ` (position ${queuePos} in queue)` : "";
+        verdictBox.innerHTML = `<div class="upload-verdict-empty">${spin}Queued behind another case${posTxt}... ${elapsed}s elapsed. Each case takes 1-3 minutes on this VM.</div>`;
+      } else {
+        verdictBox.innerHTML = `<div class="upload-verdict-empty">${spin}Working... ${elapsed}s elapsed, ${steps} pipeline steps done (local agents on CPU take 1-5 minutes).</div>`;
+      }
     } catch (err) {
-      verdictBox.innerHTML = `<div class="upload-verdict-empty">Polling for the verdict failed: ${(err && err.message) || err}. Try again in a moment.</div>`;
+      consecutiveErrors += 1;
+      if (consecutiveErrors < MAX_CONSECUTIVE_ERRORS) {
+        // Transient: keep polling, let the user know we're retrying so the
+        // UI does not appear frozen while the background retry happens.
+        const spin = `<div class="rg-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;border:2px solid #cbd5e1;border-top-color:#f59e0b;border-radius:50%;animation:rg-spin 0.9s linear infinite;vertical-align:middle;margin-right:8px"></div>`;
+        verdictBox.innerHTML = `<div class="upload-verdict-empty">${spin}Reconnecting... (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}) - agent is still working on the server.</div>`;
+        continue;
+      }
+      verdictBox.innerHTML = `<div class="upload-verdict-empty">Could not reach the server after ${MAX_CONSECUTIVE_ERRORS} tries: ${(err && err.message) || err}. The agent may still finish - come back in a minute and reload.</div>`;
       return false;
     }
   }
