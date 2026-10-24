@@ -63,12 +63,14 @@ window.addEventListener("DOMContentLoaded", async () => {
   wireSignIn();
   wireNavSignIn();
   wireHeroSlideshow();
+  wireAutoTelemetry();
   refreshSignInLabel();
   setUnauthorizedHandler(() => {
     refreshSignInLabel();
     openSignIn();
   });
   resolveApiOrigin().catch(() => {});
+  track("page_load", { url: location.pathname, ua: navigator.userAgent.slice(0, 80) });
 });
 
 // ============================================================ HERO SLIDESHOW
@@ -126,6 +128,7 @@ function wireHeroSlideshow() {
 
 // ============================================================ VIEW HELPERS
 function setView(view) {
+  const prev = state.view;
   state.view = view;
   document.body.dataset.view = view;
   document.getElementById("view-landing").hidden = view !== "landing";
@@ -134,6 +137,46 @@ function setView(view) {
   const sessionBtn = document.getElementById("nav-session");
   sessionBtn.hidden = view !== "live";
   window.scrollTo({ top: 0 });
+  track("navigate", { from: prev || "none", to: view });
+}
+
+// Lightweight client telemetry: fire-and-forget POST /telemetry/event.
+// The server prints a [CLIENT   ] line to the journal so rg-trace shows
+// user actions interleaved with the pipeline events. Silent on failure
+// (never blocks the UI). The POST is wrapped in try/catch at the call
+// site style; here we just rely on fetch's error promise and ignore it.
+async function track(event, meta) {
+  try {
+    const resolved = await resolveApiOrigin().catch(() => "");
+    const base = resolved || "";
+    await fetch(`${base}/telemetry/event`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event, meta: meta || {} }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch {
+    // telemetry must never break the UI
+  }
+}
+
+// Wire a convenience auto-tracker on buttons/links tagged data-track="label"
+// so we do not have to sprinkle track() in every handler. Fires once per
+// click; meta carries the element id, label and current view.
+function wireAutoTelemetry() {
+  document.addEventListener("click", (e) => {
+    const el = e.target.closest("[data-track], button, a.btn, .nav-btn");
+    if (!el) return;
+    const label = el.dataset.track || el.id || (el.textContent || "").trim().slice(0, 40) || el.tagName.toLowerCase();
+    track("click", { label, view: state.view });
+  }, { capture: true });
+  document.addEventListener("change", (e) => {
+    const el = e.target;
+    if (!el || !el.id) return;
+    const kind = el.tagName === "SELECT" ? "select" : el.type || "input";
+    const value = el.tagName === "SELECT" ? (el.value || "") : (kind === "checkbox" ? (el.checked ? "on" : "off") : (el.value ? "<set>" : "<empty>"));
+    track("field_change", { field: el.id, kind, value, view: state.view });
+  }, { capture: true });
 }
 
 function toast(msg, ms = 2500) {
