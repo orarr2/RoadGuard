@@ -692,26 +692,20 @@ async function openUploadWithFile(file) {
       // from detect.js clears, which is correct for the live overlay but
       // wrong here - the canvas IS the image, not a transparent overlay).
       ctx.drawImage(img, 0, 0);
-      _overlayBoxes(ctx, result.detections, canvas.width);
-      if (result.detections && result.detections.length) {
-        const top = result.detections[0];
-        const topLabel = HAZARD_CLASS_LABELS[top.class] || top.class;
-        show(`
-          <div class="upload-verdict-ready">
-            <div class="upload-verdict-stage">YOLO on-device found <strong>${result.detections.length}</strong> detection${result.detections.length === 1 ? "" : "s"}.</div>
-            <div class="upload-verdict-top">Top class: <strong>${topLabel}</strong> (<code>${top.class}</code>) at confidence <strong>${top.confidence.toFixed(2)}</strong></div>
-            <div class="upload-verdict-cta">Press <em>Triage with agent</em> to send to the signal_extractor &rarr; profile_builder &rarr; rag_retriever &rarr; decision pipeline.</div>
-          </div>`);
-        submitBtn.disabled = false;
-      } else {
-        show(`
-          <div class="upload-verdict-ready" style="border-left:4px solid #0ea5e9;padding-left:10px">
-            <div class="upload-verdict-stage">YOLO on-device did not match any of the four known classes (D00/D10/D20/D40) on this image.</div>
-            <div class="upload-verdict-top">This usually means a new or borderline defect the detector was not trained on.</div>
-            <div class="upload-verdict-cta"><strong>Press <em>Triage with agent</em> below</strong> &mdash; the agent pipeline will still analyze the image and return a <code>human_review</code> verdict so a supervisor sees it.</div>
-          </div>`);
-        submitBtn.disabled = false;
-      }
+      // bbox overlay disabled per operator preference 24.10: the citizen
+      // should not see the detector's class label on the image (fear of
+      // the model picking the wrong object and misleading the reporter).
+      // Detections are still computed and sent to the server as metadata.
+      // _overlayBoxes(ctx, result.detections, canvas.width);
+      // Internals-hidden citizen UX (per operator preference 24.10):
+      // the on-device YOLO detections are STILL run (they feed the server
+      // payload + bbox overlay suppressed on the canvas) but we do not
+      // surface class / confidence / count to the citizen. All the citizen
+      // sees before Send is a neutral message. The verdict after Send is
+      // likewise minimal (thanks + known-hazard flag only, see
+      // renderUploadVerdict / CITIZEN_COPY).
+      show(`<div class="upload-verdict-empty">Image received. Please fill in the details below and press <em>Send to Agent</em>.</div>`);
+      submitBtn.disabled = false;
     } catch (err) {
       show(`<div class="upload-verdict-empty">Detector error: ${(err && err.message) || err}</div>`);
     }
@@ -734,16 +728,17 @@ async function submitUploadedImage() {
   const canvas = document.getElementById("upload-canvas");
   const roadType = document.getElementById("upload-road-type").value;
   const laneBlocked = document.getElementById("upload-lane-blocked").value;
+  const risk = document.getElementById("upload-risk").value;
   const location = (document.getElementById("upload-location").value || "").trim();
   const reporterText = (document.getElementById("upload-reporter-text").value || "").trim();
   const det = uploadState.lastDetections;
   if (!det) return;
-  // All four context fields are REQUIRED before a case is created on the server.
-  // Partial submits were allowed earlier and produced thin cases the agent could
-  // not reason about; the form now blocks the submit until every field is filled.
+  // All 5 context fields are REQUIRED before a case is created on the server.
+  // Partial submits produced thin cases the agent could not reason about.
   const missing = [];
   if (!roadType) missing.push("Road type");
   if (!laneBlocked) missing.push("Lane obstruction");
+  if (!risk) missing.push("Risk level");
   if (!location) missing.push("Location");
   if (!reporterText) missing.push("Describe what you see");
   if (missing.length) {
@@ -818,7 +813,12 @@ async function submitUploadedImage() {
     road_type: roadType,
     lane_blocked: laneBlocked,
     location,
-    reporter_text: reporterText,
+    // The citizen-perceived risk level ("small"|"moderate"|"dangerous") is
+    // appended to reporter_text as a tagged suffix the signal_extractor can
+    // pick up. We piggy-back on reporter_text instead of adding a brand-new
+    // field so the HazardSubmit server schema stays compatible with older
+    // clients that do not know about the risk dropdown.
+    reporter_text: `[risk=${risk}] ${reporterText}`,
     image_sha256: fingerprints.sha256,
     image_phash: fingerprints.phash,
     image_jpeg_base64: imageJpegBase64,
