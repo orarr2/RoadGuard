@@ -768,6 +768,44 @@ async function submitUploadedImage() {
       console.warn("fingerprint failed", err);
     }
   }
+  // Resize + JPEG-encode the uploaded image client-side so the request
+  // payload stays small and the server never has to receive the original
+  // 20 MB phone photo. Max dimension 1600 px, quality 0.8 -> ~300-500 KB
+  // typical. The server rejects anything over 5 MB raw.
+  let imageJpegBase64 = null;
+  try {
+    const srcCanvas = canvas;
+    const maxDim = 1600;
+    let w = srcCanvas.width, h = srcCanvas.height;
+    if (w > maxDim || h > maxDim) {
+      const scale = Math.min(maxDim / w, maxDim / h);
+      w = Math.round(w * scale);
+      h = Math.round(h * scale);
+    }
+    const outCanvas = document.createElement("canvas");
+    outCanvas.width = w;
+    outCanvas.height = h;
+    outCanvas.getContext("2d").drawImage(srcCanvas, 0, 0, w, h);
+    imageJpegBase64 = outCanvas.toDataURL("image/jpeg", 0.8);
+    // 5 MB raw -> ~6.9 MB base64 (incl. "data:image/jpeg;base64," prefix)
+    if (imageJpegBase64.length > 7_000_000) {
+      verdictBox.innerHTML = `<div class="upload-verdict-empty" style="color:#b91c1c;font-weight:600">The compressed image is still larger than 5 MB. Pick a smaller photo (max 5 MB after resize).</div>`;
+      submitBtn.disabled = false;
+      return;
+    }
+  } catch (err) {
+    // Submission must not proceed without an image: the operator relies
+    // on it for the daily digest and for same-street comparisons.
+    verdictBox.innerHTML = `<div class="upload-verdict-empty" style="color:#b91c1c;font-weight:600">Could not read the image file (${(err && err.message) || err}). Pick another photo.</div>`;
+    submitBtn.disabled = false;
+    return;
+  }
+  if (!imageJpegBase64) {
+    verdictBox.innerHTML = `<div class="upload-verdict-empty" style="color:#b91c1c;font-weight:600">An image is required for submission. Please pick a photo first.</div>`;
+    submitBtn.disabled = false;
+    return;
+  }
+
   // No image_quality field: the client does not measure it and the
   // server falls back to the same defaults when it is absent.
   const body = {
@@ -783,6 +821,7 @@ async function submitUploadedImage() {
     reporter_text: reporterText,
     image_sha256: fingerprints.sha256,
     image_phash: fingerprints.phash,
+    image_jpeg_base64: imageJpegBase64,
   };
 
   // Deduplicate: refuse to re-send the SAME image bytes in the same session.
@@ -973,70 +1012,61 @@ function citeHtml(id) {
   return `<span class="verdict-cite">${String(id).replace(/[<>]/g, "")}</span>`;
 }
 
-const ACTION_COPY = {
+// CITIZEN VIEW copy only: short, objective, friendly. No priority, no
+// rationale text, no agent notes, no cited policy codes. All of those
+// stay internal and feed the supervisor digest + approval page; the
+// citizen just needs to know their report landed and whether it is
+// already a known hazard.
+const CITIZEN_COPY = {
   urgent: {
-    headline:    "Urgent dispatch recommended",
-    guidance:    "Approve to notify the on-call maintenance crew. The approval is logged against this case.",
+    headline: "Thank you - your report has been received",
+    body:     "A municipal supervisor has been notified and will take it from here.",
   },
   standard: {
-    headline:    "Standard repair queue",
-    guidance:    "Routed to the regular maintenance queue. No supervisor action required unless you want to override.",
+    headline: "Thank you - your report has been received",
+    body:     "The municipality will handle it as part of regular road maintenance.",
   },
   needs_more_evidence: {
-    headline:    "More evidence needed",
-    guidance:    "Image was ambiguous. The reporter will be asked for a clearer / closer shot before triage finishes.",
+    headline: "Thank you - one more photo would help",
+    body:     "The image was a bit unclear. Please send one more photo of the same spot from a slightly different angle so the team can look at it properly.",
   },
   human_review: {
-    headline:    "Awaiting supervisor review",
-    guidance:    "Case flagged to you for a manual decision. Common reasons: non-road scene, borderline confidence, or suspicious text.",
+    headline: "Thank you - your report has been received",
+    body:     "A municipal supervisor will take a look at this one personally.",
   },
   known_image: {
-    headline:    "Already in the reference dataset",
-    guidance:    "This photo is one of the catalogued dataset images. The agent reports the catalogued labels and the recorded model prediction; no new triage is produced.",
+    headline: "Thank you - we already know about this one",
+    body:     "This hazard has already been reported and is being tracked. No action needed from you.",
   },
-};
-
-// Shown in place of verdict.rationale, which is internal text (guard and
-// fallback reasons). needs_more_evidence shows the server's request message.
-const ACTION_SUMMARY = {
-  urgent: "Flagged for urgent inspection. A municipal supervisor reviews it before any work is scheduled.",
-  standard: "Queued for standard maintenance review.",
-  human_review: "Sent to a municipal supervisor for a manual decision.",
-  known_image: "This photo is already catalogued in the reference dataset.",
 };
 
 function renderUploadVerdict(resp) {
   const action = resp.verdict.action;
   const level = LEVEL_BY_ACTION[action] || "info";
-  const copy  = ACTION_COPY[action] || { headline: action.toUpperCase(), guidance: "" };
-  const priority = resp.verdict.priority || 0;
+  const copy  = CITIZEN_COPY[action] || {
+    headline: "Thank you - your report has been received",
+    body:     "The municipality will review it.",
+  };
   const caseRef = (resp.hazard_id || "").slice(-8);
   const timeNow = new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
-  const cited = (resp.verdict.cited_sources || []).map(citeHtml).join("");
-  const summary = action === "needs_more_evidence"
-    ? String((resp.evidence_request && resp.evidence_request.message) || "")
-    : ACTION_SUMMARY[action] || "";
+  // The internal fields (priority, rationale, cited standards, agent note)
+  // ARE kept on the server and reach the supervisor through the daily digest
+  // and the approval page. They are intentionally not rendered here: the
+  // citizen does not need them and showing them creates noise.
+  const bodyText = action === "needs_more_evidence"
+    ? String((resp.evidence_request && resp.evidence_request.message) || copy.body)
+    : copy.body;
 
   const html = `
     <div class="upload-verdict-card" data-level="${level}">
       <div class="upload-verdict-head">
         <span class="upload-verdict-action">${copy.headline}</span>
-        <span class="upload-verdict-pri" title="Priority score 0-100 - higher means more urgent">priority ${priority}</span>
       </div>
-      <div class="upload-verdict-prio-bar">
-        <div class="upload-verdict-prio-fill" style="width:${Math.max(2, Math.min(100, priority))}%"></div>
-      </div>
-      ${summary ? `<div class="upload-verdict-rationale">${summary.replace(/[<>]/g, "")}</div>` : ""}
-      <div class="upload-verdict-guidance">${copy.guidance}</div>
-      ${cited ? `
-        <div class="upload-verdict-cites-wrap">
-          <div class="upload-verdict-cites-head">Grounded in maintenance standards:</div>
-          <div class="upload-verdict-cites">${cited}</div>
-        </div>` : ""}
+      <div class="upload-verdict-rationale" style="margin-top:8px">${bodyText.replace(/[<>]/g, "")}</div>
       <div class="upload-verdict-footer">
-        <span>Case <strong>#${caseRef}</strong></span>
-        <span>Logged at ${timeNow}</span>
+        <span>Reference <strong>#${caseRef}</strong></span>
+        <span>Received at ${timeNow}</span>
       </div>
     </div>`;
   document.getElementById("upload-verdict").innerHTML = html;

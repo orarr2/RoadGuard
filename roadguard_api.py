@@ -503,6 +503,11 @@ class HazardSubmit(BaseModel):
     # reference dataset (the known_image action).
     image_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
     image_phash: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{16}$")
+    # Base64-encoded JPEG bytes (webapp resizes client-side to max 1600x1600,
+    # q=80, before encoding). Enforced max ~6.9 MB base64 = 5 MB raw image.
+    # The server saves to /var/lib/roadguard/images/<hazard_id>.jpg and
+    # exposes it via GET /images/<hazard_id>. 7-day retention per cron.
+    image_jpeg_base64: str | None = Field(default=None, max_length=7_000_000)
 
 
 class EvidenceRequestOut(BaseModel):
@@ -1815,6 +1820,36 @@ def create_app() -> FastAPI:
             rag_ready=_rag_ready(settings),
         )
 
+    @app.get("/images/{hazard_id}")
+    def hazard_image(hazard_id: str) -> Any:
+        """Serve the stored citizen photo for a hazard. Returns 404 if the
+        image was never uploaded or was deleted by the 7-day retention cron.
+        No auth required: these photos are municipal evidence a supervisor
+        or the public can see in the daily digest / case page."""
+        from fastapi.responses import FileResponse as _FileResponse
+        from pathlib import Path as _Path
+        import re as _re
+        if not _re.fullmatch(r"hz_[0-9a-f]{6,32}", hazard_id or ""):
+            raise HTTPException(status_code=400, detail="invalid hazard_id")
+        path = _Path("/var/lib/roadguard/images") / f"{hazard_id}.jpg"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="image not found or expired")
+        return _FileResponse(path, media_type="image/jpeg")
+
+    @app.get("/digest/latest", response_class=HTMLResponse)
+    @app.get("/digest/{date}", response_class=HTMLResponse)
+    def digest_html(date: str | None = None) -> HTMLResponse:
+        """Serve the pre-generated daily digest HTML (built by /usr/local/bin/rg-digest,
+        cron at 05:00 and 17:00 UTC). /digest/latest = today, /digest/YYYY-MM-DD = that date.
+        Returns 404 if the file does not exist yet."""
+        from pathlib import Path as _Path
+        import datetime as _dt
+        day = (date or _dt.datetime.utcnow().strftime("%Y-%m-%d"))
+        path = _Path("/var/lib/roadguard/digests") / f"{day}.html"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail=f"digest for {day} not available yet")
+        return HTMLResponse(content=path.read_text(encoding="utf-8"))
+
     @app.post("/telemetry/event")
     def telemetry_event(body: dict, request: Request) -> dict:
         """Light-weight client telemetry sink: the webapp posts {event, meta}
@@ -2024,6 +2059,56 @@ def create_app() -> FastAPI:
             emit_trace(hazard_id, final_state, source="api_async",
                        elapsed_s=time.time() - started_at)
 
+    def _save_hazard_image(hazard_id: str, b64: str | None) -> None:
+        """Decode and save a webapp-uploaded JPEG. Enforces a 5 MB raw cap
+        plus the 5 GB total-store cap (oldest files purged on overflow).
+        Silent on any error - the pipeline continues without the image."""
+        if not b64:
+            return
+        try:
+            import base64, os, re as _re
+            if not _re.fullmatch(r"hz_[0-9a-f]{6,32}", hazard_id or ""):
+                return
+            payload = b64.split(",", 1)[-1]  # strip "data:image/jpeg;base64,"
+            raw = base64.b64decode(payload, validate=False)
+            if len(raw) == 0 or len(raw) > 5 * 1024 * 1024:
+                LOGGER.warning("hazard_image_rejected hazard_id=%s bytes=%d", hazard_id, len(raw))
+                return
+            os.makedirs("/var/lib/roadguard/images", exist_ok=True)
+            path = f"/var/lib/roadguard/images/{hazard_id}.jpg"
+            with open(path, "wb") as fh:
+                fh.write(raw)
+            try:
+                os.chmod(path, 0o644)
+            except Exception:
+                pass
+            # Enforce 5 GB cap: if total size exceeds, delete oldest first.
+            cap = 5 * 1024 * 1024 * 1024
+            files = []
+            total = 0
+            for name in os.listdir("/var/lib/roadguard/images"):
+                p = f"/var/lib/roadguard/images/{name}"
+                try:
+                    st = os.stat(p)
+                    files.append((st.st_mtime, st.st_size, p))
+                    total += st.st_size
+                except Exception:
+                    pass
+            if total > cap:
+                files.sort()  # oldest first
+                for _mt, sz, p in files:
+                    if total <= cap:
+                        break
+                    try:
+                        os.remove(p)
+                        total -= sz
+                        LOGGER.info("hazard_image_evicted path=%s total_after=%d", p, total)
+                    except Exception:
+                        pass
+            print(f"[IMAGE    ] hazard_id={hazard_id}  bytes={len(raw)}  path={path}", flush=True)
+        except Exception as exc:
+            LOGGER.warning("hazard_image_save_failed hazard_id=%s err=%s", hazard_id, exc)
+
     @app.post("/hazards/submit-async", status_code=status.HTTP_202_ACCEPTED)
     @limiter.limit(lambda: get_settings().roadguard_user_limit)
     def hazards_submit_async(
@@ -2041,6 +2126,7 @@ def create_app() -> FastAPI:
         until status leaves 'processing'."""
         from roadguard_agent import Hazard
         hazard_id = f"hz_{uuid.uuid4().hex[:12]}"
+        _save_hazard_image(hazard_id, getattr(body, "image_jpeg_base64", None))
         hazard_input = _hazard_input_from_batch(body, hazard_id, _now_iso())
         user_id = _user_id_of(user)
         db.upsert_user(user_id, user.get("email", ""), user.get("name", ""))
