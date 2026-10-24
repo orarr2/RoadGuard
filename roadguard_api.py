@@ -1816,7 +1816,7 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/telemetry/event", status_code=status.HTTP_204_NO_CONTENT)
-    def telemetry_event(body: dict, request: Request) -> Response:
+    def telemetry_event(body: dict, request: Request) -> dict:
         """Light-weight client telemetry sink: the webapp posts {event, meta}
         for every button click, field change and navigation transition. We
         print the event to stdout tagged [CLIENT   ] so rg-trace shows user
@@ -1828,22 +1828,19 @@ def create_app() -> FastAPI:
         try:
             ev = str(body.get("event") or "")[:60]
             meta = body.get("meta") or {}
-            if not ev:
-                return Response(status_code=status.HTTP_204_NO_CONTENT)
-            if not isinstance(meta, dict):
-                meta = {"value": str(meta)[:120]}
-            # cap total serialised payload at 400 chars so a hostile client
-            # cannot write 1 MB lines into the journal
-            parts = []
-            for k, v in list(meta.items())[:8]:
-                kstr = str(k)[:40]
-                vstr = str(v)[:120].replace("\n", " ").replace("\r", " ")
-                parts.append(f"{kstr}={vstr}")
-            line = f"[CLIENT   ] event={ev}  " + "  ".join(parts)
-            print(line[:600], flush=True)
+            if ev:
+                if not isinstance(meta, dict):
+                    meta = {"value": str(meta)[:120]}
+                parts = []
+                for k, v in list(meta.items())[:8]:
+                    kstr = str(k)[:40]
+                    vstr = str(v)[:120].replace("\n", " ").replace("\r", " ")
+                    parts.append(f"{kstr}={vstr}")
+                line = f"[CLIENT   ] event={ev}  " + "  ".join(parts)
+                print(line[:600], flush=True)
         except Exception:  # pragma: no cover - telemetry must never 500
             pass
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
+        return {}
 
     @app.post("/auth/login", response_model=LoginResponse)
     @limiter.limit(lambda: get_settings().roadguard_login_limit)
