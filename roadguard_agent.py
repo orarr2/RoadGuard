@@ -8109,6 +8109,25 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
         )
     elif speaker == "pipeline":
         out.append(f"{lbl} graph failed: {c.get('error')} -> routed to a human")
+    elif kind == "llm_call":
+        model = c.get("model") or "?"
+        lat = c.get("latency_s")
+        lat_s = f"{float(lat):.2f}s" if lat is not None else "?s"
+        tin = c.get("tokens_in", 0)
+        tout = c.get("tokens_out", 0)
+        ok = c.get("ok")
+        ok_s = "ok" if ok else ("FAILED" if ok is False else "?")
+        out.append(f"[LIVE-LLM] {model}  {lat_s}  tokens in={tin} out={tout}  {ok_s}")
+    elif kind == "tool_call":
+        sp = c.get("speaker") or speaker
+        hop = c.get("hop", "?")
+        tool = c.get("tool") or "?"
+        ok = c.get("ok")
+        ok_s = "ok" if ok else ("FAILED" if ok is False else "?")
+        out.append(f"[LIVE-TOOL] {sp} hop={hop} tool={tool}  {ok_s}")
+    elif kind == "supervisor_llm":
+        note = _short(c.get("note") or c.get("plan") or "", 160)
+        out.append(f"[LIVE-SUP] {note}")
     else:
         kv = "  ".join(f"{k}={_short(v, 60)}" for k, v in c.items())
         out.append(f"{lbl} {kind}  {kv}".rstrip())

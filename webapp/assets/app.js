@@ -1026,14 +1026,31 @@ async function pollAsyncHazard(hazardId, verdictBox) {
         return false;
       }
       const elapsed = Math.round((Date.now() - started) / 1000);
-      const steps = (report.trace || []).length;
+      const trace = report.trace || [];
+      const steps = trace.length;
       const queuePos = Number(report.queue_position || 0);
       const spin = `<div class="rg-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;border:2px solid #cbd5e1;border-top-color:#0ea5e9;border-radius:50%;animation:rg-spin 0.9s linear infinite;vertical-align:middle;margin-right:8px"></div>`;
+      // Translate the last agent step into a plain-language status line so
+      // the user sees progress ("Reading your photo", "Looking up municipal
+      // standards", ...) instead of a dry step counter.
+      const AGENT_STATUS = {
+        sanitize: "Checking your submission",
+        signal_extractor: "Reading your description",
+        supervisor: "Routing the case",
+        profile_builder: "Analysing the photo",
+        rag_retriever: "Looking up municipal standards",
+        decision: "Deciding the verdict",
+        approval_gate: "Opening a supervisor approval row",
+        await_evidence: "Waiting for more evidence",
+      };
+      const last = steps > 0 ? trace[steps - 1] : null;
+      const stage = (last && AGENT_STATUS[last.speaker]) || "Starting the agents";
+      const stageHtml = `<div style="margin-top:6px;font-size:13px;color:var(--text-mid)">Stage ${steps}/7: <b>${stage}</b></div>`;
       if (v.status === "queued") {
         const posTxt = queuePos > 0 ? ` (position ${queuePos} in queue)` : "";
-        verdictBox.innerHTML = `<div class="upload-verdict-empty">${spin}Queued behind another case${posTxt}... ${elapsed}s elapsed. Each case takes 1-3 minutes on this VM.</div>`;
+        verdictBox.innerHTML = `<div class="upload-verdict-empty">${spin}Queued behind another case${posTxt}... ${elapsed}s elapsed.<div style="margin-top:6px;font-size:13px;color:var(--text-mid)">Local open-source agents on an ARM CPU, so each case takes 1-3 minutes.</div></div>`;
       } else {
-        verdictBox.innerHTML = `<div class="upload-verdict-empty">${spin}Working... ${elapsed}s elapsed, ${steps} pipeline steps done (local agents on CPU take 1-5 minutes).</div>`;
+        verdictBox.innerHTML = `<div class="upload-verdict-empty">${spin}Working... ${elapsed}s elapsed.${stageHtml}<div style="margin-top:4px;font-size:12px;color:var(--text-mid)">Five local open-source agents, no cloud API, no data leaves the city server.</div></div>`;
       }
     } catch (err) {
       consecutiveErrors += 1;
