@@ -71,7 +71,100 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
   resolveApiOrigin().catch(() => {});
   track("page_load", { url: location.pathname, ua: navigator.userAgent.slice(0, 80) });
+  loadPublicStats();
+  loadMyReports();
 });
+
+// ============================================================ PUBLIC STATS
+async function loadPublicStats() {
+  const totalEl   = document.getElementById("stats-total");
+  const openEl    = document.getElementById("stats-open");
+  const closedEl  = document.getElementById("stats-closed");
+  const medianEl  = document.getElementById("stats-median");
+  const decEl     = document.getElementById("stats-by-decision");
+  const classEl   = document.getElementById("stats-by-class");
+  const asOfEl    = document.getElementById("stats-asof");
+  if (!totalEl) return;
+  try {
+    const origin = await resolveApiOrigin();
+    const r = await fetch(`${origin}/stats/public`, { credentials: "omit" });
+    if (!r.ok) throw new Error(`http ${r.status}`);
+    const s = await r.json();
+    totalEl.textContent  = String(s.total_reports ?? 0);
+    openEl.textContent   = String(s.open_now ?? 0);
+    closedEl.textContent = String(s.closed_this_week ?? 0);
+    medianEl.textContent = s.median_resolve_hours == null ? "-" : String(s.median_resolve_hours);
+    renderStatsBars(decEl, s.by_decision || {});
+    renderStatsBars(classEl, s.by_class || {});
+    if (asOfEl) asOfEl.textContent = `as of ${s.as_of || "-"}`;
+  } catch (err) {
+    if (asOfEl) asOfEl.textContent = "stats unavailable right now";
+  }
+}
+
+function renderStatsBars(host, obj) {
+  if (!host) return;
+  host.innerHTML = "";
+  const entries = Object.entries(obj).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) {
+    host.innerHTML = '<div class="stats-bar-row" style="color:var(--text-mid)"><em>no data yet</em></div>';
+    return;
+  }
+  const max = Math.max(...entries.map(e => e[1]));
+  for (const [k, v] of entries) {
+    const row = document.createElement("div");
+    row.className = "stats-bar-row";
+    const pct = max > 0 ? Math.round((v / max) * 100) : 0;
+    row.innerHTML =
+      `<span class="stats-bar-key">${escapeHtml(k)}</span>` +
+      `<span class="stats-bar-track"><span class="stats-bar-fill" style="width:${pct}%"></span></span>` +
+      `<span class="stats-bar-val">${v}</span>`;
+    host.appendChild(row);
+  }
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+// ============================================================ MY REPORTS
+async function loadMyReports() {
+  const section = document.getElementById("my-reports");
+  const body = document.getElementById("my-reports-body");
+  if (!section || !body) return;
+  try {
+    const origin = await resolveApiOrigin();
+    const r = await fetch(`${origin}/hazards/history`, { credentials: "include" });
+    if (r.status === 401 || r.status === 403) {
+      section.hidden = true;
+      return;
+    }
+    if (!r.ok) throw new Error(`http ${r.status}`);
+    const data = await r.json();
+    const items = data.items || [];
+    section.hidden = false;
+    if (!items.length) {
+      body.innerHTML = '<tr><td colspan="6" class="my-reports-empty">No reports yet. Submit a hazard and it will show up here.</td></tr>';
+      return;
+    }
+    body.innerHTML = items.map(it => {
+      const reported = (it.reported_at || "").replace("T", " ").replace("Z", " UTC");
+      const dec = it.agent_decision || "pending";
+      const stat = (it.status || "open").toLowerCase();
+      const label = HAZARD_CLASS_LABELS[it.class] || it.class || "unknown";
+      return `<tr>
+        <td>${escapeHtml(reported)}</td>
+        <td>${escapeHtml(label)}</td>
+        <td>${escapeHtml(it.road_type || "-")}</td>
+        <td>${it.priority ?? "-"}</td>
+        <td><span class="my-reports-decision ${escapeHtml(dec)}">${escapeHtml(dec)}</span></td>
+        <td><span class="my-reports-status ${escapeHtml(stat)}">${escapeHtml(stat)}</span></td>
+      </tr>`;
+    }).join("");
+  } catch (err) {
+    section.hidden = true;
+  }
+}
 
 // ============================================================ HERO SLIDESHOW
 function wireHeroSlideshow() {
@@ -484,6 +577,7 @@ function wireSignIn() {
       refreshSignInLabel();
       closeSignIn();
       runPending();
+      loadMyReports();
       toast("Signed in");
     } catch (e) {
       err.hidden = false;
@@ -500,6 +594,7 @@ function wireSignIn() {
       refreshSignInLabel();
       closeSignIn();
       runPending();
+      loadMyReports();
       toast("Signed in with Google");
     } catch (e) {
       err.hidden = false;

@@ -359,6 +359,134 @@ a { color: inherit; text-decoration: none; }
 }
 .how-card p { margin: 0; color: var(--text-mid); font-size: 14px; }
 
+/* ============================================================ PUBLIC STATS */
+.stats-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.stats-kpi {
+  padding: 20px;
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  text-align: center;
+  box-shadow: 0 4px 20px rgba(14, 165, 233, 0.08);
+}
+.stats-kpi-val {
+  font-family: var(--font-mono);
+  font-size: 32px;
+  font-weight: 800;
+  color: var(--brand-1);
+  letter-spacing: -0.02em;
+  margin-bottom: 6px;
+}
+.stats-kpi-lab { font-size: 13px; color: var(--text-mid); }
+
+.stats-breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+.stats-breakdown {
+  padding: 20px;
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+}
+.stats-breakdown h3 { font-size: 15px; margin: 0 0 12px; font-weight: 700; }
+.stats-bars { display: flex; flex-direction: column; gap: 8px; }
+.stats-bar-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 40px;
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+}
+.stats-bar-key { color: var(--text-mid); font-family: var(--font-mono); }
+.stats-bar-track {
+  height: 8px;
+  background: var(--bg-2);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.stats-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--brand-1), var(--brand-2));
+  border-radius: 4px;
+}
+.stats-bar-val { font-family: var(--font-mono); font-weight: 700; text-align: right; }
+.stats-asof { text-align: center; color: var(--text-mid); font-size: 12px; margin: 12px 0 0; font-family: var(--font-mono); }
+
+/* ============================================================ MY REPORTS */
+.my-reports-wrap {
+  padding: 20px;
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  overflow-x: auto;
+}
+.my-reports-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.my-reports-table th {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 2px solid var(--line);
+  color: var(--text-mid);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.my-reports-table td {
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.my-reports-table tr:last-child td { border-bottom: 0; }
+.my-reports-empty { text-align: center; color: var(--text-mid); padding: 24px; }
+.my-reports-decision { font-weight: 600; }
+.my-reports-decision.urgent { color: #b91c1c; }
+.my-reports-decision.standard { color: #047857; }
+.my-reports-decision.human_review { color: #1d4ed8; }
+.my-reports-decision.needs_more_evidence { color: #b45309; }
+.my-reports-status {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.my-reports-status.open { background: rgba(234, 179, 8, 0.15); color: #b45309; }
+.my-reports-status.processing { background: rgba(14, 165, 233, 0.15); color: var(--brand-1); }
+.my-reports-status.closed { background: rgba(34, 197, 94, 0.15); color: #047857; }
+
+/* ============================================================ ABOUT */
+.about-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+}
+.about-card {
+  padding: 24px;
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+}
+.about-card h3 { font-size: 17px; margin: 0 0 12px; font-weight: 700; }
+.about-card p { margin: 0 0 10px; color: var(--text-mid); font-size: 14px; line-height: 1.55; }
+.about-steps { margin: 0; padding-left: 18px; color: var(--text-mid); font-size: 14px; line-height: 1.6; }
+.about-steps li { margin-bottom: 6px; }
+.about-list { margin: 0; padding-left: 18px; color: var(--text-mid); font-size: 14px; line-height: 1.6; }
+.about-list li { margin-bottom: 4px; }
+.about-card a { color: var(--brand-1); text-decoration: none; font-weight: 600; }
+.about-card a:hover { text-decoration: underline; }
+
 /* ============================================================ LIVE */
 .live {
   display: grid;

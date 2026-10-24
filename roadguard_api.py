@@ -1931,6 +1931,53 @@ def create_app() -> FastAPI:
         parts.append("</body></html>")
         return "".join(parts)
 
+    @app.get("/stats/public")
+    def stats_public() -> dict:
+        """Aggregate public counters for the landing stats board.
+        No PII, no case ids - the kind of numbers a city is happy to show
+        the public: total reports, open cases, closed-this-week, median
+        resolution time, and the breakdown by decision + defect class."""
+        import sqlite3 as _sqlite3
+        db_path = "/var/lib/roadguard/roadguard.db"
+        try:
+            con = _sqlite3.connect(db_path)
+            now = time.time()
+            week_ago = now - 7 * 86400
+            total = con.execute("SELECT COUNT(*) FROM hazards").fetchone()[0]
+            by_dec: dict[str, int] = {}
+            for row in con.execute("SELECT agent_decision, COUNT(*) FROM hazards GROUP BY agent_decision"):
+                by_dec[(row[0] or "unknown")] = row[1]
+            by_class: dict[str, int] = {}
+            for row in con.execute("SELECT class, COUNT(*) FROM hazards GROUP BY class"):
+                by_class[(row[0] or "unknown")] = row[1]
+            open_now = con.execute("SELECT COUNT(*) FROM hazards WHERE status='open'").fetchone()[0]
+            closed_week = con.execute(
+                "SELECT COUNT(*) FROM hazards WHERE status != 'open' AND reported_at >= ?",
+                (week_ago,),
+            ).fetchone()[0]
+            resolve_rows = con.execute(
+                "SELECT (a.decided_at - h.reported_at) / 3600.0 "
+                "FROM hazards h JOIN approvals a ON a.hazard_id = h.id "
+                "WHERE a.decided_at IS NOT NULL AND a.decided_at > h.reported_at"
+            ).fetchall()
+            median_h: float | None = None
+            if resolve_rows:
+                vals = sorted([r[0] for r in resolve_rows if r[0] is not None])
+                if vals:
+                    median_h = round(vals[len(vals) // 2], 1)
+            con.close()
+            return {
+                "total_reports": total,
+                "open_now": open_now,
+                "closed_this_week": closed_week,
+                "by_decision": by_dec,
+                "by_class": by_class,
+                "median_resolve_hours": median_h,
+                "as_of": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            }
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"stats_failed: {exc}")
+
     @app.get("/digest/latest", response_class=HTMLResponse)
     def digest_latest(request: Request) -> HTMLResponse:
         """Live digest - rebuilt from the DB on every request, so each

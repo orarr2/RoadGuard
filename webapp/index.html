@@ -219,6 +219,125 @@
       </div>
     </section>
 
+    <section class="how" id="public-stats">
+      <div class="section-head">
+        <h2>How the system is doing right now</h2>
+        <p>Live aggregated numbers from the municipal server. Rebuilt on every page load; no PII, no case ids.</p>
+      </div>
+      <div class="stats-kpi-grid">
+        <div class="stats-kpi">
+          <div class="stats-kpi-val" id="stats-total" data-k="total_reports">-</div>
+          <div class="stats-kpi-lab">Total reports received</div>
+        </div>
+        <div class="stats-kpi">
+          <div class="stats-kpi-val" id="stats-open" data-k="open_now">-</div>
+          <div class="stats-kpi-lab">Open cases right now</div>
+        </div>
+        <div class="stats-kpi">
+          <div class="stats-kpi-val" id="stats-closed" data-k="closed_this_week">-</div>
+          <div class="stats-kpi-lab">Closed this week</div>
+        </div>
+        <div class="stats-kpi">
+          <div class="stats-kpi-val" id="stats-median" data-k="median_resolve_hours">-</div>
+          <div class="stats-kpi-lab">Median resolution (hours)</div>
+        </div>
+      </div>
+      <div class="stats-breakdown-grid">
+        <div class="stats-breakdown">
+          <h3>By agent decision</h3>
+          <div id="stats-by-decision" class="stats-bars"></div>
+        </div>
+        <div class="stats-breakdown">
+          <h3>By defect class</h3>
+          <div id="stats-by-class" class="stats-bars"></div>
+        </div>
+      </div>
+      <p class="stats-asof" id="stats-asof">as of -</p>
+    </section>
+
+    <section class="how" id="my-reports" hidden>
+      <div class="section-head">
+        <h2>My reports</h2>
+        <p>Hazards you reported from this account, newest first. Status reflects where the case is in the municipal queue.</p>
+      </div>
+      <div class="my-reports-wrap">
+        <table class="my-reports-table">
+          <thead>
+            <tr>
+              <th>Reported</th>
+              <th>Defect</th>
+              <th>Road type</th>
+              <th>Priority</th>
+              <th>Agent decision</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="my-reports-body">
+            <tr><td colspan="6" class="my-reports-empty">Sign in to see your reports.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="how" id="about">
+      <div class="section-head">
+        <h2>About RoadGuard</h2>
+        <p>A longer walk-through for citizens and reviewers who want to see what is actually running behind each verdict.</p>
+      </div>
+      <div class="about-grid">
+        <div class="about-card">
+          <h3>Five-agent pipeline</h3>
+          <ol class="about-steps">
+            <li><b>Sanitizer</b> - validates the submission, strips tracking fields, keeps only what the agents need.</li>
+            <li><b>Signal extractor</b> - reads the free-text description and the YOLO detection, lists the signals that matter.</li>
+            <li><b>Supervisor</b> - routes the case: direct answer, more evidence, or deep agentic workup. Routing is LLM-decided, not a rule tree.</li>
+            <li><b>Profile builder</b> - normalises the hazard into a defect profile (class, severity, confidence) the retriever can match on.</li>
+            <li><b>RAG retriever</b> - pulls the municipal standards and safety references that apply to this exact defect.</li>
+            <li><b>Decision</b> - produces the final verdict: urgent, standard, needs more evidence, or human review, with a cited rationale.</li>
+            <li><b>Approval gate</b> - writes a signed approval row for the supervisor on duty to decide.</li>
+          </ol>
+        </div>
+        <div class="about-card">
+          <h3>What the detector sees</h3>
+          <p>A YOLOv8 model runs in your browser (ONNX Runtime Web), trained on the RDD2022 road-damage dataset. It names the defects by the dataset's own class ids:</p>
+          <ul class="about-list">
+            <li><b>D00</b> - longitudinal crack (along the direction of travel).</li>
+            <li><b>D10</b> - transverse crack (across the road).</li>
+            <li><b>D20</b> - alligator cracking (interconnected network, a structural warning sign).</li>
+            <li><b>D40</b> - pothole (localised break-up of the surface).</li>
+          </ul>
+          <p>The citizen view shows a plain-language verdict; the operator view shows the class, confidence, bounding boxes, and the full agent trace.</p>
+        </div>
+        <div class="about-card">
+          <h3>Models in production</h3>
+          <ul class="about-list">
+            <li><b>qwen2.5:7b</b> - signal extractor, decision writer.</li>
+            <li><b>llama3.1:8b</b> - supervisor routing.</li>
+            <li><b>qwen2.5:3b</b> - profile builder.</li>
+            <li><b>llama3.2:3b</b> - RAG retriever reasoning.</li>
+            <li><b>granite3.3:2b</b> - sanitizer and short-form helpers.</li>
+          </ul>
+          <p>All five are open-source weights served locally through Ollama on an Oracle A1.Flex ARM server (4 OCPU, 23 GB RAM). Zero cloud-API cost, zero data leaving the municipal network.</p>
+        </div>
+        <div class="about-card">
+          <h3>Standards grounding</h3>
+          <p>Every verdict cites the specific entries from the municipal maintenance playbook that justified it. The retriever pulls from a vector index of standards passages; the decision agent must quote at least one, or the verdict is downgraded to human review.</p>
+        </div>
+        <div class="about-card">
+          <h3>What is kept, for how long</h3>
+          <ul class="about-list">
+            <li>Submitted photo: 7 days on the municipal server, then auto-deleted.</li>
+            <li>Case record (decision, rationale, cited sources, trace): kept with the hazard id for audit.</li>
+            <li>Hard cap: 5 GB total image storage; the oldest photos are evicted first.</li>
+          </ul>
+        </div>
+        <div class="about-card">
+          <h3>Open design</h3>
+          <p>The source lives at <a href="https://github.com/orarr2/RoadGuard" rel="noopener">github.com/orarr2/RoadGuard</a>. The agent prompts, the RAG passages, the routing policy and the verdict schema are all in the repo. The whole trace of a case can be audited by the supervisor on duty.</p>
+        </div>
+      </div>
+    </section>
+
     <section class="how" id="faq">
       <div class="section-head">
         <h2>Frequently asked</h2>
