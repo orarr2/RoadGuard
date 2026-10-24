@@ -3544,6 +3544,17 @@ def _build_decision_prompt() -> str:
         "near match is clear enough. A high similarity to a catalogued\n"
         "defect of the SAME class the detector picked is a strong signal\n"
         "the detector was right even on low confidence.\n\n"
+        "Clusters (recurring issues)\n"
+        "When the submission is on a main road, shows alligator cracking,\n"
+        "or you want to know whether this location is already a known\n"
+        "problem, call `check_recent_cluster(location, hazard_class,\n"
+        "window_hours=168)`. It returns a `cluster_flag`: 'none' is a\n"
+        "one-off; 'emerging' (3-5 recent same-class reports at the same\n"
+        "place) is a soft red flag worth mentioning in the assessment;\n"
+        "'strong' (6+) is a structural / recurring issue that often needs\n"
+        "a work order rather than another one-off repair, so your rationale\n"
+        "and priority should reflect that. The cluster view also shows up\n"
+        "on the operator LIVE page.\n\n"
         "System health (own-state awareness)\n"
         "When a run feels unusually fast or unusually slow, or your tool\n"
         "calls fail, call `check_system_health`. It reports which ollama\n"
@@ -5090,6 +5101,77 @@ def lookup_dataset_image(
     }
 
 
+RECENT_CLUSTER_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "check_recent_cluster",
+        "description": (
+            "Count recent hazards of the same class at the same free-text "
+            "location to see whether this submission is part of a cluster "
+            "(a possible structural / recurring issue, not a one-off repair). "
+            "Returns the count in the window plus a `cluster_flag`: 'none' "
+            "(<3 recent reports), 'emerging' (3-5), 'strong' (6+). Use this "
+            "when the submission is on a main road or shows alligator "
+            "cracking - clusters often matter more than a single case."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "the hazard's free-text location (same string the citizen submitted)"},
+                "hazard_class": {"type": "string", "description": "D00 | D10 | D20 | D40"},
+                "window_hours": {"type": "integer", "description": "lookback window in hours (default 168 = 7 days, max 720 = 30 days)"},
+            },
+            "required": ["location", "hazard_class"],
+        },
+    },
+}
+
+
+def check_recent_cluster(
+    location: str,
+    hazard_class: str,
+    window_hours: int = 168,
+) -> dict[str, Any]:
+    """Does this submission belong to a cluster of recent same-class reports
+    at the same free-text location? Read-only. Never raises."""
+    hours = max(1, min(720, int(window_hours) if isinstance(window_hours, int) else 168))
+    if not location or not hazard_class:
+        return {"n": 0, "cluster_flag": "none", "window_hours": hours, "reason": "need location and hazard_class"}
+    try:
+        settings = get_settings()
+        with Database(settings.roadguard_db_path) as db:
+            since = time.time() - hours * 3600
+            # Reuse the same text-match helper the profile builder's
+            # lookup_similar_cases uses, so this tool agrees with it.
+            rows = db.find_similar_hazards(
+                location=location,
+                hazard_class=hazard_class,
+                window_days=max(1, (hours + 23) // 24),
+                limit=50,
+                exclude_hazard_id=None,
+            )
+            # find_similar_hazards already filters by same-location /
+            # same-class; narrow further to the hours window.
+            recent = [r for r in rows if (r.get("reported_at") or 0) >= since]
+            n = len(recent)
+    except Exception as exc:
+        LOGGER.warning("check_recent_cluster_skipped: %s", exc)
+        return {"n": 0, "cluster_flag": "unknown", "window_hours": hours, "reason": f"catalogue unavailable ({type(exc).__name__})"}
+    flag = "none"
+    if n >= 6:
+        flag = "strong"
+    elif n >= 3:
+        flag = "emerging"
+    return {
+        "n": n,
+        "cluster_flag": flag,
+        "window_hours": hours,
+        "location": location[:120],
+        "hazard_class": hazard_class,
+        "recent_ids": [r.get("id") for r in recent[:10]],
+    }
+
+
 SYSTEM_HEALTH_SCHEMA = {
     "type": "function",
     "function": {
@@ -5296,6 +5378,7 @@ _READ_ONLY_DECISION_TOOLS = (
     "lookup_dataset_image",
     "rank_similarity_to_catalog",
     "check_system_health",
+    "check_recent_cluster",
 )
 
 
@@ -5336,6 +5419,7 @@ DECISION_TOOLS = {
     "lookup_dataset_image": (lookup_dataset_image, DATASET_SCHEMA),
     "rank_similarity_to_catalog": (rank_similarity_to_catalog, RANK_SIMILARITY_SCHEMA),
     "check_system_health": (check_system_health, SYSTEM_HEALTH_SCHEMA),
+    "check_recent_cluster": (check_recent_cluster, RECENT_CLUSTER_SCHEMA),
     "request_additional_evidence": (request_additional_evidence, EVIDENCE_SCHEMA),
     "create_draft_work_order": (create_draft_work_order, DRAFT_SCHEMA),
     "flag_for_urgent_review": (flag_for_urgent_review, FLAG_SCHEMA),

@@ -1881,6 +1881,32 @@ def create_app() -> FastAPI:
         approvals_pending = con.execute("SELECT COUNT(*) FROM approvals WHERE status='pending'").fetchone()[0]
         evidence_open = con.execute("SELECT COUNT(*) FROM evidence_requests WHERE status='pending'").fetchone()[0]
 
+        # #11: hazard clusters. Group hazards of the same class at the same
+        # free-text location within the window; anything with 3+ reports is
+        # worth surfacing as a possible structural issue (one pothole becomes
+        # a recurring pattern; a crack grows into a cluster of cases).
+        # NULLIF/COALESCE collapses empty-string locations so we do not
+        # cluster all 'no location' submissions together.
+        cluster_rows = con.execute(
+            """
+            SELECT
+              COALESCE(NULLIF(TRIM(location), ''), '(no location)') AS loc,
+              class,
+              COUNT(*) AS n,
+              MIN(reported_at) AS first_ts,
+              MAX(reported_at) AS last_ts,
+              GROUP_CONCAT(id) AS ids,
+              GROUP_CONCAT(agent_decision) AS decisions
+            FROM hazards
+            WHERE reported_at >= ?
+            GROUP BY loc, class
+            HAVING n >= 3
+            ORDER BY n DESC, last_ts DESC
+            LIMIT 20
+            """,
+            (cutoff_epoch,),
+        ).fetchall()
+
         # Pre-build a JSON payload the right-pane JS can read without
         # another round-trip. Each case carries everything the detail view
         # needs; the table is just a tbody rendered from this list.
@@ -1982,6 +2008,48 @@ def create_app() -> FastAPI:
             )
         timeline_html = "<div class='tl'>" + ("".join(tl_parts) or "<p><i>No cases to show.</i></p>") + "</div>"
 
+        # #11: clusters panel. Three or more hazards of the same class at
+        # the same free-text location in the window - a possible structural
+        # or recurring issue that one case card would hide.
+        if cluster_rows:
+            cp_rows = []
+            for r in cluster_rows:
+                ids = (r["ids"] or "").split(",")
+                decisions = (r["decisions"] or "").split(",")
+                dec_counts: dict[str, int] = {}
+                for d in decisions:
+                    if d:
+                        dec_counts[d] = dec_counts.get(d, 0) + 1
+                dec_summary = ", ".join(f"{v}x {k}" for k, v in sorted(dec_counts.items(), key=lambda x: -x[1]))
+                first_ts = datetime.fromtimestamp(r["first_ts"] or 0, timezone.utc).strftime("%H:%M")
+                last_ts = datetime.fromtimestamp(r["last_ts"] or 0, timezone.utc).strftime("%H:%M")
+                cp_rows.append(
+                    f"<tr>"
+                    f"<td class='cl-n'>{r['n']}&times;</td>"
+                    f"<td class='cl-cls'>{html.escape(r['class'] or '?')}</td>"
+                    f"<td class='cl-loc'>{html.escape(r['loc'])[:80]}</td>"
+                    f"<td class='cl-dec k'>{html.escape(dec_summary)[:100]}</td>"
+                    f"<td class='k'>{first_ts} &rarr; {last_ts}</td>"
+                    f"</tr>"
+                )
+            clusters_html = (
+                "<div class='clusters-wrap'>"
+                "<p class='cl-head'>&#9888; Possible structural / recurring issues "
+                f"(same location + same class, &ge; 3 reports in the last {window_hours}h). "
+                "Operator should check whether these need a work order rather than one-off repairs.</p>"
+                "<table class='clusters'>"
+                "<thead><tr><th>n</th><th>class</th><th>location</th><th>decisions</th><th>time range</th></tr></thead>"
+                f"<tbody>{''.join(cp_rows)}</tbody>"
+                "</table>"
+                "</div>"
+            )
+        else:
+            clusters_html = (
+                "<div class='clusters-wrap'>"
+                f"<p class='k'>No clusters (no location+class group with &ge; 3 reports in the last {window_hours}h). Add a few more submissions from the same place and this table will fill in.</p>"
+                "</div>"
+            )
+
         header = (
             f"<header class='topbar'>"
             f"<h1>RoadGuard <span class='live'>LIVE</span></h1>"
@@ -2022,6 +2090,15 @@ def create_app() -> FastAPI:
         .kpi.standard .kpi-v{color:#047857}
         .kpi.evi .kpi-v{color:#b45309}
         .kpi-l{font-size:11px;color:#6b7280;margin-top:2px}
+        /* Clusters panel */
+        .clusters-wrap{background:#fff;border:1px solid #fecaca;border-left:4px solid #ef4444;border-radius:8px;padding:12px 14px;margin-bottom:16px}
+        .clusters-wrap .cl-head{margin:0 0 10px;font-size:13px;color:#991b1b;font-weight:600}
+        .clusters{width:100%;border-collapse:collapse;font-size:13px}
+        .clusters th{text-align:left;color:#6b7280;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:0.03em;padding:6px 8px;border-bottom:1px solid #e5e7eb}
+        .clusters td{padding:6px 8px;border-bottom:1px solid #f1f5f9}
+        .clusters tr:last-child td{border-bottom:0}
+        .cl-n{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;color:#b91c1c;width:48px}
+        .cl-cls{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;width:60px;color:#1f2937}
         /* Cases split */
         .split{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:16px;align-items:start}
         @media (max-width:980px){.split{grid-template-columns:1fr}}
@@ -2124,6 +2201,7 @@ def create_app() -> FastAPI:
             f"{header}"
             "<section id='pane-cases' class='tab-pane active'>"
             f"{kpi_strip}"
+            f"{clusters_html}"
             "<div class='split'>"
             f"<div>{table_html}</div>"
             "<aside class='detail' id='detail'>"
