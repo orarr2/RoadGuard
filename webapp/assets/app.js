@@ -661,7 +661,12 @@ async function openUploadWithFile(file) {
           </div>`);
         submitBtn.disabled = false;
       } else {
-        show(`<div class="upload-verdict-empty">YOLO did not find any road damage (potholes, cracks or alligator cracking) on this image. You can still send it to the agent for a human_review verdict.</div>`);
+        show(`
+          <div class="upload-verdict-ready" style="border-left:4px solid #0ea5e9;padding-left:10px">
+            <div class="upload-verdict-stage">YOLO on-device did not match any of the four known classes (D00/D10/D20/D40) on this image.</div>
+            <div class="upload-verdict-top">This usually means a new or borderline defect the detector was not trained on.</div>
+            <div class="upload-verdict-cta"><strong>Press <em>Triage with agent</em> below</strong> &mdash; the agent pipeline will still analyze the image and return a <code>human_review</code> verdict so a supervisor sees it.</div>
+          </div>`);
         submitBtn.disabled = false;
       }
     } catch (err) {
