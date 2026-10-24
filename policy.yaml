@@ -1,0 +1,61 @@
+# Decision policy for the RoadGuard triage agents.
+#
+# This file is the single source of truth for the decision rules.
+# The deterministic rule tree (_decide_rule_based) consumes these
+# values at import time; the Decision system prompt is rendered from
+# them (so the LLM and the tree share one policy).
+#
+# Bump `version` on every substantive rule change. The version string
+# is included in the Decision prompt and in each trace entry so a
+# reviewer can tell which policy produced a given verdict.
+
+version: "2026.10.22"
+charter_grounding_target_pct: 90
+
+severity:
+  # profile_builder thresholds for the severity_signal.
+  d40_main_lane_blocked: "severe"
+  d40_or_d20_large_area_min_ratio: 0.05
+  d40_or_d20_large_area_min_confidence: 0.6
+  d40_or_d20_moderate_min_confidence: 0.5
+  cracks_minor: ["D00", "D10"]
+
+decision:
+  # Preconditions for each action, read by both the rule tree and the
+  # Decision LLM prompt.
+  urgent:
+    hazard_class: ["D40"]
+    road_type: ["main"]
+    lane_blocked: ["partial", "full"]
+    min_confidence: 0.6
+  needs_more_evidence:
+    confidence_range: [0.4, 0.6]
+    requires_no_recurrence: true
+    # One request per hazard. A second needs_more_evidence verdict on the
+    # resumed run becomes human_review (roadmap section 2).
+    max_requests_per_hazard: 1
+  human_review:
+    triggers:
+      - "perception_confidence == low"
+      - "research_coverage == no_match"
+      - "ocr_suspicious == true"
+      - "reporter_text_suspicious == true"
+      - "scene_not_road == true"
+      # The reporter's description names a different class than the
+      # detector found (roadmap section 1). The contradiction is routed
+      # to a human, never resolved by the agent.
+      - "intake_class_contradiction == true"
+  standard:
+    fallback_for: ["anything not covered by urgent/human_review/needs_more_evidence"]
+
+grounding:
+  # cited_sources must be a subset of research.tool_result_ids, unless
+  # action is in `allow_empty_citations`.
+  allow_empty_citations: ["needs_more_evidence", "human_review", "known_image"]
+  retry_on_fail: 1  # one retry; then fall back to _decide_rule_based
+
+refine_entry:
+  # Decision may ask profile_builder to re-run once with a hint.
+  max_refines: 1
+  triggers:
+    - "perception_confidence == medium AND research_coverage == partial_match"
