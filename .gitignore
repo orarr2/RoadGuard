@@ -96,3 +96,10 @@ sample_images_real/
 
 # Office lock files
 ~$*
+
+# Tunnel-specific metadata (exposes current public URL / VM provider / region)
+webapp/tunnel-url.json
+
+# Local assistant scratchpad (per-session config)
+.claude/
+

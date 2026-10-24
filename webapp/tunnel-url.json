@@ -1,4 +1,0 @@
-{
-  "origin": "https://ball-mixer-minimize-voltage.trycloudflare.com",
-  "note": "Oracle A1.Flex (24GB ARM, Jerusalem) + local Ollama panel. Quick tunnel - URL changes on cloudflared restart; promote to a named tunnel once the Cloudflare account is wired (deploy/cloudflared.md). GCP e2-micro stays as warm backup."
-}
