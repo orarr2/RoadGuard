@@ -503,10 +503,17 @@ function setUploadSubmitLabel(waiting) {
 // the server until the reporter answers it or it expires.
 const PENDING_EVIDENCE_KEY = "roadguard.pendingEvidence";
 
+// Stale pending-evidence requests (older than 10 minutes) are discarded on
+// restore so the webapp does not try to fulfil an expired case and surface
+// the "already answered or expired" error to the next upload. Each pending
+// request carries the client-side timestamp of when it was stored.
+const PENDING_EVIDENCE_TTL_MS = 10 * 60 * 1000;
+
 function setPendingEvidence(req) {
-  uploadState.pendingEvidence = req;
+  const stamped = { ...req, _stored_at: Date.now() };
+  uploadState.pendingEvidence = stamped;
   try {
-    localStorage.setItem(PENDING_EVIDENCE_KEY, JSON.stringify(req));
+    localStorage.setItem(PENDING_EVIDENCE_KEY, JSON.stringify(stamped));
   } catch {
     // storage unavailable
   }
@@ -528,6 +535,14 @@ function restorePendingEvidence() {
   try {
     const saved = JSON.parse(localStorage.getItem(PENDING_EVIDENCE_KEY) || "null");
     if (saved && typeof saved.id === "string" && saved.id) {
+      const age = Date.now() - (saved._stored_at || 0);
+      if (age > PENDING_EVIDENCE_TTL_MS) {
+        // Older than the TTL: the server almost certainly expired this
+        // evidence request already. Drop it so the next upload opens a
+        // new case instead of hitting a 404 on fulfil.
+        try { localStorage.removeItem(PENDING_EVIDENCE_KEY); } catch {}
+        return;
+      }
       uploadState.pendingEvidence = saved;
       setUploadSubmitLabel(true);
     }
@@ -657,12 +672,24 @@ async function submitUploadedImage() {
   const trace = document.getElementById("upload-trace");
   const tracePre = document.getElementById("upload-trace-pre");
   const canvas = document.getElementById("upload-canvas");
-  const roadType = document.getElementById("upload-road-type").value || "main";
-  const laneBlocked = document.getElementById("upload-lane-blocked").value || "none";
-  const location = document.getElementById("upload-location").value || "";
+  const roadType = document.getElementById("upload-road-type").value;
+  const laneBlocked = document.getElementById("upload-lane-blocked").value;
+  const location = (document.getElementById("upload-location").value || "").trim();
   const reporterText = (document.getElementById("upload-reporter-text").value || "").trim();
   const det = uploadState.lastDetections;
   if (!det) return;
+  // All four context fields are REQUIRED before a case is created on the server.
+  // Partial submits were allowed earlier and produced thin cases the agent could
+  // not reason about; the form now blocks the submit until every field is filled.
+  const missing = [];
+  if (!roadType) missing.push("Road type");
+  if (!laneBlocked) missing.push("Lane obstruction");
+  if (!location) missing.push("Location");
+  if (!reporterText) missing.push("Describe what you see");
+  if (missing.length) {
+    verdictBox.innerHTML = `<div class="upload-verdict-empty" style="color:#b91c1c;font-weight:600">Please fill in all fields before sending: ${missing.join(", ")}.</div>`;
+    return;
+  }
 
   const top = (det.detections && det.detections[0]) || null;
   const bboxes = (det.detections || [])
@@ -709,9 +736,17 @@ async function submitUploadedImage() {
   const path = pending ? `/evidence_requests/${encodeURIComponent(pending.id)}/fulfill` : "/hazards/submit-async";
 
   submitBtn.disabled = true;
+  // Loading state: a visible spinner + text so the user knows the request is in flight.
+  const spinnerHtml = `<div class="rg-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;border:2px solid #cbd5e1;border-top-color:#0ea5e9;border-radius:50%;animation:rg-spin 0.9s linear infinite;vertical-align:middle;margin-right:8px"></div>`;
+  if (!document.getElementById("rg-spin-style")) {
+    const style = document.createElement("style");
+    style.id = "rg-spin-style";
+    style.textContent = "@keyframes rg-spin { to { transform: rotate(360deg); } }";
+    document.head.appendChild(style);
+  }
   verdictBox.innerHTML = pending
-    ? `<div class="upload-verdict-empty">Sending the new photo, the agent continues from where it paused...</div>`
-    : `<div class="upload-verdict-empty">Submitted. Agents are working on your case; the verdict will appear below in a minute or two.</div>`;
+    ? `<div class="upload-verdict-empty">${spinnerHtml}Sending the new photo, the agent continues from where it paused...</div>`
+    : `<div class="upload-verdict-empty">${spinnerHtml}Submitted. Agents are working on your case; the verdict will appear below in 1-3 minutes.</div>`;
   try {
     const resp = await fetchJson(path, {
       method: "POST",
@@ -782,9 +817,10 @@ async function pollAsyncHazard(hazardId, verdictBox) {
       }
       const elapsed = Math.round((Date.now() - started) / 1000);
       const steps = (report.trace || []).length;
+      const spin = `<div class="rg-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;border:2px solid #cbd5e1;border-top-color:#0ea5e9;border-radius:50%;animation:rg-spin 0.9s linear infinite;vertical-align:middle;margin-right:8px"></div>`;
       verdictBox.innerHTML = v.status === "queued"
-        ? `<div class="upload-verdict-empty">Queued behind another case... ${elapsed}s elapsed.</div>`
-        : `<div class="upload-verdict-empty">Working... ${elapsed}s elapsed, ${steps} pipeline steps done (local agents can take 1-5 minutes).</div>`;
+        ? `<div class="upload-verdict-empty">${spin}Queued behind another case... ${elapsed}s elapsed.</div>`
+        : `<div class="upload-verdict-empty">${spin}Working... ${elapsed}s elapsed, ${steps} pipeline steps done (local agents on CPU can take 1-5 minutes).</div>`;
     } catch (err) {
       verdictBox.innerHTML = `<div class="upload-verdict-empty">Polling for the verdict failed: ${(err && err.message) || err}. Try again in a moment.</div>`;
       return false;
