@@ -319,6 +319,67 @@ the digest PDF, each only when non-empty. It is stored in
 of a citizen-facing response (`HazardSubmitResponse`,
 `LiveHazardResponse`, the webapp card).
 
+### 5.1 severity vs priority vs action (25.10.2026)
+
+The reviewer flagged a case where `severity_signal=severe` landed on
+`action=standard` and asked for an explicit policy. Here it is.
+
+**severity_signal** (profile_builder, `_severity_from_signals`): a
+visual / geometric descriptor the profile builder attaches so the
+Decision model has a word for how bad the damage *looks*. It is NOT a
+policy input.
+
+| severity_signal | How profile_builder produces it |
+|---|---|
+| `severe` | D40 with lane_blocked in (partial, full); OR D40/D20 with `area_ratio >= 0.05` AND confidence >= 0.6 |
+| `moderate` | D40/D20 with confidence >= 0.5 (and not severe above); default when nothing else matches |
+| `minor` | D00 / D10 (linear cracks) |
+
+**priority** (`check_hazard_severity` tool): an integer 0-100 for queue
+ordering. Weights come from `policy.yaml`: class base (D40=60, D20=40,
+D10=20, D00=15), confidence multiplier, road_type bonus, lane_blocked
+bonus, recurrence bonus. priority is a NUMBER the supervisor sorts by;
+it does NOT by itself decide the action.
+
+**action** (the Decision rule tree + LLM): what the pipeline recommends.
+Decided from `primary_class`, `primary_confidence`, `road_type`,
+`lane_blocked`, `perception_confidence`, `research_coverage`,
+`intake_contradictions` and (on a catalogue hit) `dataset_match`.
+severity_signal is PRESENTED to the LLM as free-text context, but no
+deterministic rule maps a severity value to an action.
+
+**Why severity does not drive action.** severity_signal is a visual
+descriptor computed from the detector's bbox geometry alone. It cannot
+tell a severe-looking pothole in a parking bay (standard) from a
+severe-looking pothole on a highway with lane-blockage (urgent); the
+*same* severity_signal applies to both. Mapping severity directly to
+action would hide that difference. The rule tree's `urgent` precondition
+("D40 + main + lane_blocked in (partial, full) + confidence >= 0.6")
+already captures the "severe pothole in a dangerous context" case.
+
+**Example 1: D20 severe → standard is correct.** D20 alligator cracking
+on a main road, confidence 0.78, no lane blockage, RAG covered. The
+profile builder calls this `severe` because the bbox area is large;
+the rule tree correctly answers `standard` because D20 is not a
+pothole and the lane is not blocked.
+
+**Example 2: D40 severe → urgent is correct.** D40 pothole on a main
+road, confidence 0.82, lane_blocked=`partial`. severity=severe,
+action=urgent, priority ~77. Both agree.
+
+**Example 3: D40 severe → standard is also correct in some contexts.**
+D40 pothole on a secondary road, confidence 0.80, no lane blockage.
+severity=severe (geometry says it is), action=standard (the rule tree's
+urgent precondition needs lane blockage AND main road).
+
+In all three the LLM can argue a different verdict in prose if it has a
+grounded reason - a reporter who says vehicles are swerving, a cluster
+flag of 5+ reports at the same spot - and the rule tree only overrides
+when the LLM ignores the hard floors (low perception, no RAG coverage,
+intake contradiction, catalogue-vs-detector contradiction).
+
+### 5.2 Final-action table
+
 The LLM may deviate from the table within limits; the grounding
 assertion, the evidence cap and the deterministic floors will not. The
 LLM is asked once: a verdict that cites an id Research did not return,

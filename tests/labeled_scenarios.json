@@ -384,6 +384,38 @@
     "expected_action": "needs_more_evidence"
   },
   {
+    "id": "lb-pol-01",
+    "kind": "hard",
+    "description": "severity policy: D20 severe (large bbox) on main, no block - standard, not urgent. severity is visual, action is contextual.",
+    "yolo_output": {
+      "top1_class": "D20",
+      "top1_confidence": 0.78,
+      "top1_margin": 0.44,
+      "detections": [{"class": "D20", "confidence": 0.78, "bbox": [120, 220, 560, 620], "area_ratio": 0.19}],
+      "n_detections_by_class": {"D20": 1, "D40": 0, "D00": 0, "D10": 0},
+      "image_dims": [1280, 720]
+    },
+    "image_quality": {"blur_score": 165, "brightness_mean": 0.58, "is_road_scene": true, "road_scene_confidence": 0.93, "occlusion_estimate": "low", "ocr_text_detected": ""},
+    "metadata": {"road_type": "main", "lane_blocked": "none", "location": "Weizmann 112", "reported_at": "2026-10-25T07:30:00Z"},
+    "expected_action": "standard"
+  },
+  {
+    "id": "lb-pol-02",
+    "kind": "hard",
+    "description": "severity policy: D40 severe on secondary road, no block - standard. urgent requires main road AND blockage.",
+    "yolo_output": {
+      "top1_class": "D40",
+      "top1_confidence": 0.82,
+      "top1_margin": 0.46,
+      "detections": [{"class": "D40", "confidence": 0.82, "bbox": [200, 320, 520, 620], "area_ratio": 0.12}],
+      "n_detections_by_class": {"D40": 1, "D20": 0, "D00": 0, "D10": 0},
+      "image_dims": [1280, 720]
+    },
+    "image_quality": {"blur_score": 170, "brightness_mean": 0.60, "is_road_scene": true, "road_scene_confidence": 0.94, "occlusion_estimate": "low", "ocr_text_detected": ""},
+    "metadata": {"road_type": "secondary", "lane_blocked": "none", "location": "Habanim 15", "reported_at": "2026-10-25T07:45:00Z"},
+    "expected_action": "standard"
+  },
+  {
     "id": "lb-std-06",
     "kind": "simple",
     "description": "D40 main lane none at very high confidence - not urgent (no blockage)",
