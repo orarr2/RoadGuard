@@ -104,7 +104,8 @@ def main() -> int:
                      password_hash="!unusable_internal_user",
                      is_admin=False, is_internal=True)
 
-    print(f"total users now: {db.count_users()}")
+        total = db.count_users()
+    print(f"total users now: {total}")
     return 0
 
 
