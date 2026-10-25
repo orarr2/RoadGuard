@@ -132,6 +132,55 @@ export async function loginWithPassphrase(passphrase) {
   return data;
 }
 
+// Step 2 (25.10.2026): username + password login against the new endpoint.
+// Rejects with a stable `invalid_credentials` message on wrong user/wrong
+// password alike, so the UI must show the same text for both.
+export async function loginWithUsernamePassword(username, password) {
+  const data = await fetchJson("/auth/login/password", {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+  if (!data || !data.token) {
+    throw new Error("login_response_missing_token");
+  }
+  saveToken(data.token);
+  return data;
+}
+
+// Step 2 (25.10.2026): user registration. Gated on the server by
+// ROADGUARD_SIGNUP_ENABLED; production stays off, so this call will 403.
+// The UI only renders the signup tab after it has fetched /auth/config.
+export async function registerAccount(username, password, email) {
+  const body = { username, password };
+  if (email) body.email = email;
+  const data = await fetchJson("/auth/register", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (!data || !data.token) {
+    throw new Error("register_response_missing_token");
+  }
+  saveToken(data.token);
+  return data;
+}
+
+// Step 2 (25.10.2026): the UI reads which login methods are enabled before
+// deciding which tabs/buttons to render.
+export async function fetchAuthConfig() {
+  return fetchJson("/auth/config");
+}
+
+// Step 2 (25.10.2026): server-side logout. Stateless on the server
+// (just returns {ok:true}); the client drops the token locally too.
+export async function logoutCall() {
+  try {
+    await fetchJson("/auth/logout", { method: "POST" });
+  } catch {
+    // Even if the server call fails, continue - the client clears locally.
+  }
+  clearToken();
+}
+
 export async function loginWithGoogleIdToken(idToken) {
   const data = await fetchJson("/auth/login", {
     method: "POST",

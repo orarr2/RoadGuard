@@ -1519,3 +1519,70 @@ a.verdict-cite:hover {
 .upload-verdict-footer code {
   font-family: 'JetBrains Mono', monospace;
 }
+
+/* --- Step 2 auth upgrade: tabbed sign-in + profile dropdown --- */
+.signin-tabs {
+  display: flex; gap: 2px; padding: 4px; margin: 10px 0 18px;
+  background: var(--bg-1); border-radius: 10px; border: 1px solid var(--border);
+}
+.signin-tab {
+  flex: 1; padding: 10px 12px; border: 0; background: transparent;
+  color: var(--text-dim); font-weight: 600; font-size: 14px;
+  border-radius: 7px; cursor: pointer; transition: all 0.15s;
+}
+.signin-tab:hover { color: var(--text); }
+.signin-tab.is-active {
+  background: var(--bg-2); color: var(--text);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+}
+.signin-fine {
+  color: var(--text-dim); font-size: 12px; margin: 8px 2px 0;
+}
+.profile-pop {
+  position: fixed; inset: 0; z-index: 100;
+  display: flex; align-items: flex-start; justify-content: flex-end;
+}
+.profile-pop[hidden] { display: none; }
+.profile-pop-backdrop {
+  position: absolute; inset: 0; background: rgba(0,0,0,0.3);
+}
+.profile-pop-card {
+  position: relative; z-index: 1;
+  margin: calc(14px + env(safe-area-inset-top)) 14px 0 14px;
+  width: min(360px, calc(100vw - 28px));
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+}
+.profile-pop-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 0 0 10px 0;
+}
+.profile-pop-head h3 { margin: 0; font-size: 16px; color: var(--text); }
+.icon-btn {
+  background: transparent; border: 0; color: var(--text-dim);
+  cursor: pointer; padding: 4px; border-radius: 6px;
+}
+.icon-btn:hover { background: var(--bg-1); color: var(--text); }
+.profile-pop-fields {
+  display: grid; grid-template-columns: minmax(0, 110px) 1fr;
+  gap: 6px 10px; margin: 0 0 12px 0; font-size: 14px;
+}
+.profile-pop-fields dt { color: var(--text-dim); margin: 0; }
+.profile-pop-fields dd { color: var(--text); margin: 0; word-break: break-word; }
+.profile-pop-admin {
+  border-top: 1px solid var(--border); padding-top: 10px; margin-top: 6px;
+}
+.profile-pop-admin h4 {
+  margin: 0 0 6px 0; font-size: 13px; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.profile-pop-admin ul { list-style: none; padding: 0; margin: 0 0 6px 0; }
+.profile-pop-admin li { margin: 4px 0; }
+.profile-pop-admin a {
+  color: var(--accent); text-decoration: none; font-size: 13px;
+  word-break: break-all;
+}
+.profile-pop-admin a:hover { text-decoration: underline; }
+.profile-pop-admin-note {
+  margin: 6px 0 0; font-size: 11px; color: var(--text-dim);
+}

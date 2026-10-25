@@ -42,12 +42,46 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>
         <span id="nav-session-label">session</span>
       </button>
+      <!-- Signed-out: single sign-in button -->
       <button class="nav-btn nav-btn--ghost" id="nav-signin" title="Sign in">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
         <span id="signin-label">Sign in</span>
       </button>
+      <!-- Signed-in: profile button that opens the dropdown + separate Logout button -->
+      <button class="nav-btn nav-btn--ghost" id="nav-profile" title="Your profile" hidden>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="4"/><path d="M4 21v-2a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v2"/></svg>
+        <span id="nav-profile-label">Profile</span>
+      </button>
+      <button class="nav-btn nav-btn--ghost" id="nav-logout" title="Log out" hidden>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/></svg>
+        <span>Log out</span>
+      </button>
     </nav>
   </header>
+
+  <!-- ========================= PROFILE DROPDOWN ========================= -->
+  <div class="profile-pop" id="profile-pop" hidden>
+    <div class="profile-pop-card" role="dialog" aria-labelledby="profile-pop-title">
+      <div class="profile-pop-head">
+        <h3 id="profile-pop-title">Your profile</h3>
+        <button class="icon-btn" id="profile-pop-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <dl class="profile-pop-fields">
+        <dt>Username</dt><dd id="profile-username">-</dd>
+        <dt>Email</dt><dd id="profile-email">-</dd>
+        <dt>Uploads today</dt><dd id="profile-uploads-today">0 / 100</dd>
+        <dt>Uploads total</dt><dd id="profile-uploads-total">0</dd>
+      </dl>
+      <div class="profile-pop-admin" id="profile-pop-admin" hidden>
+        <h4>Operator pages (admin)</h4>
+        <ul id="profile-operator-urls"></ul>
+        <p class="profile-pop-admin-note">Private: served only on the Tailscale tailnet.</p>
+      </div>
+    </div>
+    <div class="profile-pop-backdrop" id="profile-pop-backdrop"></div>
+  </div>
 
   <!-- ========================= LANDING ========================= -->
   <main class="landing" id="view-landing">
@@ -462,24 +496,57 @@
         </svg>
         <h2>Sign in to RoadGuard</h2>
       </div>
-      <p class="signin-copy">Access is invite-only. Sign in with Google (if your address is on the allow list) or paste the passphrase you were given.</p>
+      <p class="signin-copy">Access is invite-only. Sign in with your username + password, or with Google if your address is on the allow list.</p>
 
-      <div class="signin-google" id="signin-google" hidden>
-        <div id="google-signin-button" class="google-btn-holder"></div>
-        <div class="signin-sep"><span>or</span></div>
+      <!-- Tabs -->
+      <div class="signin-tabs" role="tablist">
+        <button type="button" class="signin-tab is-active" id="tab-password" role="tab" aria-selected="true">Password</button>
+        <button type="button" class="signin-tab" id="tab-google" role="tab" aria-selected="false">Google</button>
+        <button type="button" class="signin-tab" id="tab-signup" role="tab" aria-selected="false" hidden>Sign up</button>
       </div>
 
-      <form class="signin-form" id="signin-form" autocomplete="off">
+      <!-- Password tab (new primary flow) -->
+      <form class="signin-form" id="signin-form-password" autocomplete="off">
         <label class="signin-field">
-          <span>Passphrase</span>
-          <input type="password" id="signin-pass" placeholder="Ask the owner" required autocomplete="current-password">
+          <span>Username</span>
+          <input type="text" id="signin-username" placeholder="e.g. orpsp8" required autocomplete="username" minlength="3" maxlength="32">
         </label>
-        <button class="btn btn--primary btn--lg signin-submit" type="submit" id="signin-submit">
+        <label class="signin-field">
+          <span>Password</span>
+          <input type="password" id="signin-password" placeholder="Your password" required autocomplete="current-password">
+        </label>
+        <button class="btn btn--primary btn--lg signin-submit" type="submit">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
-          Continue
+          Sign in
         </button>
-        <div class="signin-error" id="signin-error" hidden></div>
+        <p class="signin-fine">Legacy passphrase sign-in: leave username blank; the server tries the old /auth/login path.</p>
       </form>
+
+      <!-- Google tab -->
+      <div class="signin-form" id="signin-form-google" hidden>
+        <div id="google-signin-button" class="google-btn-holder"></div>
+        <p class="signin-fine" id="signin-google-note">Google sign-in is not enabled on this server (ROADGUARD_GOOGLE_OAUTH_CLIENT_ID not set).</p>
+      </div>
+
+      <!-- Signup tab (only shown if /auth/config.signup_enabled=true; prod stays off) -->
+      <form class="signin-form" id="signin-form-signup" hidden autocomplete="off">
+        <label class="signin-field">
+          <span>Username</span>
+          <input type="text" id="signup-username" placeholder="3-32 chars, alnum + _.-" required minlength="3" maxlength="32">
+        </label>
+        <label class="signin-field">
+          <span>Email (optional)</span>
+          <input type="email" id="signup-email" placeholder="you@example.com" maxlength="200">
+        </label>
+        <label class="signin-field">
+          <span>Password</span>
+          <input type="password" id="signup-password" placeholder="8+ chars, 1 upper + 1 lower + 1 special" required autocomplete="new-password">
+        </label>
+        <button class="btn btn--primary btn--lg signin-submit" type="submit">Create account</button>
+        <p class="signin-fine">After signup you are signed in automatically. Max 10 users on this server.</p>
+      </form>
+
+      <div class="signin-error" id="signin-error" hidden></div>
 
       <p class="signin-foot">RoadGuard is a decision-support tool. No road is closed from here. Every urgent and human-review case is a recommendation for a human to act on.</p>
     </div>

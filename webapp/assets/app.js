@@ -12,13 +12,17 @@
 import { resolveApiOrigin } from "./auth.js";
 import {
   clearToken,
+  fetchAuthConfig,
   fetchJson,
   fetchMe,
   isSignedIn,
   loginWithGoogleIdToken,
   loginWithPassphrase,
+  loginWithUsernamePassword,
+  logoutCall,
   mountGoogleSignIn,
   parseJwt,
+  registerAccount,
   setUnauthorizedHandler,
 } from "./auth.js";
 import { LiveDriver } from "./drive.js";
@@ -62,10 +66,13 @@ window.addEventListener("DOMContentLoaded", async () => {
   wireUpload();
   wireSignIn();
   wireNavSignIn();
+  wireNavProfile();
+  wireNavLogout();
   wireHeroSlideshow();
   wireAutoTelemetry();
-  refreshSignInLabel();
+  refreshSignInLabel();  // also calls refreshUserChrome()
   setUnauthorizedHandler(() => {
+    state.me = null;
     refreshSignInLabel();
     openSignIn();
   });
@@ -195,16 +202,104 @@ function toast(msg, ms = 2500) {
 }
 
 function refreshSignInLabel() {
+  // Legacy function kept so other call sites still work. The new UX uses
+  // refreshUserChrome() which swaps the whole header based on sign-in state.
   const label = document.getElementById("signin-label");
-  if (!label) return;
-  const payload = parseJwt();
-  if (payload && payload.email) {
-    label.textContent = payload.email.split("@")[0];
-  } else if (payload && payload.name) {
-    label.textContent = payload.name;
-  } else {
-    label.textContent = "Sign in";
+  if (label) {
+    const payload = parseJwt();
+    if (payload && payload.email) {
+      label.textContent = payload.email.split("@")[0];
+    } else if (payload && payload.name) {
+      label.textContent = payload.name;
+    } else {
+      label.textContent = "Sign in";
+    }
   }
+  // Also run the full chrome refresh (sign-in button vs profile+logout).
+  refreshUserChrome().catch(() => {});
+}
+
+// Step 2 (25.10.2026): swap the header between signed-out ("Sign in" button)
+// and signed-in (Profile dropdown button + separate Logout button). On
+// sign-in it also pre-fetches /auth/me so the profile dropdown opens with
+// fresh counts.
+async function refreshUserChrome() {
+  const navSignin = document.getElementById("nav-signin");
+  const navProfile = document.getElementById("nav-profile");
+  const navLogout = document.getElementById("nav-logout");
+  if (!navSignin || !navProfile || !navLogout) return;
+  const signed = isSignedIn();
+  navSignin.hidden = signed;
+  navProfile.hidden = !signed;
+  navLogout.hidden = !signed;
+  if (!signed) {
+    state.me = null;
+    return;
+  }
+  // Fetch /auth/me and cache; the dropdown reads from state.me on open.
+  try {
+    const me = await fetchMe();
+    state.me = me;
+    const profileLabel = document.getElementById("nav-profile-label");
+    if (profileLabel) {
+      profileLabel.textContent = me.username || (me.email || "").split("@")[0] || "Profile";
+    }
+  } catch {
+    // 401 handler already fired; chrome will refresh on next tick.
+  }
+}
+
+function _populateProfileDropdown() {
+  const me = state.me || {};
+  const setText = (id, text) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text == null ? "-" : String(text);
+  };
+  setText("profile-username", me.username || me.name || me.sub || "(unknown)");
+  setText("profile-email", me.email || "(none)");
+  const cap = me.daily_cap || 100;
+  setText("profile-uploads-today", `${me.uploads_today || 0} / ${cap}`);
+  setText("profile-uploads-total", `${me.uploads_total || 0}`);
+  const adminBlock = document.getElementById("profile-pop-admin");
+  const urlsList = document.getElementById("profile-operator-urls");
+  if (me.is_admin && me.operator_urls && me.operator_urls.length) {
+    adminBlock.hidden = false;
+    urlsList.innerHTML = me.operator_urls.map((u) =>
+      `<li><a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a></li>`
+    ).join("");
+  } else {
+    adminBlock.hidden = true;
+    urlsList.innerHTML = "";
+  }
+}
+
+function wireNavProfile() {
+  const btn = document.getElementById("nav-profile");
+  const pop = document.getElementById("profile-pop");
+  const backdrop = document.getElementById("profile-pop-backdrop");
+  const closeBtn = document.getElementById("profile-pop-close");
+  if (!btn || !pop) return;
+  btn.addEventListener("click", async () => {
+    await refreshUserChrome();
+    _populateProfileDropdown();
+    pop.hidden = false;
+  });
+  if (backdrop) backdrop.addEventListener("click", () => { pop.hidden = true; });
+  if (closeBtn) closeBtn.addEventListener("click", () => { pop.hidden = true; });
+}
+
+function wireNavLogout() {
+  const btn = document.getElementById("nav-logout");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    await logoutCall();
+    state.me = null;
+    await refreshUserChrome();
+    const pop = document.getElementById("profile-pop");
+    if (pop) pop.hidden = true;
+    toast("Logged out");
+    if (state.view === "live") stopLive();
+  });
 }
 
 // ============================================================ LANDING
@@ -473,28 +568,91 @@ function setBanner({ action, rationale, priority, cited_sources, cached, fallbac
   }
 }
 
-// ============================================================ SIGN IN
+// ============================================================ SIGN IN (step 2)
+let _authConfigCache = null;
+async function getAuthConfig() {
+  if (_authConfigCache) return _authConfigCache;
+  try {
+    _authConfigCache = await fetchAuthConfig();
+  } catch {
+    _authConfigCache = {
+      signup_enabled: false, password_login_enabled: true,
+      google_login_enabled: false, max_users: 10, user_count: 0,
+    };
+  }
+  return _authConfigCache;
+}
+
+function _showSigninTab(name) {
+  const tabs = ["password", "google", "signup"];
+  tabs.forEach((t) => {
+    const btn = document.getElementById(`tab-${t}`);
+    const form = document.getElementById(`signin-form-${t}`);
+    if (!btn || !form) return;
+    const active = t === name;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+    form.hidden = !active;
+  });
+  const err = document.getElementById("signin-error");
+  if (err) { err.hidden = true; err.textContent = ""; }
+}
+
 function wireSignIn() {
-  const form = document.getElementById("signin-form");
   const err = document.getElementById("signin-error");
   const backdrop = document.getElementById("signin-backdrop");
 
-  form.addEventListener("submit", async (ev) => {
+  // Password tab form
+  const pwForm = document.getElementById("signin-form-password");
+  pwForm.addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    err.hidden = true;
-    err.textContent = "";
-    const pass = document.getElementById("signin-pass").value;
+    err.hidden = true; err.textContent = "";
+    const username = document.getElementById("signin-username").value.trim();
+    const password = document.getElementById("signin-password").value;
     try {
-      await loginWithPassphrase(pass);
-      refreshSignInLabel();
+      if (!username) {
+        // Legacy: no username given - try the old passphrase endpoint for
+        // backward compat with existing operator credentials.
+        await loginWithPassphrase(password);
+      } else {
+        await loginWithUsernamePassword(username, password);
+      }
+      await refreshUserChrome();
       closeSignIn();
       runPending();
       loadMyReports();
       toast("Signed in");
     } catch (e) {
       err.hidden = false;
-      err.textContent = e && e.message ? e.message : "Sign-in failed";
+      err.textContent = _friendlyAuthError(e);
     }
+  });
+
+  // Signup tab form
+  const suForm = document.getElementById("signin-form-signup");
+  suForm.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    err.hidden = true; err.textContent = "";
+    const username = document.getElementById("signup-username").value.trim();
+    const password = document.getElementById("signup-password").value;
+    const email = document.getElementById("signup-email").value.trim();
+    try {
+      await registerAccount(username, password, email);
+      await refreshUserChrome();
+      closeSignIn();
+      runPending();
+      loadMyReports();
+      toast("Account created, signed in");
+    } catch (e) {
+      err.hidden = false;
+      err.textContent = _friendlyAuthError(e);
+    }
+  });
+
+  // Tabs
+  ["password", "google", "signup"].forEach((t) => {
+    const btn = document.getElementById(`tab-${t}`);
+    if (btn) btn.addEventListener("click", () => _showSigninTab(t));
   });
 
   backdrop.addEventListener("click", () => closeSignIn());
@@ -503,26 +661,59 @@ function wireSignIn() {
     err.hidden = true;
     try {
       await loginWithGoogleIdToken(credential);
-      refreshSignInLabel();
+      await refreshUserChrome();
       closeSignIn();
       runPending();
       loadMyReports();
       toast("Signed in with Google");
     } catch (e) {
       err.hidden = false;
-      err.textContent = e && e.message ? e.message : "Google sign-in failed";
+      err.textContent = _friendlyAuthError(e);
     }
   });
 }
 
-function openSignIn() {
-  document.getElementById("signin-modal").hidden = false;
-  const googleWrap = document.getElementById("signin-google");
-  googleWrap.hidden = !document.querySelector(
-    "#google-signin-button iframe, #google-signin-button div",
-  );
-  setTimeout(() => document.getElementById("signin-pass").focus(), 60);
+function _friendlyAuthError(e) {
+  const msg = (e && e.message) ? e.message : "Sign-in failed";
+  // The server returns stable keys like `invalid_credentials`, `signup_disabled`,
+  // `password_too_short`, `user_cap_reached`, `username_taken`, etc. Map a few
+  // to human prose; show the rest verbatim.
+  const map = {
+    "invalid_credentials": "Wrong username or password.",
+    "signup_disabled": "Signup is closed on this server.",
+    "password_login_disabled": "Password login is disabled on this server.",
+    "username_taken": "That username is already taken.",
+    "user_cap_reached": "User limit reached on this server.",
+    "password_too_short": "Password must be at least 8 characters.",
+    "password_missing_uppercase": "Password must include an uppercase letter.",
+    "password_missing_lowercase": "Password must include a lowercase letter.",
+    "password_missing_special": "Password must include a special character.",
+    "username_invalid_format": "Username: 3-32 chars, letters/digits/_.-, must start with letter/digit/_.",
+    "daily_submit_cap_reached (100/day)": "Daily upload cap reached - try tomorrow.",
+  };
+  for (const [key, friendly] of Object.entries(map)) {
+    if (msg.includes(key)) return friendly;
+  }
+  return msg;
 }
+
+async function openSignIn() {
+  const modal = document.getElementById("signin-modal");
+  modal.hidden = false;
+  // Decide which tabs to render based on server config.
+  const cfg = await getAuthConfig();
+  const signupTab = document.getElementById("tab-signup");
+  if (signupTab) signupTab.hidden = !cfg.signup_enabled;
+  const googleNote = document.getElementById("signin-google-note");
+  if (googleNote) googleNote.hidden = !!cfg.google_login_enabled;
+  // Default to the Password tab on open.
+  _showSigninTab("password");
+  setTimeout(() => {
+    const u = document.getElementById("signin-username");
+    if (u) u.focus();
+  }, 60);
+}
+
 function closeSignIn() {
   document.getElementById("signin-modal").hidden = true;
 }
@@ -1113,14 +1304,13 @@ function renderUploadVerdict(resp) {
 }
 
 function wireNavSignIn() {
+  // Signed-out: show the signin modal. Signed-in: open the profile
+  // dropdown (user asked for separate Login and Logout buttons; this one
+  // handles only the signed-out path).
   const btn = document.getElementById("nav-signin");
+  if (!btn) return;
   btn.addEventListener("click", () => {
-    if (isSignedIn()) {
-      clearToken();
-      refreshSignInLabel();
-      toast("Signed out");
-      if (state.view === "live") stopLive();
-    } else {
+    if (!isSignedIn()) {
       openSignIn();
     }
   });
