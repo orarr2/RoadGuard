@@ -1520,21 +1520,131 @@ a.verdict-cite:hover {
   font-family: 'JetBrains Mono', monospace;
 }
 
-/* --- Step 2 auth upgrade: tabbed sign-in + profile dropdown --- */
-.signin-tabs {
-  display: flex; gap: 2px; padding: 4px; margin: 10px 0 18px;
-  background: var(--bg-1); border-radius: 10px; border: 1px solid var(--border);
+/* --- Step 2 auth upgrade: modern GitHub/HuggingFace-style sign-in --- */
+
+/* The modal body gets more breathing room */
+.signin-modal-body {
+  max-width: 420px !important;
+  padding: 36px 30px 24px !important;
 }
-.signin-tab {
-  flex: 1; padding: 10px 12px; border: 0; background: transparent;
-  color: var(--text-dim); font-weight: 600; font-size: 14px;
-  border-radius: 7px; cursor: pointer; transition: all 0.15s;
+.signin-brand { gap: 10px; margin-bottom: 4px; }
+.signin-brand h2 {
+  font-size: 22px; font-weight: 700; letter-spacing: -0.01em;
+  margin: 0; color: var(--text);
 }
-.signin-tab:hover { color: var(--text); }
-.signin-tab.is-active {
-  background: var(--bg-2); color: var(--text);
-  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+.signin-copy {
+  color: var(--text-dim); font-size: 14px; line-height: 1.5;
+  margin: 4px 0 24px; text-align: left;
 }
+
+/* Social providers block (top of the card) */
+.signin-social { margin: 0 0 4px; }
+.social-btn {
+  display: flex; align-items: center; justify-content: center;
+  gap: 10px; width: 100%;
+  padding: 11px 16px; border: 1px solid var(--line-2);
+  background: var(--bg-1); color: var(--text);
+  border-radius: 10px; font-size: 15px; font-weight: 500;
+  cursor: pointer; transition: all 0.15s;
+  font-family: inherit;
+}
+.social-btn:hover { background: var(--bg-2); border-color: var(--brand-1); }
+.social-btn:active { transform: scale(0.99); }
+.social-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.social-icon { flex: none; }
+.gsi-hidden { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+
+.signin-divider {
+  display: flex; align-items: center; gap: 10px;
+  color: var(--text-dim); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 1px;
+  margin: 20px 0;
+}
+.signin-divider::before, .signin-divider::after {
+  content: ""; flex: 1; height: 1px; background: var(--line);
+}
+.signin-divider span { padding: 0 2px; }
+
+/* Form fields - stacked label above input, inside border */
+.signin-form { display: flex; flex-direction: column; gap: 16px; }
+.signin-field { display: flex; flex-direction: column; gap: 6px; }
+.signin-field label {
+  font-size: 13px; font-weight: 500; color: var(--text);
+  display: block;
+}
+.signin-field label .optional {
+  color: var(--text-dim); font-weight: 400; font-size: 12px;
+}
+.signin-field input {
+  width: 100%; box-sizing: border-box;
+  padding: 11px 12px; font-size: 15px; font-family: inherit;
+  background: var(--bg-1); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: 8px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.signin-field input:hover { border-color: var(--brand-1); }
+.signin-field input:focus {
+  outline: none; border-color: var(--brand-1);
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.15);
+}
+.signin-field input::placeholder { color: var(--text-fade); }
+
+.row-split {
+  display: flex; align-items: baseline; justify-content: space-between;
+}
+.link-tiny {
+  background: transparent; border: 0; padding: 0;
+  color: var(--brand-1); font-size: 12px; font-weight: 500;
+  cursor: pointer; font-family: inherit;
+}
+.link-tiny:hover { text-decoration: underline; }
+.signin-hint {
+  color: var(--text-dim); font-size: 12px; margin: 4px 0 0;
+  line-height: 1.5;
+}
+
+/* Primary action button - solid high-contrast brand gradient */
+.btn-primary-xl {
+  width: 100%; padding: 12px 16px; margin-top: 6px;
+  background: var(--brand-grad); color: #ffffff;
+  border: 0; border-radius: 10px;
+  font-size: 15px; font-weight: 600;
+  cursor: pointer; transition: all 0.15s;
+  font-family: inherit;
+  box-shadow: 0 4px 12px rgba(14, 165, 233, 0.3);
+}
+.btn-primary-xl:hover {
+  filter: brightness(1.05);
+  box-shadow: 0 6px 16px rgba(14, 165, 233, 0.4);
+}
+.btn-primary-xl:active { transform: scale(0.99); }
+
+/* Error block */
+.signin-error {
+  margin-top: 16px; padding: 10px 12px;
+  background: var(--bad-soft); border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px; color: var(--bad); font-size: 13px;
+}
+
+/* Flip link (Sign in <-> Sign up) */
+.signin-flip {
+  text-align: center; margin: 20px 0 10px;
+  font-size: 14px; color: var(--text-dim);
+}
+.link {
+  background: transparent; border: 0; padding: 0;
+  color: var(--brand-1); font-weight: 600;
+  cursor: pointer; font-size: inherit; font-family: inherit;
+  margin-left: 4px;
+}
+.link:hover { text-decoration: underline; }
+
+.signin-foot {
+  color: var(--text-fade); font-size: 11px; line-height: 1.5;
+  margin: 20px 0 0; text-align: center;
+}
+
+/* Keep .signin-fine for the Google-not-enabled note */
 .signin-fine {
   color: var(--text-dim); font-size: 12px; margin: 8px 2px 0;
 }
@@ -1550,7 +1660,7 @@ a.verdict-cite:hover {
   position: relative; z-index: 1;
   margin: calc(14px + env(safe-area-inset-top)) 14px 0 14px;
   width: min(360px, calc(100vw - 28px));
-  background: var(--bg-2); border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg-1); border: 1px solid var(--line-2); border-radius: 12px;
   padding: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.4);
 }
 .profile-pop-head {
@@ -1570,7 +1680,7 @@ a.verdict-cite:hover {
 .profile-pop-fields dt { color: var(--text-dim); margin: 0; }
 .profile-pop-fields dd { color: var(--text); margin: 0; word-break: break-word; }
 .profile-pop-admin {
-  border-top: 1px solid var(--border); padding-top: 10px; margin-top: 6px;
+  border-top: 1px solid var(--line); padding-top: 10px; margin-top: 6px;
 }
 .profile-pop-admin h4 {
   margin: 0 0 6px 0; font-size: 13px; color: var(--text-dim);
@@ -1579,7 +1689,7 @@ a.verdict-cite:hover {
 .profile-pop-admin ul { list-style: none; padding: 0; margin: 0 0 6px 0; }
 .profile-pop-admin li { margin: 4px 0; }
 .profile-pop-admin a {
-  color: var(--accent); text-decoration: none; font-size: 13px;
+  color: var(--brand-1); text-decoration: none; font-size: 13px;
   word-break: break-all;
 }
 .profile-pop-admin a:hover { text-decoration: underline; }

@@ -569,6 +569,9 @@ function setBanner({ action, rationale, priority, cited_sources, cached, fallbac
 }
 
 // ============================================================ SIGN IN (step 2)
+// GitHub / Hugging Face style single-card modal: Google button on top,
+// email+password below the "or" divider, "Sign up" flip link at bottom
+// (shown only when the server enables signup).
 let _authConfigCache = null;
 async function getAuthConfig() {
   if (_authConfigCache) return _authConfigCache;
@@ -583,37 +586,101 @@ async function getAuthConfig() {
   return _authConfigCache;
 }
 
-function _showSigninTab(name) {
-  const tabs = ["password", "google", "signup"];
-  tabs.forEach((t) => {
-    const btn = document.getElementById(`tab-${t}`);
-    const form = document.getElementById(`signin-form-${t}`);
-    if (!btn || !form) return;
-    const active = t === name;
-    btn.classList.toggle("is-active", active);
-    btn.setAttribute("aria-selected", active ? "true" : "false");
-    form.hidden = !active;
-  });
+let _signinMode = "signin";  // "signin" or "signup"
+
+function _setSigninMode(mode) {
+  _signinMode = mode;
+  const signinForm = document.getElementById("signin-form-signin");
+  const signupForm = document.getElementById("signin-form-signup");
+  const title = document.getElementById("signin-title");
+  const subtitle = document.getElementById("signin-subtitle");
+  const flipPrompt = document.getElementById("signin-flip-prompt");
+  const flipBtn = document.getElementById("signin-flip-btn");
   const err = document.getElementById("signin-error");
+  const brandTitle = document.querySelector(".signin-brand h2");
+  if (mode === "signup") {
+    if (signinForm) signinForm.hidden = true;
+    if (signupForm) signupForm.hidden = false;
+    if (brandTitle) brandTitle.textContent = "Create your account";
+    if (subtitle) subtitle.textContent = "Join RoadGuard with a username and password.";
+    if (flipPrompt) flipPrompt.textContent = "Already have an account?";
+    if (flipBtn) flipBtn.textContent = "Sign in";
+    setTimeout(() => {
+      const el = document.getElementById("signup-username");
+      if (el) el.focus();
+    }, 50);
+  } else {
+    if (signinForm) signinForm.hidden = false;
+    if (signupForm) signupForm.hidden = true;
+    if (brandTitle) brandTitle.textContent = "Sign in to RoadGuard";
+    if (subtitle) subtitle.textContent = "Welcome back. Sign in to continue reporting hazards.";
+    if (flipPrompt) flipPrompt.textContent = "Don't have an account?";
+    if (flipBtn) flipBtn.textContent = "Sign up";
+    setTimeout(() => {
+      const el = document.getElementById("signin-username");
+      if (el) el.focus();
+    }, 50);
+  }
   if (err) { err.hidden = true; err.textContent = ""; }
+}
+
+function _wirePasswordToggle(btnId, inputId) {
+  const btn = document.getElementById(btnId);
+  const input = document.getElementById(inputId);
+  if (!btn || !input) return;
+  btn.addEventListener("click", () => {
+    const show = input.type === "password";
+    input.type = show ? "text" : "password";
+    btn.textContent = show ? "Hide" : "Show";
+    btn.setAttribute("aria-pressed", show ? "true" : "false");
+    btn.setAttribute("aria-label", show ? "Hide password" : "Show password");
+  });
+}
+
+// GSI's rendered button lives off-screen; our styled "Continue with Google"
+// button programmatically triggers Google's One-Tap prompt or clicks the
+// hidden GSI button, so the UX is a single visible button that matches
+// GitHub / Hugging Face.
+let _gsiReady = false;
+function _triggerGoogleSignIn() {
+  const err = document.getElementById("signin-error");
+  if (!_gsiReady || !window.google || !window.google.accounts || !window.google.accounts.id) {
+    if (err) {
+      err.hidden = false;
+      err.textContent = "Google sign-in is not configured on this server yet.";
+    }
+    return;
+  }
+  // Prefer the hidden GSI button so the user sees a consistent native
+  // consent sheet. If that fails, fall back to One-Tap prompt().
+  const nativeBtn = document.querySelector(
+    "#google-signin-button div[role='button'], #google-signin-button iframe",
+  );
+  if (nativeBtn && typeof nativeBtn.click === "function") {
+    nativeBtn.click();
+    return;
+  }
+  try {
+    window.google.accounts.id.prompt();
+  } catch (e) {
+    if (err) { err.hidden = false; err.textContent = _friendlyAuthError(e); }
+  }
 }
 
 function wireSignIn() {
   const err = document.getElementById("signin-error");
   const backdrop = document.getElementById("signin-backdrop");
 
-  // Password tab form
-  const pwForm = document.getElementById("signin-form-password");
-  pwForm.addEventListener("submit", async (ev) => {
+  // Sign-in form
+  const signinForm = document.getElementById("signin-form-signin");
+  signinForm.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     err.hidden = true; err.textContent = "";
     const username = document.getElementById("signin-username").value.trim();
     const password = document.getElementById("signin-password").value;
     try {
       if (!username) {
-        // Legacy: no username given - try the old passphrase endpoint for
-        // backward compat with existing operator credentials.
-        await loginWithPassphrase(password);
+        await loginWithPassphrase(password);  // legacy
       } else {
         await loginWithUsernamePassword(username, password);
       }
@@ -628,9 +695,9 @@ function wireSignIn() {
     }
   });
 
-  // Signup tab form
-  const suForm = document.getElementById("signin-form-signup");
-  suForm.addEventListener("submit", async (ev) => {
+  // Sign-up form (hidden by default; shown when _setSigninMode('signup'))
+  const signupForm = document.getElementById("signin-form-signup");
+  signupForm.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     err.hidden = true; err.textContent = "";
     const username = document.getElementById("signup-username").value.trim();
@@ -649,14 +716,25 @@ function wireSignIn() {
     }
   });
 
-  // Tabs
-  ["password", "google", "signup"].forEach((t) => {
-    const btn = document.getElementById(`tab-${t}`);
-    if (btn) btn.addEventListener("click", () => _showSigninTab(t));
-  });
+  // Flip link signin <-> signup
+  const flipBtn = document.getElementById("signin-flip-btn");
+  if (flipBtn) {
+    flipBtn.addEventListener("click", () => {
+      _setSigninMode(_signinMode === "signin" ? "signup" : "signin");
+    });
+  }
+
+  // Password visibility toggles
+  _wirePasswordToggle("signin-pw-toggle", "signin-password");
+  _wirePasswordToggle("signup-pw-toggle", "signup-password");
+
+  // Our styled Google button triggers the hidden GSI widget
+  const googleBtn = document.getElementById("btn-google");
+  if (googleBtn) googleBtn.addEventListener("click", _triggerGoogleSignIn);
 
   backdrop.addEventListener("click", () => closeSignIn());
 
+  // Mount the real GSI widget off-screen so our styled button can delegate to it
   mountGoogleSignIn("google-signin-button", async (credential) => {
     err.hidden = true;
     try {
@@ -671,13 +749,11 @@ function wireSignIn() {
       err.textContent = _friendlyAuthError(e);
     }
   });
+  _gsiReady = true;
 }
 
 function _friendlyAuthError(e) {
   const msg = (e && e.message) ? e.message : "Sign-in failed";
-  // The server returns stable keys like `invalid_credentials`, `signup_disabled`,
-  // `password_too_short`, `user_cap_reached`, `username_taken`, etc. Map a few
-  // to human prose; show the rest verbatim.
   const map = {
     "invalid_credentials": "Wrong username or password.",
     "signup_disabled": "Signup is closed on this server.",
@@ -700,18 +776,19 @@ function _friendlyAuthError(e) {
 async function openSignIn() {
   const modal = document.getElementById("signin-modal");
   modal.hidden = false;
-  // Decide which tabs to render based on server config.
   const cfg = await getAuthConfig();
-  const signupTab = document.getElementById("tab-signup");
-  if (signupTab) signupTab.hidden = !cfg.signup_enabled;
+
+  // Social block: show whole block only if Google is enabled on the server.
+  const socialBlock = document.getElementById("signin-social");
+  if (socialBlock) socialBlock.hidden = !cfg.google_login_enabled;
   const googleNote = document.getElementById("signin-google-note");
   if (googleNote) googleNote.hidden = !!cfg.google_login_enabled;
-  // Default to the Password tab on open.
-  _showSigninTab("password");
-  setTimeout(() => {
-    const u = document.getElementById("signin-username");
-    if (u) u.focus();
-  }, 60);
+
+  // Flip link (signin <-> signup) only when signup is enabled.
+  const flipWrap = document.getElementById("signin-flip-wrap");
+  if (flipWrap) flipWrap.hidden = !cfg.signup_enabled;
+
+  _setSigninMode("signin");
 }
 
 function closeSignIn() {
