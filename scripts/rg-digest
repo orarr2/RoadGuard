@@ -1,0 +1,507 @@
+#!/bin/bash
+# rg-digest: build the morning / afternoon digest. The email body is an
+# executive summary (headline + supervisor denials + Patterns block +
+# decision-support footer); the per-case detail (one block per hazard
+# with rationale, pipeline, cited sources, status) ships as an attached
+# PDF generated with ReportLab's SimpleDocTemplate (streaming flowables -
+# memory-efficient; fpdf2 was blowing past 9 GB on 60+ cases).
+#
+# Both are written to /var/lib/roadguard/digests/<date>.{html,pdf}; the
+# HTML is also what /digest/<date> serves. Cron fires at 05:00 and 17:00
+# UTC; a manual run goes through the same path.
+set -u
+OUTDIR=/var/lib/roadguard/digests
+TODAY=$(date -u +%Y-%m-%d)
+sudo mkdir -p "$OUTDIR"
+sudo chown roadguard:roadguard "$OUTDIR"
+
+sudo -u roadguard /opt/roadguard/venv/bin/python3 <<'PYEOF'
+import sqlite3, json, html, os, urllib.request, urllib.error
+from datetime import datetime, timedelta, timezone
+
+DB   = "/var/lib/roadguard/roadguard.db"
+NOW  = datetime.now(timezone.utc)
+CUT  = NOW - timedelta(hours=24)
+CUT_30D = NOW - timedelta(days=30)
+cutoff_epoch = CUT.timestamp()
+cutoff_30d = CUT_30D.timestamp()
+DATE_STAMP = NOW.strftime('%Y-%m-%d')
+OUT_HTML  = f"/var/lib/roadguard/digests/{DATE_STAMP}.html"
+OUT_PDF   = f"/var/lib/roadguard/digests/{DATE_STAMP}.pdf"
+
+con = sqlite3.connect(DB)
+con.row_factory = sqlite3.Row
+
+rows = con.execute(
+    "SELECT id, agent_decision, priority, agent_rationale, reported_at, location, status, "
+    "cited_sources_json, agent_trace_json "
+    "FROM hazards WHERE reported_at >= ? ORDER BY reported_at DESC",
+    (cutoff_epoch,),
+).fetchall()
+
+counts = {"urgent":0,"standard":0,"needs_more_evidence":0,"human_review":0,"other":0}
+for r in rows:
+    k = (r["agent_decision"] or "other").lower()
+    counts[k if k in counts else "other"] += 1
+
+grounded_denom = 0
+grounded_num = 0
+for r in rows:
+    d = (r["agent_decision"] or "").lower()
+    if d in ("urgent","standard"):
+        grounded_denom += 1
+        try:
+            cited = json.loads(r["cited_sources_json"] or "[]")
+            if cited:
+                grounded_num += 1
+        except Exception:
+            pass
+if grounded_denom:
+    grounded_rate = f"{int(100 * grounded_num / grounded_denom)}% ({grounded_num} of {grounded_denom})"
+else:
+    grounded_rate = "n/a (no citing verdicts)"
+
+approvals_pending = con.execute(
+    "SELECT COUNT(*) FROM approvals WHERE status='pending'"
+).fetchone()[0]
+evidence_open = con.execute(
+    "SELECT COUNT(*) FROM evidence_requests WHERE status='pending'"
+).fetchone()[0]
+
+denials = []
+try:
+    denial_rows = con.execute(
+        """
+        SELECT COALESCE(a.decision,'') AS decision,
+               COALESCE(h.agent_decision,'') AS original,
+               COUNT(*) AS n
+        FROM approvals a
+        LEFT JOIN hazards h ON a.hazard_id = h.id
+        WHERE a.decided_at >= ? AND a.status='decided'
+          AND LOWER(a.decision) IN ('deny','denied','override','rejected')
+        GROUP BY decision, original
+        ORDER BY n DESC
+        """,
+        (cutoff_30d,),
+    ).fetchall()
+    for r in denial_rows:
+        denials.append({"decision": r["decision"], "original": r["original"], "n": r["n"]})
+except Exception:
+    denials = []
+
+pattern_rows = con.execute(
+    """
+    SELECT
+      COALESCE(NULLIF(TRIM(location), ''), '(no location)') AS loc,
+      class,
+      COUNT(*) AS n,
+      MIN(reported_at) AS first_ts,
+      MAX(reported_at) AS last_ts
+    FROM hazards
+    WHERE reported_at >= ?
+      AND agent_decision IS NOT NULL
+    GROUP BY loc, class
+    HAVING n >= 2 AND loc != '(no location)'
+    ORDER BY n DESC, last_ts DESC
+    LIMIT 20
+    """,
+    (cutoff_30d,),
+).fetchall()
+clusters = []
+for r in pattern_rows:
+    span_days = round((r["last_ts"] - r["first_ts"]) / 86400.0, 1)
+    clusters.append({
+        "location": r["loc"],
+        "class": r["class"] or "unknown",
+        "count": r["n"],
+        "span_days": span_days,
+    })
+
+PATTERN_SYSTEM = (
+    "You are RoadGuard's Pattern agent. You read a list of same-class same-location "
+    "hazard clusters identified over the last 30 days and write ONE short paragraph "
+    "for a municipal supervisor's morning digest. Write 2-4 plain English sentences. "
+    "Do not invent counts, dates, locations, or class codes - use only the ones "
+    "provided. Call out the most striking cluster first (highest count or most "
+    "recent). If there are two or more notable clusters, mention the top one or two. "
+    "If a cluster is tight in time (<= 1 day span), name that; if it is spread over "
+    "weeks, call it a slow accumulation. End with one short sentence on what the "
+    "supervisor might check (drainage, sub-base, signage). If the list is empty, "
+    "write a single sentence that no recurring patterns were seen in the window."
+)
+_CLASS_WORDS = {
+    "D00": "longitudinal crack",
+    "D10": "transverse crack",
+    "D20": "alligator cracking",
+    "D40": "pothole",
+}
+
+def _deterministic_pattern(clusters):
+    if not clusters:
+        return "No recurring same-location same-class reports were seen in the last 30 days."
+    top = clusters[0]
+    friendly = _CLASS_WORDS.get(top["class"], top["class"])
+    if top["span_days"] <= 1.0:
+        when = "within a single day"
+    elif top["span_days"] <= 7.0:
+        when = f"within {top['span_days']} days"
+    else:
+        when = f"over {top['span_days']} days"
+    sent = (
+        f"{top['location']} received {top['count']} {friendly} ({top['class']}) "
+        f"reports {when}. "
+    )
+    others = [c for c in clusters[1:3] if c["count"] >= 2]
+    if others:
+        sent += (
+            "Other recurring reports: "
+            + "; ".join(
+                f"{c['location']} ({c['count']} x {c['class']})"
+                for c in others
+            )
+            + ". "
+        )
+    sent += "Worth a drainage or sub-base check on the top entry."
+    return sent
+
+
+def _pattern_from_llm(clusters):
+    try:
+        payload = {
+            "model": "qwen2.5:3b",
+            "stream": False,
+            "options": {"temperature": 0.3, "num_predict": 220},
+            "messages": [
+                {"role": "system", "content": PATTERN_SYSTEM},
+                {"role": "user", "content": "Clusters:\n" + json.dumps(clusters, ensure_ascii=False)},
+            ],
+        }
+        req = urllib.request.Request(
+            "http://127.0.0.1:11434/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        text = (data.get("message") or {}).get("content") or ""
+        text = text.strip()
+        text = text.split("\n\n", 1)[0].strip()
+        return text or None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        print(f"Pattern agent LLM failed: {type(exc).__name__}: {exc}")
+        return None
+
+
+_llm_paragraph = _pattern_from_llm(clusters)
+if _llm_paragraph:
+    pattern_paragraph = _llm_paragraph
+    pattern_source = "Pattern agent (ollama:qwen2.5:3b)"
+else:
+    pattern_paragraph = _deterministic_pattern(clusters)
+    pattern_source = "Pattern agent (rule tree fallback; LLM unavailable)"
+
+# ------------------------------------------------------------------
+# HTML email body: executive summary only. Per-case detail is in the
+# attached PDF.
+# ------------------------------------------------------------------
+parts = []
+parts.append("<!doctype html><html><head><meta charset='utf-8'>")
+parts.append(f"<title>RoadGuard Morning Digest - {DATE_STAMP}</title>")
+parts.append(
+    "<style>body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;"
+    "max-width:680px;margin:40px auto;padding:0 20px;color:#111;line-height:1.5}"
+    "h1{margin:0 0 4px 0}"
+    "h2{margin-top:28px;font-size:17px;border-bottom:1px solid #e5e7eb;padding-bottom:4px}"
+    "table{border-collapse:collapse;margin:12px 0;width:100%}"
+    "th,td{padding:6px 10px;border:1px solid #ddd;text-align:left;font-size:14px}"
+    "th{background:#f3f4f6}"
+    ".k{color:#6b7280}"
+    ".urgent{color:#b91c1c;font-weight:600}"
+    ".human{color:#1d4ed8}"
+    ".standard{color:#047857}"
+    ".evi{color:#b45309}"
+    ".pattern{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:14px 16px;margin:12px 0}"
+    ".pattern-src{color:#6b7280;font-size:13px;margin-top:8px}"
+    ".footer{color:#6b7280;font-size:13px;margin-top:36px;border-top:1px solid #e5e7eb;padding-top:12px}"
+    "</style></head><body>"
+)
+parts.append("<h1>RoadGuard Morning Digest</h1>")
+parts.append(
+    f"<p class='k'>{NOW.strftime('%d.%m.%Y')} - window: last 24 hours</p>"
+)
+parts.append(
+    "<p>Executive summary of citizen hazard reports and the agent's recommendation "
+    "for each. The attached PDF carries the full per-case detail with rationale, "
+    "cited standards and the approve/deny link.</p>"
+)
+
+parts.append("<table>")
+parts.append(f"<tr><td>New reports from the public</td><td><b>{len(rows)}</b></td></tr>")
+parts.append(f"<tr><td>- urgent</td><td class='urgent'>{counts['urgent']}</td></tr>")
+parts.append(f"<tr><td>- standard queue</td><td class='standard'>{counts['standard']}</td></tr>")
+parts.append(f"<tr><td>- needs more evidence</td><td class='evi'>{counts['needs_more_evidence']}</td></tr>")
+parts.append(f"<tr><td>- human review</td><td class='human'>{counts['human_review']}</td></tr>")
+parts.append(f"<tr><td>Awaiting your approval (all time)</td><td><b>{approvals_pending}</b></td></tr>")
+parts.append(f"<tr><td>Waiting for the reporter's extra photo</td><td>{evidence_open}</td></tr>")
+parts.append(f"<tr><td>Grounded citation rate</td><td>{html.escape(grounded_rate)}</td></tr>")
+parts.append("</table>")
+
+parts.append("<h2>Supervisor denials by category (last 30 days)</h2>")
+if not denials:
+    parts.append("<p>No supervisor decisions in the window.</p>")
+else:
+    parts.append("<table><tr><th>Supervisor decision</th><th>Original verdict</th><th>Count</th></tr>")
+    for d in denials:
+        parts.append(
+            f"<tr><td>{html.escape(d['decision'])}</td>"
+            f"<td>{html.escape(d['original'] or '-')}</td>"
+            f"<td>{d['n']}</td></tr>"
+        )
+    parts.append("</table>")
+
+parts.append("<h2>Patterns identified (last 30 days)</h2>")
+parts.append("<div class='pattern'>")
+parts.append(f"<div>{html.escape(pattern_paragraph)}</div>")
+parts.append(f"<div class='pattern-src'>Source: {pattern_source}</div>")
+parts.append("</div>")
+
+parts.append(
+    "<p class='footer'>This is a decision-support record. Nothing has been dispatched. "
+    "Every urgent and human-review case still waits for your explicit approval.</p>"
+)
+parts.append(
+    f"<p class='k' style='font-size:12px'>Generated by rg-digest at {NOW.strftime('%Y-%m-%d %H:%M UTC')} on netsec-agent.</p>"
+)
+parts.append("</body></html>")
+
+html_body = "".join(parts)
+os.makedirs(os.path.dirname(OUT_HTML), exist_ok=True)
+with open(OUT_HTML, "w", encoding="utf-8") as f:
+    f.write(html_body)
+print(f"wrote {OUT_HTML} ({len(rows)} hazards, {approvals_pending} approvals pending)")
+
+# ------------------------------------------------------------------
+# PDF: full per-case detail with ReportLab. SimpleDocTemplate flushes
+# flowables as they are built, so the peak memory stays flat; fpdf2 was
+# ballooning past 9 GB on 60+ cases because its page buffer is held
+# entirely in memory until .output().
+# ------------------------------------------------------------------
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether,
+)
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+
+
+def _escape_para(s: str) -> str:
+    """Escape text for ReportLab Paragraphs. ReportLab reads a tiny HTML
+    subset, so <, > and & must become entities. Also keep the raw text
+    free of other markup."""
+    if s is None:
+        return ""
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _soft_wrap(s: str, every: int = 40) -> str:
+    """Insert a zero-width-space-ish break every N chars inside tokens
+    that have no spaces. ReportLab's Paragraph does not break mid-word
+    by default; a 60-char filename overflows the cell. We insert <br/>
+    at word-boundaries we build ourselves. Only kicks in for very long
+    tokens."""
+    out = []
+    for tok in s.split(" "):
+        if len(tok) <= every:
+            out.append(tok)
+            continue
+        pieces = [tok[i:i+every] for i in range(0, len(tok), every)]
+        out.append("<br/>".join(pieces))
+    return " ".join(out)
+
+
+styles = getSampleStyleSheet()
+BASE = ParagraphStyle("base", parent=styles["BodyText"], fontName="Helvetica",
+                     fontSize=9, leading=12, textColor=colors.HexColor("#111111"))
+MUTED = ParagraphStyle("muted", parent=BASE, fontSize=8, textColor=colors.HexColor("#6b7280"))
+H1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName="Helvetica-Bold",
+                   fontSize=18, textColor=colors.HexColor("#111111"), spaceAfter=4)
+H2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName="Helvetica-Bold",
+                   fontSize=12, textColor=colors.HexColor("#111111"),
+                   spaceBefore=10, spaceAfter=4)
+CASE_HEAD = ParagraphStyle("case_head", parent=BASE, fontName="Helvetica-Bold",
+                          fontSize=11, textColor=colors.HexColor("#111111"),
+                          spaceBefore=8, spaceAfter=2)
+
+doc = SimpleDocTemplate(
+    OUT_PDF, pagesize=A4,
+    leftMargin=18*mm, rightMargin=18*mm,
+    topMargin=18*mm, bottomMargin=18*mm,
+    title=f"RoadGuard Morning Digest {DATE_STAMP}",
+    author="RoadGuard (netsec-agent)",
+)
+
+flow = []
+flow.append(Paragraph("RoadGuard Morning Digest", H1))
+flow.append(Paragraph(
+    _escape_para(f"{NOW.strftime('%d.%m.%Y')} - window: last 24 hours "
+                 f"(since {CUT.strftime('%Y-%m-%d %H:%M UTC')})"),
+    MUTED,
+))
+flow.append(Spacer(1, 4))
+
+# Headline table
+head_data = [
+    ["New reports from the public", str(len(rows))],
+    ["- urgent", str(counts["urgent"])],
+    ["- standard queue", str(counts["standard"])],
+    ["- needs more evidence", str(counts["needs_more_evidence"])],
+    ["- human review", str(counts["human_review"])],
+    ["Awaiting your approval (all time)", str(approvals_pending)],
+    ["Waiting for the reporter's extra photo", str(evidence_open)],
+    ["Grounded citation rate", grounded_rate],
+]
+head_tbl = Table(head_data, colWidths=[110*mm, 40*mm])
+head_tbl.setStyle(TableStyle([
+    ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#dddddd")),
+    ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+    ("FONTSIZE", (0, 0), (-1, -1), 9),
+    ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#111111")),
+    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+    ("TOPPADDING", (0, 0), (-1, -1), 3),
+    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+]))
+flow.append(Paragraph("Headline", H2))
+flow.append(head_tbl)
+
+if rows:
+    # Summary table of all cases (compact)
+    flow.append(Paragraph("Summary table", H2))
+    sum_rows = [["#", "id", "decision", "pri", "location", "time"]]
+    for i, r in enumerate(rows[:80], 1):
+        ts = datetime.fromtimestamp(r["reported_at"] or 0, timezone.utc).strftime("%H:%M")
+        sum_rows.append([
+            str(i),
+            (r["id"] or "")[:14],
+            (r["agent_decision"] or "n/a")[:18],
+            str(r["priority"]) if r["priority"] is not None else "",
+            Paragraph(_escape_para(_soft_wrap((r["location"] or "")[:60], 30)), BASE),
+            ts,
+        ])
+    sum_tbl = Table(
+        sum_rows,
+        colWidths=[8*mm, 32*mm, 32*mm, 12*mm, 70*mm, 14*mm],
+        repeatRows=1,
+    )
+    sum_tbl.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#dddddd")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f3f4f6")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    flow.append(sum_tbl)
+
+    # Per-case detail
+    flow.append(PageBreak())
+    flow.append(Paragraph("Per-case detail", H2))
+    for i, r in enumerate(rows, 1):
+        ts = datetime.fromtimestamp(r["reported_at"] or 0, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        try:
+            trace = json.loads(r["agent_trace_json"] or "[]")
+            speakers = " -> ".join(dict.fromkeys(e.get("speaker","?") for e in trace))
+        except Exception:
+            speakers = ""
+        try:
+            cited = json.loads(r["cited_sources_json"] or "[]")
+            cited_str = ", ".join(str(c) for c in cited) if cited else "none"
+        except Exception:
+            cited_str = "none"
+        decision = r["agent_decision"] or "n/a"
+        head = f"Case {i} - {decision} (priority {r['priority'] if r['priority'] is not None else 'n/a'})"
+        meta = f"id {r['id']} - {ts} - status: {r['status'] or ''}"
+        loc = r["location"] or "(not provided)"
+        rationale = (r["agent_rationale"] or "(empty)").strip()[:600]
+        # One case lives as a group of flowables we try to keep together.
+        case = [
+            Paragraph(_escape_para(head), CASE_HEAD),
+            Paragraph(_escape_para(_soft_wrap(meta, 42)), MUTED),
+            Paragraph("<b>Location:</b> " + _escape_para(_soft_wrap(loc, 42)), BASE),
+            Paragraph("<b>Rationale:</b> " + _escape_para(rationale), BASE),
+            Paragraph("<b>Pipeline:</b> " + _escape_para(speakers), BASE),
+            Paragraph("<b>Cited sources:</b> " + _escape_para(cited_str), BASE),
+            Spacer(1, 4),
+        ]
+        flow.append(KeepTogether(case))
+else:
+    flow.append(Paragraph("<i>No hazards reported in the last 24 hours.</i>", BASE))
+
+flow.append(Spacer(1, 10))
+flow.append(Paragraph(
+    "This is a decision-support record. Nothing has been dispatched. "
+    "Every urgent and human-review case still waits for the supervisor's explicit approval. "
+    "Links to the operator pages (/digest/latest, /trace, /report/&lt;id&gt;) are served privately over Tailscale.",
+    MUTED,
+))
+
+doc.build(flow)
+print(f"wrote {OUT_PDF}")
+
+# ------------------------------------------------------------------
+# SMTP: HTML body + PDF attachment.
+# ------------------------------------------------------------------
+_env_path = "/etc/roadguard/env"
+if os.path.isfile(_env_path):
+    try:
+        for ln in open(_env_path):
+            ln = ln.strip()
+            if ln and not ln.startswith("#") and "=" in ln:
+                k, _, v = ln.partition("=")
+                os.environ.setdefault(k.strip(), v.strip())
+    except Exception as _exc:
+        print(f"env read failed: {type(_exc).__name__}: {_exc}")
+
+_host = os.environ.get("RG_DIGEST_SMTP_HOST")
+_port = int(os.environ.get("RG_DIGEST_SMTP_PORT") or 587)
+_user = os.environ.get("RG_DIGEST_SMTP_USER")
+_pw   = os.environ.get("RG_DIGEST_SMTP_PASS")
+_from = os.environ.get("RG_DIGEST_MAIL_FROM") or _user
+_to   = os.environ.get("RG_DIGEST_MAIL_TO")   or _user
+if _host and _user and _pw and _to:
+    import smtplib, ssl
+    from email.message import EmailMessage
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = f"RoadGuard digest - {NOW.strftime('%Y-%m-%d %H:%M UTC')} - {len(rows)} hazards, {approvals_pending} approvals pending"
+        msg["From"] = _from
+        msg["To"]   = _to
+        msg.set_content("Executive summary is in the HTML body; per-case detail is attached as a PDF.")
+        msg.add_alternative(html_body, subtype="html")
+        try:
+            with open(OUT_PDF, "rb") as _pdf:
+                pdf_bytes = _pdf.read()
+            msg.add_attachment(
+                pdf_bytes,
+                maintype="application",
+                subtype="pdf",
+                filename=f"roadguard_{NOW.strftime('%Y%m%d_%H%M')}.pdf",
+            )
+            print(f"attached PDF ({len(pdf_bytes)} bytes)")
+        except Exception as _exc:
+            print(f"pdf attach failed: {type(_exc).__name__}: {_exc}")
+        with smtplib.SMTP(_host, _port, timeout=30) as _smtp:
+            _smtp.starttls(context=ssl.create_default_context())
+            _smtp.login(_user, _pw)
+            _smtp.send_message(msg)
+        print(f"emailed digest to {_to} (with PDF attachment)")
+    except Exception as _exc:
+        print(f"email send failed: {type(_exc).__name__}: {_exc}")
+else:
+    print("email skipped (RG_DIGEST_SMTP_* vars not fully set)")
+PYEOF

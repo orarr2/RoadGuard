@@ -30,8 +30,14 @@ webapp/              the citizen webapp served by GitHub Pages (detection in the
                      submit and poll, evidence round trip, history)
 tests/               conftest.py, test_eval_scenarios.py and the 70-scenario eval
                      set; tests/labeled_scenarios.json is picked up when present
-deploy/              setup.sh, roadguard.service and README for a Linux VM
-scripts/export_yolo.py   .pt -> .onnx for the webapp detector
+deploy/              setup.sh, roadguard.service and README for a Linux VM (gitignored,
+                     reveals the Oracle A1.Flex layout - see your local checkout)
+scripts/export_yolo.py       .pt -> .onnx for the webapp detector
+scripts/rag_truth_test.py    canary insert / query / delete / query to prove the RAG retriever is
+                             wired to the live ChromaDB collection and not a static map (reviewer P0)
+scripts/rg-digest            twice-daily digest + PDF generator; installed at /usr/local/bin on
+                             the VM, fires at 05:00 and 17:00 UTC under the roadguard cron
+scripts/catalog_dataset.py   builds the SQLite dataset catalogue used by lookup_dataset_image
 docs/                agents-architecture.md (authoritative), agents-contract.md,
                      team-meeting/ (meeting handout, requirements sheet, deck)
 .github/workflows/pages.yml   webapp -> GitHub Pages
