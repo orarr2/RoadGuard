@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     roadguard_jwt_ttl: int = 604800
     google_oauth_client_id: str = ""
 
+    # Step 1 auth upgrade (25.10.2026). Signup is OFF by default - the
+    # production VM is explicitly closed to new users; only orpsp8 (admin)
+    # and batch@internal (internal, submit-cap bypass) exist.
+    roadguard_signup_enabled: bool = False
+    roadguard_max_users: int = 10
+    roadguard_password_login_enabled: bool = True
+    roadguard_user_daily_submit_cap: int = 100
+
     # Rate limits in slowapi syntax, read by the endpoint decorators.
     roadguard_login_limit: str = "10/minute"
     roadguard_user_limit: str = "20/minute"
@@ -141,6 +149,48 @@ def verify_passphrase(passphrase: str, stored_hash: str) -> bool:
         return bcrypt.checkpw(passphrase.encode("utf-8"), stored_hash.encode("utf-8"))
     except (ValueError, TypeError):
         return False
+
+
+# Step 1 auth upgrade (25.10.2026): username / password rules.
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{2,31}$")
+
+
+def validate_username(username: str) -> tuple[bool, str]:
+    """Username: 3-32 chars, alnum + _.-, must start with alnum or _.
+
+    Returns (ok, reason). Reasons are stable machine-readable strings so the
+    frontend can i18n them if needed."""
+    if not username:
+        return False, "username_required"
+    if not _USERNAME_RE.fullmatch(username):
+        return False, "username_invalid_format"
+    return True, "ok"
+
+
+def validate_password(password: str) -> tuple[bool, str]:
+    """Password rules the operator set: 8+ chars, 1 upper, 1 lower, 1 special.
+
+    Returns (ok, reason). The reason is a stable key the frontend can show as
+    a localized message - never the raw password or a hint about it."""
+    if not password or len(password) < 8:
+        return False, "password_too_short"
+    if not any(c.isupper() for c in password):
+        return False, "password_missing_uppercase"
+    if not any(c.islower() for c in password):
+        return False, "password_missing_lowercase"
+    if not any((not c.isalnum()) and (not c.isspace()) for c in password):
+        return False, "password_missing_special"
+    return True, "ok"
+
+
+def hash_password(password: str) -> str:
+    """bcrypt hash, same scheme as the legacy passphrase."""
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Thin alias over verify_passphrase so the auth code reads cleanly."""
+    return verify_passphrase(password, stored_hash)
 
 
 def create_jwt(
@@ -489,6 +539,11 @@ class User:
     display_name: str
     created_at: float
     opted_in_to_report: bool = False
+    username: str | None = None
+    password_hash: str | None = None
+    google_sub: str | None = None
+    is_admin: bool = False
+    is_internal: bool = False
 
 
 @dataclass
@@ -587,6 +642,12 @@ class Database:
         ("approvals", "note", "TEXT NOT NULL DEFAULT ''"),
         ("hazards", "reporter_text", "TEXT NOT NULL DEFAULT ''"),
         ("hazards", "agent_assessment", "TEXT NOT NULL DEFAULT ''"),
+        # Step 1 auth upgrade (25.10.2026)
+        ("users", "username", "TEXT"),
+        ("users", "password_hash", "TEXT"),
+        ("users", "google_sub", "TEXT"),
+        ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
+        ("users", "is_internal", "INTEGER NOT NULL DEFAULT 0"),
     )
 
     def _migrate_columns(self) -> None:
@@ -624,6 +685,68 @@ class Database:
             "SELECT * FROM users WHERE id = ?", (user_id,)
         ).fetchone()
         return self._row_to_user(row) if row else None
+
+    def get_user_by_username(self, username: str) -> User | None:
+        """Case-insensitive lookup. Returns None if not present."""
+        if not username:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM users WHERE lower(username) = lower(?)",
+            (username,),
+        ).fetchone()
+        return self._row_to_user(row) if row else None
+
+    def count_users(self) -> int:
+        """Everyone in the users table, admins and internal included.
+        Caller enforces the 10-user cap against this count at registration."""
+        return int(self._conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+
+    def create_user_full(
+        self,
+        user_id: str,
+        username: str | None,
+        email: str,
+        display_name: str,
+        password_hash: str | None,
+        google_sub: str | None = None,
+        is_admin: bool = False,
+        is_internal: bool = False,
+    ) -> None:
+        """Insert a user with the step-1 auth columns. Idempotent on id;
+        callers that need uniqueness-of-username must check beforehand (the
+        schema does not enforce it so legacy rows without a username keep
+        working)."""
+        self._conn.execute(
+            """
+            INSERT INTO users (
+              id, email, display_name, created_at,
+              username, password_hash, google_sub, is_admin, is_internal
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              email = excluded.email,
+              display_name = excluded.display_name,
+              username = COALESCE(excluded.username, users.username),
+              password_hash = COALESCE(excluded.password_hash, users.password_hash),
+              google_sub = COALESCE(excluded.google_sub, users.google_sub),
+              is_admin = excluded.is_admin,
+              is_internal = excluded.is_internal
+            """,
+            (
+                user_id, email, display_name, time.time(),
+                username, password_hash, google_sub,
+                1 if is_admin else 0,
+                1 if is_internal else 0,
+            ),
+        )
+
+    def count_user_hazards_since(self, user_id: str, since_epoch: float) -> int:
+        """Rolling count of hazards a given user submitted since the given
+        epoch. Used by the per-user daily cap on /hazards/submit*."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM hazards WHERE user_id = ? AND reported_at >= ?",
+            (user_id, float(since_epoch)),
+        ).fetchone()
+        return int(row[0]) if row else 0
 
     def report_recipients(self) -> list[User]:
         rows = self._conn.execute(
@@ -1319,12 +1442,18 @@ class Database:
 
     @staticmethod
     def _row_to_user(row: sqlite3.Row) -> User:
+        keys = row.keys() if hasattr(row, "keys") else []
         return User(
             id=row["id"],
             email=row["email"],
             display_name=row["display_name"],
             created_at=row["created_at"],
             opted_in_to_report=bool(row["opted_in_to_report"]),
+            username=row["username"] if "username" in keys else None,
+            password_hash=row["password_hash"] if "password_hash" in keys else None,
+            google_sub=row["google_sub"] if "google_sub" in keys else None,
+            is_admin=bool(row["is_admin"]) if "is_admin" in keys else False,
+            is_internal=bool(row["is_internal"]) if "is_internal" in keys else False,
         )
 
     @staticmethod

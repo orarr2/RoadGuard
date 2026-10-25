@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import platform
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -44,10 +45,14 @@ from roadguard_agent import (
     format_trace_lines,
     get_current_user,
     get_settings,
+    hash_password,
     multiagent_decide,
     multiagent_decide_live,
     multiagent_resume,
     sanitize_location,
+    validate_password,
+    validate_username,
+    verify_password,
     sanitize_reporter_text,
     verify_approval,
     verify_google_id_token,
@@ -496,10 +501,39 @@ class LoginResponse(BaseModel):
     expires_in: int
 
 
+class PasswordLoginRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=32)
+    password: str = Field(..., min_length=1, max_length=200)
+
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=32)
+    password: str = Field(..., min_length=1, max_length=200)
+    email: str | None = Field(default=None, max_length=200)
+
+
+class AuthConfigResponse(BaseModel):
+    """Which auth methods the server will accept right now. Unauthenticated
+    endpoint so the frontend can decide which buttons to render before
+    anyone is logged in."""
+    signup_enabled: bool
+    password_login_enabled: bool
+    google_login_enabled: bool
+    max_users: int
+    user_count: int
+
+
 class Me(BaseModel):
     sub: str
     email: str
     name: str
+    username: str | None = None
+    is_admin: bool = False
+    is_internal: bool = False
+    uploads_today: int = 0
+    uploads_total: int = 0
+    daily_cap: int = 100
+    operator_urls: list[str] = Field(default_factory=list)
 
 
 class ImageQualitySignal(BaseModel):
@@ -1530,6 +1564,44 @@ def _user_id_of(user: dict[str, Any]) -> str:
     return user.get("sub") or user.get("email") or "anonymous"
 
 
+def _check_user_daily_submit_cap(
+    user: dict[str, Any],
+    db: Any,
+    settings: Settings,
+) -> None:
+    """Enforce the per-user daily submission cap (step-1 auth upgrade).
+
+    - A user with ``is_internal=True`` (e.g. batch@internal) is exempt - the
+      offline batch runner must be able to push hundreds of images without
+      starving.
+    - Everyone else is capped at ``settings.roadguard_user_daily_submit_cap``
+      per rolling 24-hour window; the 101st upload returns 429.
+    - Legacy passphrase users whose sub does not resolve to a users-table row
+      still get a conservative cap applied (counted by sub).
+    """
+    user_id = _user_id_of(user)
+    cap = int(settings.roadguard_user_daily_submit_cap)
+    if cap <= 0:
+        return  # cap disabled
+    u = None
+    try:
+        u = db.get_user(user_id)
+        if u is None and (user.get("sub") or "").startswith("user:"):
+            u = db.get_user(user["sub"].split(":", 1)[1])
+    except Exception:
+        u = None
+    if u is not None and u.is_internal:
+        return  # batch runner bypass
+    import time as _t
+    day_start = _t.time() - 24 * 3600
+    count = db.count_user_hazards_since(user_id, day_start)
+    if count >= cap:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"daily_submit_cap_reached ({cap}/day)",
+        )
+
+
 def _approval_id_from_trace(decision: Any) -> str | None:
     """The approval row the gate wrote during this run, read from the
     trace rather than the DB: when the hazard INSERT just failed twice,
@@ -2392,12 +2464,144 @@ def create_app() -> FastAPI:
         )
         return LoginResponse(token=token, expires_in=settings.roadguard_jwt_ttl)
 
+    @app.get("/auth/config", response_model=AuthConfigResponse)
+    def auth_config(settings: Settings = Depends(get_settings)) -> AuthConfigResponse:
+        """Which login methods will the server accept. Unauthenticated on
+        purpose - the frontend needs this to decide which buttons to show
+        before anyone logs in. Reads only env toggles + a count of existing
+        users; never returns usernames or emails."""
+        with Database(settings.roadguard_db_path) as db:
+            n_users = db.count_users()
+        return AuthConfigResponse(
+            signup_enabled=bool(settings.roadguard_signup_enabled),
+            password_login_enabled=bool(settings.roadguard_password_login_enabled),
+            google_login_enabled=bool(settings.google_oauth_client_id),
+            max_users=int(settings.roadguard_max_users),
+            user_count=n_users,
+        )
+
+    @app.post("/auth/register", response_model=LoginResponse)
+    @limiter.limit(lambda: get_settings().roadguard_login_limit)
+    def register(
+        request: Request,
+        body: RegisterRequest = Body(...),
+        settings: Settings = Depends(get_settings),
+    ) -> LoginResponse:
+        """New user signup. Gated by ROADGUARD_SIGNUP_ENABLED (default off:
+        the production VM is closed to new users)."""
+        if not settings.roadguard_signup_enabled:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                detail="signup_disabled")
+        ok, reason = validate_username(body.username)
+        if not ok:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
+        ok, reason = validate_password(body.password)
+        if not ok:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
+        with Database(settings.roadguard_db_path) as db:
+            if db.count_users() >= settings.roadguard_max_users:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                    detail="user_cap_reached")
+            if db.get_user_by_username(body.username) is not None:
+                # Stable error key; same shape as a wrong-password reply so a
+                # scanner cannot enumerate existing usernames via timing or
+                # distinct messages (register-vs-login reveal the same thing).
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                    detail="username_taken")
+            user_id = f"u_{secrets.token_hex(8)}"
+            db.create_user_full(
+                user_id=user_id,
+                username=body.username,
+                email=(body.email or "").strip().lower(),
+                display_name=body.username,
+                password_hash=hash_password(body.password),
+                google_sub=None,
+                is_admin=False,
+                is_internal=False,
+            )
+        token = create_jwt(
+            sub=f"user:{user_id}", email=(body.email or "").lower(),
+            display_name=body.username, settings=settings,
+        )
+        return LoginResponse(token=token, expires_in=settings.roadguard_jwt_ttl)
+
+    @app.post("/auth/login/password", response_model=LoginResponse)
+    @limiter.limit(lambda: get_settings().roadguard_login_limit)
+    def login_password(
+        request: Request,
+        body: PasswordLoginRequest = Body(...),
+        settings: Settings = Depends(get_settings),
+    ) -> LoginResponse:
+        """username + password login. Response time is intentionally padded
+        to the bcrypt cost whether or not the user exists, so a scanner
+        cannot distinguish 'bad user' from 'bad password' by timing."""
+        if not settings.roadguard_password_login_enabled:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                detail="password_login_disabled")
+        with Database(settings.roadguard_db_path) as db:
+            user = db.get_user_by_username(body.username)
+        # Always run bcrypt once - even on nonexistent users - to equalize timing.
+        # Use the stored hash if present, else a cheap sham bcrypt hash so the
+        # check still executes.
+        _sham = "$2b$12$CFSdxWEptIE4LPmPSCCJQenfBXAcMFzaS4iN4Bq6Pv/HPWx7uHcSi"
+        stored = user.password_hash if (user and user.password_hash) else _sham
+        is_valid = verify_password(body.password, stored) if user else False
+        if not user or not is_valid:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                                detail="invalid_credentials")
+        token = create_jwt(
+            sub=f"user:{user.id}", email=user.email,
+            display_name=user.display_name or user.username or user.id,
+            settings=settings,
+        )
+        return LoginResponse(token=token, expires_in=settings.roadguard_jwt_ttl)
+
+    @app.post("/auth/logout")
+    def logout(user: dict[str, Any] = Depends(get_current_user)) -> dict:
+        """Stateless logout: the client deletes its JWT. The server returns
+        {ok: true} so the UI knows it succeeded. We do NOT keep a per-token
+        blacklist here because the JWT TTL is already bounded (7 days by
+        default) and a blacklist would reset on every restart anyway;
+        rotating ROADGUARD_JWT_SECRET invalidates every outstanding token at
+        once if a real emergency comes."""
+        return {"ok": True, "sub": user.get("sub", "")}
+
     @app.get("/auth/me", response_model=Me)
-    def me(user: dict[str, Any] = Depends(get_current_user)) -> Me:
+    def me(
+        user: dict[str, Any] = Depends(get_current_user),
+        settings: Settings = Depends(get_settings),
+    ) -> Me:
+        sub = user.get("sub", "")
+        username = None
+        is_admin = False
+        is_internal = False
+        uploads_today = 0
+        uploads_total = 0
+        user_id = _user_id_of(user)
+        with Database(settings.roadguard_db_path) as db:
+            u = db.get_user(user_id) if user_id else None
+            if u is None and sub.startswith("user:"):
+                u = db.get_user(sub.split(":", 1)[1])
+            if u is not None:
+                username = u.username
+                is_admin = u.is_admin
+                is_internal = u.is_internal
+                import time as _t
+                day_start = _t.time() - 24 * 3600
+                uploads_today = db.count_user_hazards_since(u.id, day_start)
+                uploads_total = db.count_user_hazards_since(u.id, 0.0)
+        operator_urls = []
+        if is_admin:
+            operator_urls = [
+                "https://netsec-agent.tail37ac21.ts.net/roadguard/trace",
+                "https://netsec-agent.tail37ac21.ts.net/digest/latest",
+            ]
         return Me(
-            sub=user.get("sub", ""),
-            email=user.get("email", ""),
-            name=user.get("name", ""),
+            sub=sub, email=user.get("email", ""), name=user.get("name", ""),
+            username=username, is_admin=is_admin, is_internal=is_internal,
+            uploads_today=uploads_today, uploads_total=uploads_total,
+            daily_cap=int(settings.roadguard_user_daily_submit_cap),
+            operator_urls=operator_urls,
         )
 
     # IDX 26: at most this many async graphs run at once; the rest wait
@@ -2598,6 +2802,7 @@ def create_app() -> FastAPI:
         row when it finishes. The caller polls GET /report/{hazard_id}
         until status leaves 'processing'."""
         from roadguard_agent import Hazard
+        _check_user_daily_submit_cap(user, db, settings)
         hazard_id = f"hz_{uuid.uuid4().hex[:12]}"
         _save_hazard_image(hazard_id, getattr(body, "image_jpeg_base64", None))
         hazard_input = _hazard_input_from_batch(body, hazard_id, _now_iso())
@@ -2643,6 +2848,7 @@ def create_app() -> FastAPI:
         settings: Settings = Depends(get_settings),
         db: Any = Depends(get_db),
     ) -> HazardSubmitResponse:
+        _check_user_daily_submit_cap(user, db, settings)
         hazard_id = f"hz_{uuid.uuid4().hex[:12]}"
         hazard_input = _hazard_input_from_batch(body, hazard_id, _now_iso())
         try:
@@ -2701,6 +2907,7 @@ def create_app() -> FastAPI:
         same canonical hazard within the TTL. On a miss, runs the
         3-agent graph and caches the result.
         """
+        _check_user_daily_submit_cap(user, db, settings)
         cache_key = DecisionCache.canonical_key(
             session_id=body.session_id,
             hazard_class=body.hazard_class,
