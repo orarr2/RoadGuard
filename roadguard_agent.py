@@ -1669,15 +1669,40 @@ class BudgetTracker:
         self.tokens_out += tokens_out
 
 
-def graceful_stop_decision(reason: str) -> dict:
+def graceful_stop_decision(reason: str, state: dict | None = None) -> dict:
     """The legitimate human_review answer when guard fires.
 
-    "I could not finish" is a legitimate answer,
-    not a crash. The API returns 200 with this body.
+    "I could not finish" is a legitimate answer, not a crash. The API
+    returns 200 with this body. When ``state`` is provided, the rationale
+    is enriched with whatever was accomplished before the cap tripped
+    (``last_speaker``, hazard class, RAG coverage) so the supervisor
+    reading the trace page gets a usable partial picture rather than
+    just the three words "budget guard fired".
     """
+    rationale = f"budget guard fired: {reason}"
+    if state:
+        last = state.get("last_speaker") or "pre-sanitize"
+        parts = [f"budget guard fired: {reason}. stopped at {last}."]
+        profile = state.get("hazard_profile") or {}
+        if profile.get("primary_class"):
+            parts.append(
+                f"profile_builder got as far as class={profile.get('primary_class')} "
+                f"severity={profile.get('severity_signal') or '?'} "
+                f"perception={state.get('perception_confidence') or '?'}."
+            )
+        coverage = state.get("research_coverage")
+        if coverage:
+            tool_ids = state.get("tool_result_ids") or []
+            parts.append(
+                f"rag_retriever got as far as coverage={coverage} "
+                f"with {len(tool_ids)} passage(s)."
+            )
+        if last in ("profile_builder", "rag_retriever") or coverage:
+            parts.append("decision was not reached; manual triage recommended.")
+        rationale = " ".join(parts)[:500]
     return {
         "action": "human_review",
-        "rationale": f"budget guard fired: {reason}",
+        "rationale": rationale,
         "priority": 50,
         "cited_sources": [],
         "guard_fired": True,
@@ -2922,23 +2947,47 @@ def active_model(use_panel: bool = False) -> str:
 
 
 def llm_summary(calls: list[dict]) -> dict:
-    """One trace record for a node: model, number of calls, latency, tokens."""
-    return {
+    """One trace record for a node: model, number of calls, latency, tokens.
+
+    When one or more calls failed, ``failed_calls`` is non-zero and
+    ``errors`` lists the exception types the chat() wrapper caught -
+    so a supervisor reading the trace can tell a slow call ("40s and
+    returned") from a provider failure ("0.03s and threw APIError").
+    """
+    ok_calls = sum(1 for c in calls if c.get("ok"))
+    failed_calls = sum(1 for c in calls if not c.get("ok"))
+    errors = [c["error_type"] for c in calls
+              if not c.get("ok") and c.get("error_type")]
+    summary = {
         "model": calls[0]["model"] if calls else None,
         "calls": len(calls),
+        "ok_calls": ok_calls,
+        "failed_calls": failed_calls,
         "latency_s": round(sum(c["latency_s"] for c in calls), 2),
         "tokens_in": sum(c["tokens_in"] for c in calls),
         "tokens_out": sum(c["tokens_out"] for c in calls),
         "mode": "live" if _use_live() else "offline-stub",
     }
+    if errors:
+        summary["errors"] = errors
+    return summary
 
 
-def _record_call(model: str, latency_s: float, tokens_in: int, tokens_out: int, ok: bool) -> None:
+def _record_call(
+    model: str,
+    latency_s: float,
+    tokens_in: int,
+    tokens_out: int,
+    ok: bool,
+    error_type: str | None = None,
+) -> None:
     """Record a chat() call for the node summary + emit a per-LLM-call live trace event.
 
     The emit_live_trace event (Round 4) carries only timestamp, model name,
     token counts, latency and ok flag - NEVER the prompt or response text,
-    per the delivery scope decision.
+    per the delivery scope decision. ``error_type`` is the exception's
+    class name when a call failed, so the supervisor can distinguish a
+    provider rate-limit (``RateLimitError``) from a slow success.
     """
     entry = {
         "model": model,
@@ -2947,6 +2996,8 @@ def _record_call(model: str, latency_s: float, tokens_in: int, tokens_out: int, 
         "tokens_out": int(tokens_out or 0),
         "ok": ok,
     }
+    if not ok and error_type:
+        entry["error_type"] = error_type
     calls = getattr(_LLM_LOG, "calls", None)
     if calls is not None:
         calls.append(entry)
@@ -2979,8 +3030,14 @@ def chat(
             use_panel=use_panel,
             provider_override=provider_override,
         )
-    except Exception:
-        _record_call(model_label, time.time() - t0, 0, 0, ok=False)
+    except Exception as exc:
+        _record_call(
+            model_label,
+            time.time() - t0,
+            0, 0,
+            ok=False,
+            error_type=type(exc).__name__,
+        )
         raise
     _record_call(model_label, time.time() - t0, in_tok, out_tok, ok=True)
     return msg, in_tok, out_tok
@@ -6211,7 +6268,7 @@ def supervisor_node(state: RoadGuardState) -> dict:
     fired, reason = budget.check()
     if fired:
         clear_deadline()
-        decision = graceful_stop_decision(reason)
+        decision = graceful_stop_decision(reason, state)
         return {
             "action": decision["action"],
             "rationale": decision["rationale"],
@@ -6983,7 +7040,15 @@ def profile_builder_node(state: RoadGuardState) -> dict:
     }
     _llm_calls = end_llm_log()
     if _llm_calls:
-        trace_entry["content"]["llm"] = llm_summary(_llm_calls)
+        _summary = llm_summary(_llm_calls)
+        trace_entry["content"]["llm"] = _summary
+        if llm_enabled and _summary.get("ok_calls", 0) == 0 and _summary.get("failed_calls", 0) > 0:
+            # The LLM was enabled, every attempt failed, we fell back to
+            # the rule tree. Call this out explicitly on the trace so the
+            # supervisor doesn't read "llm_used=False" as "LLM was off."
+            trace_entry["content"]["llm_fallback_reason"] = (
+                "llm_calls_all_failed: " + ",".join(_summary.get("errors") or ["unknown"])
+            )
     if not llm_enabled:
         trace_entry["content"]["llm_skipped_reason"] = "AGENT_PROFILE_BUILDER_LLM=0"
     trace_entry["content"]["dataset_lookup"] = _dataset_lookup_summary(dataset_hit)
@@ -7236,7 +7301,12 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
     }
     _llm_calls = end_llm_log()
     if _llm_calls:
-        trace_entry["content"]["llm"] = llm_summary(_llm_calls)
+        _summary = llm_summary(_llm_calls)
+        trace_entry["content"]["llm"] = _summary
+        if llm_enabled and _summary.get("ok_calls", 0) == 0 and _summary.get("failed_calls", 0) > 0:
+            trace_entry["content"]["llm_fallback_reason"] = (
+                "llm_calls_all_failed: " + ",".join(_summary.get("errors") or ["unknown"])
+            )
     if not llm_enabled:
         trace_entry["content"]["llm_skipped_reason"] = "AGENT_RAG_RETRIEVER_LLM=0"
 

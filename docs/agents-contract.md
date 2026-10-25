@@ -603,6 +603,52 @@ Thresholds (charter): correct-action rate >= 85%, groundedness >= 90%
 of `urgent` / `standard` verdicts citing an id from `tool_result_ids`.
 Current: 70/70 and 100% offline (rule tree).
 
+## 9.5 LLM failure handling (25.10.2026)
+
+Every LLM call made through `chat()` is recorded in a per-node log with
+`ok` (True / False) and, on failure, `error_type` (the exception class
+name). When a node emits its handoff trace entry, `llm_summary(calls)`
+rolls those records up:
+
+```json
+{
+  "model": "ollama:qwen2.5:3b",
+  "calls": 2,
+  "ok_calls": 1,
+  "failed_calls": 1,
+  "latency_s": 42.13,
+  "tokens_in": 850,
+  "tokens_out": 220,
+  "errors": ["APIConnectionError"],
+  "mode": "live"
+}
+```
+
+When a node's LLM was enabled, every call failed, and the rule tree
+took over, the trace entry carries an explicit
+`llm_fallback_reason: "llm_calls_all_failed: APIConnectionError"` field.
+A supervisor reading the trace sees `llm_used=false` plus the reason
+instead of a silent fallback that looks indistinguishable from "LLM was
+off." Covered by `tests/test_llm_failure_handling.py`.
+
+### Budget-guard partial progress
+
+When the wall-clock cap fires mid-pipeline (profile_builder or
+rag_retriever is still running and Decision was not reached),
+`graceful_stop_decision(reason, state)` now enriches the rationale with
+whatever was accomplished:
+
+> "budget guard fired: WALL_CLOCK_CAP_SECONDS (240.0) reached. stopped
+> at rag_retriever. profile_builder got as far as class=D40
+> severity=severe perception=medium. rag_retriever got as far as
+> coverage=direct_match with 2 passage(s). decision was not reached;
+> manual triage recommended."
+
+The rationale is bounded to 500 characters (the hazards.agent_rationale
+column cap). The verdict stays `human_review` with `guard_fired=True`
+and `priority=50`, but the supervisor now has a usable partial picture
+instead of just "budget guard fired".
+
 ## 10. Observability
 
 Every decision writes to the `hazards` row: `agent_decision`,
