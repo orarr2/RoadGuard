@@ -4176,6 +4176,19 @@ class RagClient:
             LOGGER.warning("rag_upsert_failed: %s", exc)
         return self.count()
 
+    def delete(self, ids: list[str]) -> int:
+        """Idempotent delete by id. Returns the number of rows after the
+        delete. Used by `scripts/rag_truth_test.py` to prove the pipeline
+        is wired end-to-end (insert canary, query, delete, query again,
+        verify the second query does not fabricate success)."""
+        if not self.available() or not ids:
+            return self.count()
+        try:
+            self._collection.delete(ids=[str(i) for i in ids])
+        except Exception as exc:
+            LOGGER.warning("rag_delete_failed: %s", exc)
+        return self.count()
+
     def query(
         self,
         *,
@@ -4870,6 +4883,7 @@ def query_repair_standards(
     corpus_answered = False
     if rag_client is not None:
         passages = rag_client.query(hazard_class=hazard_class, road_type=road_type, k=k)
+        corpus_answered = True
     else:
         try:
 
@@ -4879,6 +4893,13 @@ def query_repair_standards(
                 passages = shared.query(
                     hazard_class=hazard_class, road_type=road_type, k=k
                 )
+            elif shared.available():
+                # The corpus exists but is empty. In STRICT mode we report
+                # no_match plainly so a RAG truth test (or an operator
+                # watching an empty-corpus prod VM) sees the gap instead
+                # of a stub answer that masquerades as a real retrieval.
+                if os.environ.get("ROADGUARD_RAG_STRICT", "0") == "1":
+                    corpus_answered = True
         except Exception:
             passages = []
     if not passages and not corpus_answered:
