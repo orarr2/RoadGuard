@@ -112,6 +112,92 @@ def test_decision_short_circuits_to_known_image_when_catalogue_hits(seeded_db):
     assert "firc_10001" in out["rationale"]
 
 
+def test_known_image_contradiction_routes_to_human_review(seeded_db):
+    """Catalog says D20, detector says D40 at 0.65 - this is a
+    catalog-vs-detector contradiction. The decision tree must NOT return
+    known_image; the mismatch has to reach a supervisor."""
+    from roadguard_agent import _decide_rule_based
+
+    state = {
+        "hazard_profile": {"primary_class": "D40", "primary_confidence": 0.65},
+        "metadata": {"road_type": "main", "lane_blocked": "partial"},
+        "tool_result_ids": [],
+        "research_coverage": "no_match",
+        "perception_confidence": "medium",
+        "dataset_match": {
+            "found": True,
+            "match": "sha256",
+            "distance": 0,
+            "pic_id": 1,
+            "file_name": "firc_10001.jpg",
+            "split": "train",
+            "classes": "D20",
+            "n_labels": 1,
+            "model_prediction": {"top1_class": "D20", "top1_confidence": 0.42},
+        },
+    }
+    out = _decide_rule_based(state)
+    assert out["action"] == "human_review", out
+    assert "contradiction" in out["rationale"].lower()
+    assert "D40" in out["rationale"]
+    assert "D20" in out["rationale"]
+
+
+def test_known_image_contradiction_ignored_when_detector_confidence_low(seeded_db):
+    """A detector that reports a different class but at near-zero
+    confidence (<0.30) is noise, not a real contradiction. Keep the
+    catalog verdict."""
+    from roadguard_agent import _decide_rule_based
+
+    state = {
+        "hazard_profile": {"primary_class": "D40", "primary_confidence": 0.12},
+        "metadata": {"road_type": "main", "lane_blocked": "none"},
+        "tool_result_ids": [],
+        "research_coverage": "no_match",
+        "perception_confidence": "medium",
+        "dataset_match": {
+            "found": True,
+            "match": "sha256",
+            "distance": 0,
+            "pic_id": 1,
+            "file_name": "firc_10001.jpg",
+            "split": "train",
+            "classes": "D20",
+            "n_labels": 1,
+            "model_prediction": {"top1_class": "D20", "top1_confidence": 0.42},
+        },
+    }
+    out = _decide_rule_based(state)
+    assert out["action"] == "known_image", out
+
+
+def test_known_image_contradiction_overlapping_class_is_not_a_contradiction(seeded_db):
+    """Catalog has D00,D20 and detector reports D20. The detector's call
+    is covered by the catalog labels; no contradiction, keep known_image."""
+    from roadguard_agent import _decide_rule_based
+
+    state = {
+        "hazard_profile": {"primary_class": "D20", "primary_confidence": 0.72},
+        "metadata": {"road_type": "main", "lane_blocked": "none"},
+        "tool_result_ids": [],
+        "research_coverage": "no_match",
+        "perception_confidence": "high",
+        "dataset_match": {
+            "found": True,
+            "match": "phash",
+            "distance": 3,
+            "pic_id": 1,
+            "file_name": "firc_10001.jpg",
+            "split": "train",
+            "classes": "D00,D20",
+            "n_labels": 2,
+            "model_prediction": {"top1_class": "D20", "top1_confidence": 0.42},
+        },
+    }
+    out = _decide_rule_based(state)
+    assert out["action"] == "known_image", out
+
+
 def test_profile_builder_annotates_dataset_match_in_trace(seeded_db):
     from roadguard_agent import profile_builder_node
 

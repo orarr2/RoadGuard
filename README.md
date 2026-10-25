@@ -92,7 +92,7 @@ the other LLM-backed nodes are workers whose next step the code fixes.
 **Guardrails** (what the LLM does NOT decide):
 
 - Human approval before any urgent or human-review case moves on.
-- Deterministic floors kept only where they correct the LLM, not pre-empt it: the rule tree's `known_image`, `human_review` on suspicious OCR / sanitize hits, and the policy's `urgent` preconditions. The old zero-conf and `confidence<0.5` floors were removed - the Decision persona reads those signals in context and decides.
+- Deterministic floors kept only where they correct the LLM, not pre-empt it: the rule tree's `known_image`, `human_review` on suspicious OCR / sanitize hits, `human_review` on a catalog-vs-detector contradiction (catalog says D20 but the detector reports D40 at confidence >= 0.30 - the mismatch has to reach a supervisor, not get hidden behind a priority-0 `known_image`), and the policy's `urgent` preconditions. The old zero-conf and `confidence<0.5` floors were removed - the Decision persona reads those signals in context and decides.
 - Grounding check: `cited_sources` must be a subset of the retriever's `tool_result_ids`, otherwise the rule tree decides.
 - Boundary defence on all free text: injection patterns neutralised, reporter text wrapped in `[USER_SUPPLIED_UNVERIFIED]` markers so downstream prompts treat it as evidence not instructions, PII redacted (phone / email / national id / IBAN / card) before the row is stored or shown.
 - Signal extractor emits `jurisdiction_hint` for non-Israeli submissions so the Decision agent can route them to a human instead of into the normal urgent / standard queue.

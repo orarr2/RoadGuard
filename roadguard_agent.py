@@ -3528,10 +3528,18 @@ def _build_decision_prompt() -> str:
         "Known images\n"
         "When the user message carries `dataset_match` (the profile builder\n"
         "found this exact photo in the reference dataset), call\n"
-        "lookup_dataset_image once to confirm it, then answer with action\n"
+        "lookup_dataset_image once to confirm it. If the catalogued labels\n"
+        "cover the detector's current top class, answer with action\n"
         "known_image: rationale = the catalogued labels and the recorded\n"
-        "prediction, cited_sources [], priority 0. Never answer known_image\n"
-        "without a dataset_match.\n\n"
+        "prediction, cited_sources [], priority 0. BUT if the detector\n"
+        "reports a class not in the catalogued labels at confidence >=\n"
+        "0.30, that is a catalog-vs-detector contradiction - the\n"
+        "catalogue says one thing, the model sees another on the same\n"
+        "photo. Answer human_review and name the contradiction in the\n"
+        "rationale ('catalogued D20 but detector reports D40 at 0.65');\n"
+        "the catalogue label alone cannot be trusted when the detector\n"
+        "sees a different class at real confidence. Never answer\n"
+        "known_image without a dataset_match.\n\n"
         "Similarity to the catalogue (new photos)\n"
         "When the submission is NOT an exact catalogue hit but you want to\n"
         "know whether it still looks like a known defect, call the tool\n"
@@ -5366,20 +5374,83 @@ def _dataset_lookup_summary(hit: dict | None) -> dict[str, Any]:
     }
 
 
-def _known_image_decision(match: dict) -> dict:
-    """The verdict for a catalogued photo: no triage, the catalogue speaks."""
+_KNOWN_IMAGE_CONTRADICTION_CONF = 0.30
+
+
+def _catalog_classes_set(classes_csv: str) -> frozenset[str]:
+    """Parse 'D00,D20' from the catalog row into a frozen set."""
+    if not classes_csv:
+        return frozenset()
+    return frozenset(
+        c.strip().upper() for c in classes_csv.split(",") if c.strip()
+    )
+
+
+def _detector_prediction_from_state(state: dict | None) -> tuple[str | None, float]:
+    """Pull the current YOLO top-1 class and confidence from the pipeline state.
+
+    Prefers hazard_profile.primary_class (what profile_builder settled on)
+    and falls back to yolo_output.top1_class (the raw detector output).
+    Returns ``(None, 0.0)`` when no detector signal is present.
+    """
+    if not state:
+        return (None, 0.0)
+    profile = state.get("hazard_profile") or {}
+    cls = profile.get("primary_class")
+    conf = profile.get("primary_confidence")
+    if not cls:
+        yolo = state.get("yolo_output") or {}
+        cls = yolo.get("top1_class")
+        conf = yolo.get("top1_confidence")
+    try:
+        conf_f = float(conf) if conf is not None else 0.0
+    except (TypeError, ValueError):
+        conf_f = 0.0
+    cls_s = str(cls).upper() if cls else None
+    return cls_s, conf_f
+
+
+def _known_image_decision(match: dict, state: dict | None = None) -> dict:
+    """The verdict for a catalogued photo. A clean match short-circuits to
+    ``known_image``; a catalog-vs-detector contradiction routes to
+    ``human_review`` instead - the catalog label alone cannot be trusted
+    when the current detector sees a different class at real confidence.
+    """
     summary = _dataset_lookup_summary(match)
     pred = summary.get("model_prediction")
-    rationale = (
+    base_rationale = (
         f"known dataset image pic_id={summary.get('pic_id')} "
         f"({summary.get('split')}/{summary.get('file_name')}): "
         f"catalogued labels {summary.get('classes') or 'none'} "
-        f"({summary.get('n_labels')} boxes); model prediction "
+        f"({summary.get('n_labels')} boxes); recorded prediction "
         f"{pred or 'none recorded'}; match by {summary.get('match')}"
     )
+    catalog_classes = _catalog_classes_set(summary.get("classes") or "")
+    detector_class, detector_confidence = _detector_prediction_from_state(state)
+    contradicted = (
+        bool(catalog_classes)
+        and detector_class is not None
+        and detector_class not in catalog_classes
+        and detector_confidence >= _KNOWN_IMAGE_CONTRADICTION_CONF
+    )
+    if contradicted:
+        rationale = (
+            f"catalog-vs-detector contradiction on a known image: "
+            f"catalogued labels {summary.get('classes')} but the current "
+            f"detector reports {detector_class} at "
+            f"{detector_confidence:.2f}. A human should review the "
+            f"mismatch before any triage. ({base_rationale})"
+        )
+        return {
+            "action": "human_review",
+            "rationale": rationale[:500],
+            "priority": 50,
+            "cited_sources": [],
+            "missing_evidence": [],
+        }
     return {
         "action": "known_image",
-        "rationale": rationale[:500],
+        "rationale": base_rationale[:500],
         "priority": 0,
         "cited_sources": [],
         "missing_evidence": [],
@@ -7288,7 +7359,7 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
     """
     match = state.get("dataset_match")
     if match:
-        return _known_image_decision(match)
+        return _known_image_decision(match, state)
     profile = state.get("hazard_profile") or {}
     md = state.get("metadata") or {}
     tool_result_ids = state.get("tool_result_ids") or []
@@ -7878,11 +7949,12 @@ def decision_node(state: RoadGuardState) -> dict:
 
     rule_hint = _decide_rule_based(state)
 
-    # A catalogued dataset image is answered as known_image without any
+    # A catalogued dataset image is answered as known_image (or routed to
+    # human_review on a catalog-vs-detector contradiction) without any
     # LLM call: there is nothing to triage, nothing to reason about, and
     # waiting on the local model for a verdict that is already decided
     # ties up a concurrency slot for 60-120 s per upload.
-    if rule_hint["action"] == "known_image" and state.get("dataset_match"):
+    if state.get("dataset_match") and rule_hint["action"] in ("known_image", "human_review"):
         llm_decision = None
         in_tok = out_tok = 0
         react_info = None

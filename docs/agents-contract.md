@@ -283,7 +283,7 @@ try a different tool but may not retry the same call.
 
 | Action | Trigger (rule tree, in order) | Citations | Human in the loop |
 |---|---|---|---|
-| `known_image` | `lookup_dataset_image` hit on sha256 or exact phash | none | none; the dataset image already carries a verdict |
+| `known_image` | `lookup_dataset_image` hit on sha256 or exact phash AND the catalogued labels cover the detector's current top class | none | none; the dataset image already carries a verdict. On catalog-vs-detector contradiction (detector class not in catalog labels at confidence >= 0.30), the case is routed to `human_review` instead - see section 8. |
 | `human_review` | `perception_confidence == low` (blur, non-road scene, suspicious OCR, suspicious reporter text, scrubbed location); the reporter's description contradicts the detector's class; `research_coverage == no_match`; a budget cap; a grounding failure (the LLM is asked once); a second `needs_more_evidence` after the reporter's evidence; `jurisdiction_hint != "il"` on the signal extractor | none | `approvals` row, supervisor decides |
 | `needs_more_evidence` | the LLM asks for one more piece of evidence; the rule tree never triggers this on its own | none | reporter answers one request (section 7) |
 | `urgent` | D40 on a main road, lane partially or fully blocked | at least one id from `tool_result_ids` | `approvals` row, supervisor decides |
@@ -482,8 +482,22 @@ Any of the following ends with `human_review`:
 Any of the following ends with `known_image`:
 
 - `lookup_dataset_image` reports a sha256 or exact phash hit against the
-  catalogue (`fallback_reason=known_image_in_dataset`); no LLM triage
-  runs and no citizen-facing verdict is created.
+  catalogue **AND** the catalogued labels cover the detector's current
+  top class (or the detector reports nothing at confidence >= 0.30);
+  `fallback_reason=known_image_in_dataset`, no LLM triage runs and no
+  citizen-facing verdict is created.
+
+Catalog-vs-detector contradiction (25.10.2026): when
+`lookup_dataset_image` hits but the detector reports a class not in the
+catalogued labels at confidence >= 0.30, the case is routed to
+`human_review` with `priority=50` and a rationale that names the
+mismatch ("catalogued D20 but the current detector reports D40 at
+0.65"). The LLM is skipped in this path too - the mismatch is already
+determined by signals, there is nothing for the model to add. Earlier
+versions always answered `known_image` on a catalogue hit, which hid
+these contradictions behind a priority-0 verdict; that was a design
+bug and no longer the behaviour. Covered by three unit tests in
+`tests/test_known_image.py`.
 
 The deterministic paths that keep the system working without an LLM:
 the rule tree in every node (the default path of Perception and
