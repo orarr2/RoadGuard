@@ -1,0 +1,110 @@
+{
+  "schema_version": "1.0",
+  "selected_model": "yolov8_n_lr0003_coloraug",
+  "deployment_status": "research_only_human_review",
+  "onnx_class_ids": {
+    "0": "D00",
+    "1": "D10",
+    "2": "D20",
+    "3": "D40"
+  },
+  "native_checkpoint_class_ids": {
+    "0": "D20",
+    "1": "D00",
+    "2": "D40",
+    "3": "D10"
+  },
+  "onnx_input": {
+    "shape": [
+      1,
+      3,
+      640,
+      640
+    ],
+    "dtype": "float32",
+    "color": "RGB",
+    "layout": "NCHW",
+    "normalization": "divide by 255",
+    "resize": "aspect-preserving letterbox; pad 114"
+  },
+  "onnx_output": {
+    "shape": [
+      1,
+      8,
+      8400
+    ],
+    "layout": "batch,channels,candidates",
+    "channels": [
+      "center_x",
+      "center_y",
+      "width",
+      "height",
+      "D00",
+      "D10",
+      "D20",
+      "D40"
+    ],
+    "box_units": "pixels in the 640x640 letterboxed input",
+    "nms_embedded": false,
+    "scores": "per-class scores; no separate objectness channel; no additional sigmoid"
+  },
+  "postprocess": {
+    "confidence_threshold": 0.01,
+    "class_aware_nms_iou": 0.7,
+    "max_detections": 300,
+    "map_boxes_back": "remove padding, divide by resize scale, clip to original image"
+  },
+  "csv": {
+    "rows": 1488,
+    "columns": [
+      "image_id",
+      "top1_class",
+      "top1_confidence",
+      "bbox",
+      "image_width",
+      "image_height"
+    ],
+    "bbox_separator": ":",
+    "bbox_order": "x1:y1:x2:y2",
+    "box_units": "original-image pixels",
+    "top1": "highest confidence across all classes after frozen threshold and NMS",
+    "no_detection": {
+      "top1_class": "",
+      "top1_confidence": 0.0,
+      "bbox": ""
+    },
+    "no_detection_count": 1,
+    "no_detection_image_ids": [
+      "firc_roadcrack_4218_jpg.rf.6e10741a94e77added66e2b9af65aae3.jpg"
+    ],
+    "source": "cached selected-model PyTorch test predictions, not a new full ONNX test evaluation"
+  },
+  "checks": [
+    {
+      "image_id": "firc_roadcrack_10011_jpg.rf.8de53fdeefb5151a20a672e034dc2c15.jpg",
+      "pytorch_onnx_max_abs_error": 0.001220703125,
+      "reorder_max_abs_error": 0.0
+    },
+    {
+      "image_id": "firc_roadcrack_10018_jpg.rf.664cb931ddbbf6df0c7dc6b9fc307303.jpg",
+      "pytorch_onnx_max_abs_error": 0.001495361328125,
+      "reorder_max_abs_error": 0.0
+    },
+    {
+      "image_id": "firc_roadcrack_10020_jpg.rf.aa6b67058ca1d4d512ab00925af78e90.jpg",
+      "pytorch_onnx_max_abs_error": 0.00189208984375,
+      "reorder_max_abs_error": 0.0
+    }
+  ],
+  "browser_runtime_tested": false,
+  "versions": {
+    "ultralytics": "8.4.184",
+    "torch": "2.11.0+cu130",
+    "onnx": "1.23.2",
+    "onnxruntime": "1.31.0"
+  },
+  "sha256": {
+    "webapp/assets/models/yolov8n-roadguard.onnx": "3987385423f7bec6f79d52f08c13f203051f32455942289fa1b7c5cb4cac82b7",
+    "data/batch_eval/yolo_predictions.csv": "be357f2e37d4c0c8e3d575c040a1b524a96f21cb2d0e4344a6890ef53b2c5ae8"
+  }
+}
