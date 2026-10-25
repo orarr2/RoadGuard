@@ -215,9 +215,43 @@ async function banner() {
   }
 }
 
+async function replayHistory() {
+  // On first open, print the trace of every recent hazard oldest-first,
+  // then let the live tick() keep following new ones. Without this the
+  // page shows a greeting + empty terminal when nothing new is being
+  // submitted RIGHT NOW, which hides the whole last batch run.
+  try {
+    const h = await get("/hazards/history?limit=200");
+    const items = (h.items || []).slice().reverse();  // oldest first
+    if (!items.length) return;
+    print("--- replaying " + items.length + " recent hazard(s) ---", "hdr");
+    for (const item of items) {
+      try {
+        const rep = await get("/report/" + encodeURIComponent(item.hazard_id));
+        const lines = rep.trace_lines || [];
+        for (const line of lines) print(line, classOf(line));
+        print("");
+      } catch (e) { /* skip the broken ones */ }
+    }
+    print("--- end of replay; following live ---", "hdr");
+    // Mark the newest as "already seen" so the live tick does not
+    // reprint it. tick() uses `current` + `printed` to resume.
+    const newest = items[items.length - 1];
+    current = newest.hazard_id;
+    try {
+      const rep = await get("/report/" + encodeURIComponent(current));
+      printed = (rep.trace_lines || []).length;
+      active = (((rep.verdict || {}).status) === "queued" || ((rep.verdict || {}).status) === "processing");
+    } catch (e) { printed = 0; }
+  } catch (err) {
+    print("history replay failed: " + err.message, "err");
+  }
+}
+
 async function follow() {
   stop();
   try { await banner(); } catch (err) { showPrompt(); return; }
+  await replayHistory();
   tick();
   timer = setInterval(tick, 2000);
 }
@@ -2735,10 +2769,12 @@ def create_app() -> FastAPI:
 
     @app.get("/hazards/history", response_model=HazardHistoryResponse)
     def hazards_history(
+        limit: int = 100,
         user: dict[str, Any] = Depends(get_current_user),
         db=Depends(get_db),
     ) -> HazardHistoryResponse:
-        rows = db.list_user_hazards(_user_id_of(user), limit=50)
+        limit = max(1, min(limit, 500))
+        rows = db.list_user_hazards(_user_id_of(user), limit=limit)
         return HazardHistoryResponse(
             items=[
                 HazardHistoryItem(
