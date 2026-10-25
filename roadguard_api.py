@@ -1874,7 +1874,8 @@ def create_app() -> FastAPI:
             "FROM hazards WHERE reported_at >= ? ORDER BY reported_at DESC",
             (cutoff_epoch,),
         ).fetchall()
-        counts = {"urgent": 0, "standard": 0, "needs_more_evidence": 0, "human_review": 0, "other": 0}
+        counts = {"urgent": 0, "standard": 0, "needs_more_evidence": 0,
+                  "human_review": 0, "known_image": 0, "other": 0}
         for r in rows:
             k = (r["agent_decision"] or "other").lower()
             counts[k if k in counts else "other"] += 1
@@ -1957,6 +1958,7 @@ def create_app() -> FastAPI:
             f"<div class='kpi standard'><div class='kpi-v'>{counts['standard']}</div><div class='kpi-l'>Standard queue</div></div>"
             f"<div class='kpi human'><div class='kpi-v'>{counts['human_review']}</div><div class='kpi-l'>Human review</div></div>"
             f"<div class='kpi evi'><div class='kpi-v'>{counts['needs_more_evidence']}</div><div class='kpi-l'>Needs more evidence</div></div>"
+            f"<div class='kpi'><div class='kpi-v'>{counts['known_image']}</div><div class='kpi-l'>Known image</div></div>"
             f"<div class='kpi'><div class='kpi-v'>{approvals_pending}</div><div class='kpi-l'>Approvals pending</div></div>"
             f"<div class='kpi'><div class='kpi-v'>{evidence_open}</div><div class='kpi-l'>Awaiting photo</div></div>"
             "</div>"

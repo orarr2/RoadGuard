@@ -39,7 +39,7 @@ rows = con.execute(
     (cutoff_epoch,),
 ).fetchall()
 
-counts = {"urgent":0,"standard":0,"needs_more_evidence":0,"human_review":0,"other":0}
+counts = {"urgent":0,"standard":0,"needs_more_evidence":0,"human_review":0,"known_image":0,"other":0}
 for r in rows:
     k = (r["agent_decision"] or "other").lower()
     counts[k if k in counts else "other"] += 1
@@ -241,6 +241,7 @@ parts.append(f"<tr><td>- urgent</td><td class='urgent'>{counts['urgent']}</td></
 parts.append(f"<tr><td>- standard queue</td><td class='standard'>{counts['standard']}</td></tr>")
 parts.append(f"<tr><td>- needs more evidence</td><td class='evi'>{counts['needs_more_evidence']}</td></tr>")
 parts.append(f"<tr><td>- human review</td><td class='human'>{counts['human_review']}</td></tr>")
+parts.append(f"<tr><td>- known image (RDD2022 catalogue hit)</td><td class='k'>{counts['known_image']}</td></tr>")
 parts.append(f"<tr><td>Awaiting your approval (all time)</td><td><b>{approvals_pending}</b></td></tr>")
 parts.append(f"<tr><td>Waiting for the reporter's extra photo</td><td>{evidence_open}</td></tr>")
 parts.append(f"<tr><td>Grounded citation rate</td><td>{html.escape(grounded_rate)}</td></tr>")
@@ -357,6 +358,7 @@ head_data = [
     ["- standard queue", str(counts["standard"])],
     ["- needs more evidence", str(counts["needs_more_evidence"])],
     ["- human review", str(counts["human_review"])],
+    ["- known image (RDD2022 catalogue hit)", str(counts["known_image"])],
     ["Awaiting your approval (all time)", str(approvals_pending)],
     ["Waiting for the reporter's extra photo", str(evidence_open)],
     ["Grounded citation rate", grounded_rate],
