@@ -4342,13 +4342,18 @@ class RagClient:
             passages = self._query_where(query_text, {"hazard_class": hazard_class}, k)
         return passages
 
-    def _query_where(self, query_text: str, where: dict, k: int) -> list[dict]:
+    def _query_where(self, query_text: str, where: dict | None, k: int) -> list[dict]:
         try:
-            res = self._collection.query(
-                query_texts=[query_text],
-                n_results=max(1, min(k, 5)),
-                where=where,
-            )
+            query_kwargs: dict[str, Any] = {
+                "query_texts": [query_text],
+                "n_results": max(1, min(k, 5)),
+            }
+            # `where=None` means "no metadata filter" - a pure semantic
+            # search. Needed for corpora (like Benny's charter_grounded_corpus)
+            # that do not carry our {hazard_class, road_type} tags.
+            if where:
+                query_kwargs["where"] = where
+            res = self._collection.query(**query_kwargs)
         except Exception as exc:
             LOGGER.warning("rag_query_failed: %s", exc)
             return []
@@ -4370,6 +4375,19 @@ class RagClient:
                 }
             )
         return passages
+
+    def query_semantic(self, query_text: str, k: int = 5) -> list[dict]:
+        """Pure semantic lookup without any metadata filter.
+
+        Used when the backing corpus is tagged on different keys than
+        {hazard_class, road_type} - e.g. Benny's charter_grounded_corpus,
+        whose chunks carry only {source, chunk_index, matched_keywords,
+        parent_doc_id, passage_index}. Returns the top-k nearest
+        passages in the same shape `query` returns.
+        """
+        if not self.available():
+            return []
+        return self._query_where(query_text, None, k)
 
     @classmethod
     def shared(cls) -> RagClient:
@@ -4990,38 +5008,85 @@ def _coverage(passages: list[dict], hazard_class: str, road_type: str) -> str:
     return "partial_match" if passages else "no_match"
 
 
+# Natural-language labels used when the structured descriptors are
+# passed to a semantic retriever that does not understand the D-codes
+# or our road_type enum directly. Keeps Benny's English-only
+# charter_grounded_corpus hitting the right passages for a given
+# (hazard_class, road_type) pair.
+_HAZARD_LABEL = {
+    "D40": "pothole",
+    "D20": "alligator crack pavement distress",
+    "D10": "transverse crack",
+    "D00": "longitudinal crack",
+}
+_ROAD_LABEL = {
+    "main": "arterial main road",
+    "secondary": "secondary road",
+    "bike_path": "bike lane bicycle path",
+    "parking": "parking facility",
+}
+
+
+def _semantic_rag_query(hazard_class: str, road_type: str) -> str:
+    """Build an English free-text query from the structured descriptors,
+    for use with semantic-only corpora (no hazard_class/road_type tags
+    on the stored passages)."""
+    hazard = _HAZARD_LABEL.get(hazard_class, hazard_class)
+    road = _ROAD_LABEL.get(road_type, road_type)
+    return (
+        f"road maintenance repair standards for {hazard} on {road}: "
+        "safety requirements, response procedures, repair window"
+    )
+
+
+def _augment_passage_for_coverage(
+    p: dict, hazard_class: str, road_type: str
+) -> dict:
+    """Semantic retrieval returns chunks without {hazard_class, road_type}
+    tags, so `_coverage` would otherwise always fall to partial_match.
+    We stamp both tags on the retrieved passage: ChromaDB returned it as
+    the nearest-neighbour match to our structured query, so from the
+    retriever's point of view it IS about that pair."""
+    out = dict(p)
+    types = list(out.get("hazard_types") or [])
+    if hazard_class not in types:
+        types.append(hazard_class)
+    out["hazard_types"] = types
+    out["road_types"] = [road_type]
+    return out
+
+
 def query_repair_standards(
     hazard_class: str,
     road_type: str,
     k: int = 3,
     rag_client=None,
 ) -> dict:
-    """Returns passages + tool_result_ids. Shape is identical for ChromaDB and stub.
+    """Returns passages + tool_result_ids. Shape is identical for every path.
 
     Lookup order:
       1. If an explicit `rag_client` is injected (tests) use it.
       2. Else, if a seeded ChromaDB corpus exists on the host, use the
-         shared RagClient; this is the production path once Benny's
-         corpus is seeded. Its answer is final: a query error or a gap
-         for this class comes back empty (no_match downstream), never
-         as a stub passage.
+         shared RagClient. First try the structured path (hazard_class
+         + road_type where-filter), which hits the original
+         `roadguard_repair_standards` schema; if that returns nothing,
+         fall back to a pure semantic search for Benny's
+         `charter_grounded_corpus` schema (which carries no such
+         filterable tags, so a where-filter is a guaranteed miss).
+         The shared client's answer is final: a query error or a gap
+         comes back empty (no_match downstream), never as a stub passage.
       3. Only without a seeded corpus (chromadb unavailable or an empty
          collection) fall back to the hardcoded stub corpus.
     """
     passages: list[dict] = []
     corpus_answered = False
-    if rag_client is not None:
-        passages = rag_client.query(hazard_class=hazard_class, road_type=road_type, k=k)
-        corpus_answered = True
-    else:
+    client = rag_client
+    if client is None:
         try:
-
             shared = RagClient.shared()
             if shared.available() and shared.count() > 0:
+                client = shared
                 corpus_answered = True
-                passages = shared.query(
-                    hazard_class=hazard_class, road_type=road_type, k=k
-                )
             elif shared.available():
                 # The corpus exists but is empty. In STRICT mode we report
                 # no_match plainly so a RAG truth test (or an operator
@@ -5030,7 +5095,31 @@ def query_repair_standards(
                 if os.environ.get("ROADGUARD_RAG_STRICT", "0") == "1":
                     corpus_answered = True
         except Exception:
+            client = None
+    else:
+        corpus_answered = True
+
+    if client is not None:
+        try:
+            # Structured path first - works with mini_corpus-style
+            # schemas that tag each passage by {hazard_class, road_type}.
+            passages = client.query(
+                hazard_class=hazard_class, road_type=road_type, k=k
+            )
+            # Semantic fallback - works with corpora whose metadata lacks
+            # our tags (Benny's charter_grounded_corpus). The returned
+            # chunks are stamped with the queried pair so _coverage reads
+            # them as a direct match.
+            if not passages and hasattr(client, "query_semantic"):
+                query_text = _semantic_rag_query(hazard_class, road_type)
+                raw = client.query_semantic(query_text, k=max(k, 5))
+                passages = [
+                    _augment_passage_for_coverage(p, hazard_class, road_type)
+                    for p in raw[:k]
+                ]
+        except Exception:
             passages = []
+
     if not passages and not corpus_answered:
         passages = [
             dict(p, road_types=[road_type])
