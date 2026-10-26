@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0ea5e9">
+  <meta name="description" content="Operational road-damage triage. Classifies D00 / D10 / D20 / D40 pavement defects from camera or uploaded image and routes each to urgent / standard / needs-more-evidence / human-review via a grounded multi-agent decision pipeline.">
+  <title>RoadGuard - Road damage triage agent</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="apple-touch-icon" href="favicon.svg">
+  <link rel="mask-icon" href="favicon.svg" color="#22c55e">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-view="landing">
+
+  <!-- ========================= NAV ========================= -->
+  <header class="nav">
+    <div class="nav-brand">
+      <svg class="brand-mark" viewBox="0 0 180 40" fill="none" aria-hidden="true" style="height:40px;width:auto;min-width:180px">
+        <defs>
+          <linearGradient id="brandShield" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#38bdf8"/>
+            <stop offset="1" stop-color="#1d4ed8"/>
+          </linearGradient>
+          <linearGradient id="brandWord" x1="40" y1="0" x2="180" y2="0" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#1d4ed8"/>
+            <stop offset="1" stop-color="#22c55e"/>
+          </linearGradient>
+        </defs>
+        <path d="M20 3 L34 10 V22 C34 29 28 35 20 37 C12 35 6 29 6 22 V10 Z"
+              fill="url(#brandShield)" stroke="#1e40af" stroke-width="1.5" stroke-linejoin="round"/>
+        <path d="M13 20.5 L17.5 25 L27 15" stroke="#22c55e" stroke-width="3.5"
+              stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <text x="42" y="27" font-family="Inter,system-ui,sans-serif" font-size="20" font-weight="800" fill="url(#brandWord)" textLength="134" lengthAdjust="spacingAndGlyphs">RoadGuard</text>
+      </svg>
+    </div>
+    <nav class="nav-actions">
+      <button class="nav-btn nav-btn--ghost" id="nav-session" title="Session status" hidden>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>
+        <span id="nav-session-label">session</span>
+      </button>
+      <!-- Signed-out: single sign-in button -->
+      <button class="nav-btn nav-btn--ghost" id="nav-signin" title="Sign in">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        <span id="signin-label">Sign in</span>
+      </button>
+      <!-- Signed-in: profile button that opens the dropdown + separate Logout button -->
+      <button class="nav-btn nav-btn--ghost" id="nav-profile" title="Your profile" hidden>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="4"/><path d="M4 21v-2a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v2"/></svg>
+        <span id="nav-profile-label">Profile</span>
+      </button>
+      <button class="nav-btn nav-btn--ghost" id="nav-logout" title="Log out" hidden>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/></svg>
+        <span>Log out</span>
+      </button>
+    </nav>
+  </header>
+
+  <!-- ========================= PROFILE DROPDOWN ========================= -->
+  <div class="profile-pop" id="profile-pop" hidden>
+    <div class="profile-pop-card" role="dialog" aria-labelledby="profile-pop-title">
+      <div class="profile-pop-head">
+        <h3 id="profile-pop-title">Your profile</h3>
+        <button class="icon-btn" id="profile-pop-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <dl class="profile-pop-fields">
+        <dt>Username</dt><dd id="profile-username">-</dd>
+        <dt>Email</dt><dd id="profile-email">-</dd>
+        <dt>Uploads today</dt><dd id="profile-uploads-today">0 / 100</dd>
+        <dt>Uploads total</dt><dd id="profile-uploads-total">0</dd>
+      </dl>
+      <div class="profile-pop-admin" id="profile-pop-admin" hidden>
+        <h4>Operator pages (admin)</h4>
+        <ul id="profile-operator-urls"></ul>
+        <p class="profile-pop-admin-note">Private: served only on the Tailscale tailnet.</p>
+      </div>
+    </div>
+    <div class="profile-pop-backdrop" id="profile-pop-backdrop"></div>
+  </div>
+
+  <!-- ========================= LANDING ========================= -->
+  <main class="landing" id="view-landing">
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="hero-badge">
+          <span class="hero-dot"></span>
+          A public-service road-safety reporting system
+        </div>
+        <h1 class="hero-title">
+          See a hazard? <span class="hero-grad">Report it in one tap</span>,
+          the city handles the rest.
+        </h1>
+        <p class="hero-sub">
+          Help keep your streets safe. Snap a photo of a pothole, a crack,
+          or any broken piece of pavement and send it in. A detector in your
+          browser plus a multi-agent AI pipeline on the municipal server
+          classify the damage, cross-check it against the current repair
+          standards, and either queue it for regular maintenance or escalate
+          it to a supervisor. Every report is tracked, every verdict a
+          supervisor sees is grounded in a specific procedure, and a human
+          always has the final say before any crew is dispatched.
+        </p>
+        <div class="hero-cta">
+          <button class="btn btn--primary btn--lg" id="start-btn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            Start live drive
+          </button>
+          <button class="btn btn--secondary btn--lg" id="upload-btn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Upload image
+          </button>
+          <input type="file" id="upload-input" accept="image/*" hidden>
+          <a class="btn btn--ghost btn--lg" href="#how">
+            How it works
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+          </a>
+        </div>
+        <div class="hero-trust">
+          <div class="trust-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+            <span>On-device detector runs in your browser (no app install)</span>
+          </div>
+          <div class="trust-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 L2 7 L12 12 L22 7 Z"/><path d="M2 17 L12 22 L22 17"/><path d="M2 12 L12 17 L22 12"/></svg>
+            <span>5-agent AI pipeline (signal, perception, research, decision, supervisor)</span>
+          </div>
+          <div class="trust-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            <span>Every verdict is grounded in the city's own repair standards</span>
+          </div>
+          <div class="trust-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7 V12 L15 15"/></svg>
+            <span>Image kept 7 days on the municipal server, then auto-deleted</span>
+          </div>
+        </div>
+      </div>
+      <div class="hero-visual">
+        <div class="hero-frame">
+          <div class="hero-frame-inner">
+            <div class="hero-slideshow" id="hero-slideshow" aria-label="Real pavement damage images, 15 rotating examples">
+              <img class="hero-slide hero-slide--active" src="assets/slides/slide_01.jpg" alt="Road damage example" loading="eager">
+              <img class="hero-slide" src="assets/slides/slide_02.jpg" alt="Road damage example" loading="lazy">
+              <img class="hero-slide" src="assets/slides/slide_03.jpg" alt="Road damage example" loading="lazy">
+              <img class="hero-slide" src="assets/slides/slide_04.jpg" alt="Road damage example" loading="lazy">
+              <img class="hero-slide" src="assets/slides/slide_05.jpg" alt="Road damage example" loading="lazy">
+              <img class="hero-slide" src="assets/slides/slide_06.jpg" alt="Road damage example" loading="lazy">
+              <img class="hero-slide" src="assets/slides/slide_07.jpg" alt="Road damage example" loading="lazy">
+              <img class="hero-slide" src="assets/slides/slide_08.jpg" alt="Road damage example" loading="lazy">
+              <img class="hero-slide" src="assets/slides/slide_09.jpg" alt="Road damage example" loading="lazy">
+              <img class="hero-slide" src="assets/slides/slide_10.jpg" alt="Road damage example" loading="lazy">
+              <img class="hero-slide" src="assets/slides/slide_11.jpg" alt="Road damage example" loading="lazy">
+              <img class="hero-slide" src="assets/slides/slide_12.jpg" alt="Road damage example" loading="lazy">
+              <img class="hero-slide" src="assets/slides/slide_13.jpg" alt="Road damage example" loading="lazy">
+              <img class="hero-slide" src="assets/slides/slide_14.jpg" alt="Road damage example" loading="lazy">
+              <img class="hero-slide" src="assets/slides/slide_15.jpg" alt="Road damage example" loading="lazy">
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="how" id="how">
+      <div class="section-head">
+        <h2>How it works</h2>
+        <p>Three moving parts, all working together.</p>
+      </div>
+      <div class="how-grid">
+        <div class="how-card">
+          <div class="how-num">01</div>
+          <h3>Snap a photo in the browser</h3>
+          <p>Open the site on your phone, point the back camera at the hazard, or upload a photo you already took. A YOLOv8 object detector trained on the <strong>RDD2022</strong> road-damage dataset runs <em>on your device</em> using onnxruntime-web and finds the four pavement defect types the municipality cares about: longitudinal cracks, transverse cracks, alligator cracking and potholes. The photo is sent to the city server with your report so a supervisor can see what you saw.</p>
+        </div>
+        <div class="how-card">
+          <div class="how-num">02</div>
+          <h3>5 AI agents triage your report</h3>
+          <p>On the server, a pipeline of five cooperating agents, each running a different open-source language model, analyses the report: an <strong>intake</strong> agent reads your description, a <strong>perception</strong> agent interprets the detector output, a <strong>research</strong> agent looks up the matching municipal repair standard, a <strong>decision</strong> agent picks one of four actions, and a <strong>supervisor</strong> agent short-circuits obviously-hard cases straight to a human. The whole chain is logged step by step.</p>
+        </div>
+        <div class="how-card">
+          <div class="how-num">03</div>
+          <h3>Humans stay in the loop</h3>
+          <p>The agent recommends: <strong>urgent dispatch</strong> (crew notified now), <strong>standard queue</strong> (routine maintenance), <strong>needs more evidence</strong> (we ask you for one more photo) or <strong>human review</strong> (a municipal supervisor decides). Nothing is ever dispatched automatically. Every urgent and human-review case is a recommendation the supervisor must approve, and the approval is tracked against the case for accountability.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="how" id="why">
+      <div class="section-head">
+        <h2>What RoadGuard sees</h2>
+        <p>Four classes from the RDD2022 benchmark - the four most common pavement defects in city streets.</p>
+      </div>
+      <div class="how-grid">
+        <div class="how-card">
+          <h3>Longitudinal crack <code>(D00)</code></h3>
+          <p>A crack running along the road's travel direction. Usually caused by poor joint construction or temperature stress. Early repair is cheap; left untreated, water seeps in and the pavement fails.</p>
+        </div>
+        <div class="how-card">
+          <h3>Transverse crack <code>(D10)</code></h3>
+          <p>A crack running across the travel direction. Often starts at a construction joint or reflects a crack in the base layer. Routine maintenance queue when caught early.</p>
+        </div>
+        <div class="how-card">
+          <h3>Alligator cracking <code>(D20)</code></h3>
+          <p>Interconnected cracks forming a scaly pattern - the pavement's base layer is failing. Typically needs partial-depth patching before it becomes a pothole.</p>
+        </div>
+        <div class="how-card">
+          <h3>Pothole <code>(D40)</code></h3>
+          <p>A localized hole where surface material has broken away. The most dangerous class for vehicles and cyclists - on a main road with lane obstruction, this is an urgent-dispatch case.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="how" id="dataset">
+      <div class="section-head">
+        <h2>The labelled dataset behind every verdict</h2>
+        <p>The detector and the agent reasoning are grounded in a public, academic road-damage corpus. Nothing is hand-waved.</p>
+      </div>
+      <div class="how-grid">
+        <div class="how-card">
+          <div class="how-num">01</div>
+          <h3>17,099 labelled images</h3>
+          <p>The RDD2022 (Road Damage Detection 2022) training set, split into <b>14,346 train / 1,265 val / 1,488 test</b>. Every image carries YOLO-format bounding boxes for the four defect classes the municipality acts on. The entire catalogue is loaded on the city server so a submitted photo can be fingerprinted against known cases in milliseconds.</p>
+        </div>
+        <div class="how-card">
+          <div class="how-num">02</div>
+          <h3>Four defect classes, one shared vocabulary</h3>
+          <p><b>D00</b> longitudinal crack - along the lane. <b>D10</b> transverse crack - across the lane. <b>D20</b> alligator cracking - interconnected network, a structural warning sign. <b>D40</b> pothole - localised break-up of the surface. Same ids the detector, the agents, the operator pages and the municipal playbook all speak.</p>
+        </div>
+        <div class="how-card">
+          <div class="how-num">03</div>
+          <h3>Open and auditable</h3>
+          <p>RDD2022 is a published academic dataset; a new photo that matches a catalogued one is marked <i>known_image</i> and reused instead of being retriaged from scratch. The dataset lives on the municipal server, versioned and queryable - no third-party upload, no labelling pipeline hidden behind a vendor.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="how" id="my-reports" hidden>
+      <div class="section-head">
+        <h2>My reports</h2>
+        <p>Hazards you reported from this account, newest first. Status reflects where the case is in the municipal queue.</p>
+      </div>
+      <div class="my-reports-wrap">
+        <table class="my-reports-table">
+          <thead>
+            <tr>
+              <th>Reported</th>
+              <th>Defect</th>
+              <th>Road type</th>
+              <th>Priority</th>
+              <th>Agent decision</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="my-reports-body">
+            <tr><td colspan="6" class="my-reports-empty">Sign in to see your reports.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="how" id="faq">
+      <div class="section-head">
+        <h2>Frequently asked</h2>
+      </div>
+      <div class="how-grid">
+        <div class="how-card">
+          <h3>Who sees my photo?</h3>
+          <p>Only the municipal operations team, through a private page gated to the city's internal network. The photo is kept for 7 days on the city server for comparison and then deleted automatically.</p>
+        </div>
+        <div class="how-card">
+          <h3>Will something actually get fixed?</h3>
+          <p>RoadGuard is a decision-support tool. It routes your report to the right queue and gives the supervisor the context to decide. The actual fix is a work order the municipality dispatches - we show you the agent's recommendation and the case reference, nothing more is promised.</p>
+        </div>
+        <div class="how-card">
+          <h3>Why does it take 1-3 minutes for the verdict?</h3>
+          <p>The AI agents run entirely on local open-source models (no cloud API bill) on a modest ARM server. Each agent takes 5-30 seconds. Your part finishes in seconds; the server works in the background and the page updates when the verdict is ready.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ========================= UPLOAD ========================= -->
+  <main class="upload" id="view-upload" hidden>
+    <div class="upload-stage">
+      <button class="upload-back" id="upload-close" title="Back">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        <span>Back</span>
+      </button>
+      <div class="upload-single" style="max-width:1200px;margin:0 auto">
+        <h2>Your report</h2>
+        <div class="upload-split">
+          <div class="upload-col-image">
+            <div class="upload-canvas-wrap">
+              <canvas id="upload-canvas" style="max-width:100%;height:auto"></canvas>
+              <div class="upload-empty" id="upload-empty">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <p>Pick an image to send</p>
+                <button class="btn btn--primary" id="upload-pick-again">Choose file</button>
+              </div>
+            </div>
+          </div>
+          <div class="upload-col-form">
+        <div class="upload-verdict" id="upload-verdict" style="margin-top:0">
+          <div class="upload-verdict-empty">Pick an image, fill in the details, and press Send to Agent.</div>
+        </div>
+        <div class="upload-controls" style="margin-top:12px">
+          <label class="upload-field">
+            <span>Road type <span style="color:#dc2626;font-weight:700" aria-hidden="true">*</span></span>
+            <select id="upload-road-type">
+              <option value="main">Main</option>
+              <option value="secondary">Secondary</option>
+              <option value="bike_path">Bike path</option>
+              <option value="parking">Parking</option>
+            </select>
+          </label>
+          <label class="upload-field">
+            <span>Blocks a traffic lane? <span style="color:#dc2626;font-weight:700" aria-hidden="true">*</span></span>
+            <small class="upload-hint">Does the damage make a car swerve or avoid the lane?</small>
+            <select id="upload-lane-blocked">
+              <option value="none">No - cars drive over or around it fine</option>
+              <option value="partial">Partially - cars have to swerve</option>
+              <option value="full">Yes - the lane is unusable</option>
+            </select>
+          </label>
+          <label class="upload-field">
+            <span>Risk level <span style="color:#dc2626;font-weight:700" aria-hidden="true">*</span></span>
+            <select id="upload-risk">
+              <option value="">(select)</option>
+              <option value="small">Small - minor annoyance, not a safety issue</option>
+              <option value="moderate">Moderate - noticeable, should be fixed soon</option>
+              <option value="dangerous">Dangerous - risk to vehicles or pedestrians</option>
+            </select>
+          </label>
+          <label class="upload-field upload-field--wide">
+            <span>Location <span style="color:#dc2626;font-weight:700" aria-hidden="true">*</span> <span class="sr-only">required</span></span>
+            <input type="text" id="upload-location" maxlength="500" placeholder="e.g. Rothschild 1, Tel Aviv">
+          </label>
+          <label class="upload-field upload-field--wide">
+            <span>Describe what you see <span style="color:#dc2626;font-weight:700" aria-hidden="true">*</span> <span class="sr-only">required</span></span>
+            <textarea id="upload-reporter-text" rows="2" maxlength="1000"
+                      placeholder="e.g. Deep pothole at the parking entrance, cars swerve into the opposite lane"></textarea>
+          </label>
+        </div>
+        <div class="upload-actions" style="margin-top:12px">
+          <button class="btn btn--primary btn--lg" id="upload-submit" disabled>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
+            <span class="upload-submit-label">Send to Agent</span>
+          </button>
+          <button class="btn btn--ghost" id="upload-pick-another">Pick another</button>
+        </div>
+          </div>
+        </div>
+        <div class="upload-trace" id="upload-trace" hidden><h3>Agent trace</h3><pre id="upload-trace-pre"></pre></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ========================= LIVE ========================= -->
+  <main class="live" id="view-live" hidden>
+    <div class="live-stage">
+      <video id="cam" playsinline autoplay muted></video>
+      <canvas id="overlay"></canvas>
+
+      <div class="live-topbar">
+        <button class="live-back" id="stop-btn" title="End drive">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+          <span>End</span>
+        </button>
+        <div class="live-title">
+          <div class="live-title-name" id="live-mode-name">Live drive</div>
+          <div class="live-title-meta">
+            <span class="live-title-tag" id="live-provider">Streaming</span>
+            <span class="live-title-sep">&middot;</span>
+            <span id="live-fps">0 fps</span>
+          </div>
+        </div>
+        <div class="live-camera-select" id="camera-select-wrap" hidden>
+          <label for="camera-select" class="sr-only">Camera</label>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+          <select id="camera-select" aria-label="Choose camera"></select>
+        </div>
+      </div>
+
+      <div class="live-hud">
+        <div class="hud-metric">
+          <div class="hud-metric-label">Tracks</div>
+          <div class="hud-metric-value" id="hud-tracks">0</div>
+        </div>
+        <div class="hud-metric">
+          <div class="hud-metric-label">Top class</div>
+          <div class="hud-metric-value" id="hud-topclass">--</div>
+        </div>
+        <div class="hud-ring" id="hud-ring">
+          <svg viewBox="0 0 100 100" class="ring">
+            <circle cx="50" cy="50" r="42" class="ring-track"/>
+            <circle cx="50" cy="50" r="42" class="ring-fill" id="ring-fill"/>
+          </svg>
+          <div class="hud-ring-center">
+            <div class="hud-ring-count" id="hud-verdicts">0</div>
+            <div class="hud-ring-goal">verdicts</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="live-bottom">
+        <div class="verdict-banner" id="verdict-banner" data-level="idle">
+          <div class="verdict-banner-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 22h20L12 2z"/><path d="M12 10v4"/><circle cx="12" cy="18" r="1" fill="currentColor"/></svg>
+          </div>
+          <div class="verdict-banner-body">
+            <div class="verdict-banner-head">
+              <span id="verdict-head-action">idle</span>
+              <span class="verdict-banner-head-tag" id="verdict-head-tag">waiting</span>
+            </div>
+            <div class="verdict-banner-text" id="verdict-text">Press start - RoadGuard begins when the back camera opens.</div>
+            <span class="verdict-banner-source" id="verdict-source" hidden></span>
+          </div>
+          <div class="verdict-banner-pending" id="verdict-pending" hidden aria-hidden="true">
+            <span class="verdict-banner-dot"></span>
+            <span class="verdict-banner-dot"></span>
+            <span class="verdict-banner-dot"></span>
+          </div>
+        </div>
+        <div class="live-mini">
+          <div class="mini-stat">
+            <div class="mini-stat-value" id="mini-urgent">0</div>
+            <div class="mini-stat-label">Urgent</div>
+          </div>
+          <div class="mini-stat">
+            <div class="mini-stat-value" id="mini-standard">0</div>
+            <div class="mini-stat-label">Standard</div>
+          </div>
+          <div class="mini-stat">
+            <div class="mini-stat-value" id="mini-elapsed">0:00</div>
+            <div class="mini-stat-label">Time</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="live-loading" id="live-loading" hidden>
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Warming up the detector...</div>
+      </div>
+    </div>
+
+    <aside class="live-side">
+      <div class="side-head">
+        <h3>Verdicts</h3>
+        <span class="side-head-tag" id="verdict-count">0</span>
+      </div>
+      <div class="side-controls">
+        <label class="side-control">
+          <span>Road type</span>
+          <select id="drive-road-type">
+            <option value="main">Main</option>
+            <option value="secondary">Secondary</option>
+            <option value="bike_path">Bike path</option>
+            <option value="parking">Parking</option>
+          </select>
+        </label>
+        <label class="side-control">
+          <span>Blocks a traffic lane? (default)</span>
+          <select id="drive-lane-blocked">
+            <option value="none">No</option>
+            <option value="partial">Partially</option>
+            <option value="full">Yes</option>
+          </select>
+        </label>
+      </div>
+      <div class="verdict-log" id="verdict-log">
+        <div class="verdict-empty">
+          Verdicts arrive here as RoadGuard clears each confirmed hazard.
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- ========================= SIGN-IN MODAL ========================= -->
+  <div class="modal" id="signin-modal" hidden>
+    <div class="modal-body signin-modal-body">
+      <div class="signin-brand">
+        <svg class="brand-mark" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="signinShield" x1="0" y1="0" x2="40" y2="40">
+              <stop offset="0" stop-color="#38bdf8"/>
+              <stop offset="1" stop-color="#1d4ed8"/>
+            </linearGradient>
+          </defs>
+          <path d="M20 3 L34 10 V22 C34 29 28 35 20 37 C12 35 6 29 6 22 V10 Z"
+                fill="url(#signinShield)" stroke="#1e40af" stroke-width="1.5" stroke-linejoin="round"/>
+          <path d="M13 20.5 L17.5 25 L27 15" stroke="#22c55e" stroke-width="3.5"
+                stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+        <h2>Sign in to RoadGuard</h2>
+      </div>
+      <p class="signin-copy" id="signin-subtitle">Welcome back. Sign in to continue reporting hazards.</p>
+
+      <!-- Social providers (shown first in the GitHub/HuggingFace pattern) -->
+      <div class="signin-social" id="signin-social" hidden>
+        <button type="button" class="social-btn" id="btn-google">
+          <svg class="social-icon" viewBox="0 0 48 48" aria-hidden="true" width="20" height="20">
+            <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.6-6 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C33.6 6.1 29 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/>
+            <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C33.6 6.1 29 4 24 4 16.3 4 9.7 8.4 6.3 14.7z"/>
+            <path fill="#4CAF50" d="M24 44c5 0 9.5-1.9 12.9-5l-6-5.1c-2 1.4-4.5 2.2-7 2.1-5.3 0-9.7-3.4-11.3-8l-6.6 5C9.6 39.5 16.2 44 24 44z"/>
+            <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.3-4.3 5.7l6 5.1c-.4.4 6.4-4.7 6.4-14.8 0-1.3-.1-2.4-.4-3.5z"/>
+          </svg>
+          Continue with Google
+        </button>
+        <!-- GSI's own rendered button is a fallback kept out of the normal flow -->
+        <div id="google-signin-button" class="gsi-hidden"></div>
+        <p class="signin-fine" id="signin-google-note" hidden>Google sign-in is not configured on this server yet.</p>
+        <div class="signin-divider"><span>or</span></div>
+      </div>
+
+      <!-- Sign-in form (primary view) -->
+      <form class="signin-form" id="signin-form-signin" autocomplete="off">
+        <div class="signin-field">
+          <label for="signin-username">Username or email</label>
+          <input type="text" id="signin-username" name="username" placeholder="orpsp8" required autocomplete="username" maxlength="200">
+        </div>
+        <div class="signin-field">
+          <label class="row-split" for="signin-password">
+            <span>Password</span>
+            <button type="button" class="link-tiny" id="signin-pw-toggle" aria-pressed="false" aria-label="Show password">Show</button>
+          </label>
+          <input type="password" id="signin-password" name="password" placeholder="Enter your password" required autocomplete="current-password">
+        </div>
+        <button class="btn-primary-xl" type="submit" id="signin-submit-btn">Sign in</button>
+      </form>
+
+      <!-- Sign-up form (hidden until the "Sign up" link is tapped AND signup_enabled) -->
+      <form class="signin-form" id="signin-form-signup" hidden autocomplete="off">
+        <div class="signin-field">
+          <label for="signup-username">Username</label>
+          <input type="text" id="signup-username" placeholder="3-32 chars; letters, digits, _ . -" required minlength="3" maxlength="32">
+        </div>
+        <div class="signin-field">
+          <label for="signup-email">Email <span class="optional">(optional)</span></label>
+          <input type="email" id="signup-email" placeholder="you@example.com" maxlength="200">
+        </div>
+        <div class="signin-field">
+          <label class="row-split" for="signup-password">
+            <span>Password</span>
+            <button type="button" class="link-tiny" id="signup-pw-toggle" aria-pressed="false" aria-label="Show password">Show</button>
+          </label>
+          <input type="password" id="signup-password" placeholder="At least 8 characters" required autocomplete="new-password">
+          <small class="signin-hint">8+ characters including an uppercase, a lowercase and a special character.</small>
+        </div>
+        <button class="btn-primary-xl" type="submit">Create account</button>
+      </form>
+
+      <div class="signin-error" id="signin-error" hidden role="alert"></div>
+
+      <!-- Flip link (Sign in <-> Sign up). Hidden entirely when signup_enabled=false. -->
+      <p class="signin-flip" id="signin-flip-wrap" hidden>
+        <span id="signin-flip-prompt">Don't have an account?</span>
+        <button type="button" class="link" id="signin-flip-btn">Sign up</button>
+      </p>
+
+      <p class="signin-foot">RoadGuard is a decision-support tool. No road is closed from here. Every urgent and human-review case is a recommendation for a human to act on.</p>
+    </div>
+    <div class="modal-backdrop" id="signin-backdrop"></div>
+  </div>
+
+  <!-- ========================= TOAST ========================= -->
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script type="module" src="assets/app.js"></script>
+</body>
+</html>
+<!-- rebuild trigger 2026-10-26T20:18:41Z -->
