@@ -237,6 +237,11 @@ async function refreshUserChrome() {
     return;
   }
   // Fetch /auth/me and cache; the dropdown reads from state.me on open.
+  // If the call fails on network error (backend unreachable, DNS failure,
+  // tunnel down, CORS block) the token in localStorage is still formally
+  // valid but useless, and the old UX showed the stale username as if the
+  // user were signed in. Treat any failure as "backend says no" and sign
+  // the user out locally so the Sign-in button comes back.
   try {
     const me = await fetchMe();
     state.me = me;
@@ -244,8 +249,12 @@ async function refreshUserChrome() {
     if (profileLabel) {
       profileLabel.textContent = me.username || (me.email || "").split("@")[0] || "Profile";
     }
-  } catch {
-    // 401 handler already fired; chrome will refresh on next tick.
+  } catch (e) {
+    clearToken();
+    state.me = null;
+    navSignin.hidden = false;
+    navProfile.hidden = true;
+    navLogout.hidden = true;
   }
 }
 
