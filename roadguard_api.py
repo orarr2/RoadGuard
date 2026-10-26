@@ -469,7 +469,771 @@ if (saved) { el("token").value = saved; start(); }
 </body>
 </html>
 """
-_STATIC_PAGES = {"trace.html": _TRACE_HTML, "supervisor.html": _SUPERVISOR_HTML}
+_FLOW_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>RoadGuard - Agent Flow (private)</title>
+<style>
+:root {
+  --bg: #0b1220;
+  --card: #121a2e;
+  --card2: #1a2340;
+  --border: #1f2a44;
+  --text: #e6ecff;
+  --dim: #8a95b3;
+  --idle: #4a5a7a;
+  --active: #fbbf24;
+  --ok: #22c55e;
+  --info: #38bdf8;
+  --warn: #f59e0b;
+  --bad: #ef4444;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body {
+  margin: 0; padding: 0;
+  background: var(--bg); color: var(--text);
+  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+header {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 20px;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 10;
+  flex-wrap: wrap;
+}
+header h1 { margin: 0; font-size: 18px; color: var(--info); font-weight: 600; letter-spacing: 0.3px; }
+.badge {
+  padding: 4px 10px; border-radius: 999px; font-size: 11px;
+  font-weight: 700; letter-spacing: 0.5px;
+  background: rgba(34,197,94,.18); color: var(--ok);
+}
+.badge.paused { background: rgba(239,68,68,.18); color: var(--bad); }
+#hz-display { color: var(--dim); font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
+.header-spacer { flex: 1; }
+button {
+  background: var(--card2); color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 14px;
+  font-size: 13px; cursor: pointer;
+  font-family: inherit;
+  min-height: 38px;
+}
+button:hover { background: var(--border); }
+button:active { transform: scale(0.97); }
+main {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 14px;
+  padding: 14px;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; }
+}
+.flow-container {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 18px 24px 18px;
+  overflow-x: auto;
+  position: relative;
+  min-height: 260px;
+}
+.flow {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(140px, 1fr));
+  grid-template-rows: auto auto;
+  gap: 24px 28px;
+  padding: 10px 0 20px 0;
+  min-width: 980px;
+}
+.arrows {
+  position: absolute; top: 0; left: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+.node {
+  grid-row: 1;
+  background: var(--card2);
+  border: 2px solid var(--idle);
+  border-radius: 10px;
+  padding: 12px;
+  position: relative;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.15s ease;
+  cursor: pointer;
+  z-index: 2;
+}
+.node:hover { transform: translateY(-2px); }
+.node.state-active {
+  border-color: var(--active);
+  box-shadow: 0 0 24px rgba(251,191,36,0.35);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+.node.state-done { border-color: var(--ok); }
+.node.state-info { border-color: var(--info); }
+.node.state-warn { border-color: var(--warn); }
+.node.state-bad {
+  border-color: var(--bad);
+  box-shadow: 0 0 24px rgba(239,68,68,0.3);
+}
+.node .node-head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 6px;
+  font-weight: 700; font-size: 13px;
+}
+.node .node-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--idle);
+  box-shadow: 0 0 0 3px rgba(74,90,122,0.15);
+}
+.node.state-active .node-dot { background: var(--active); box-shadow: 0 0 0 3px rgba(251,191,36,0.3); animation: dot-blink 0.9s steps(2) infinite; }
+.node.state-done .node-dot { background: var(--ok); box-shadow: 0 0 0 3px rgba(34,197,94,0.25); }
+.node.state-info .node-dot { background: var(--info); box-shadow: 0 0 0 3px rgba(56,189,248,0.25); }
+.node.state-warn .node-dot { background: var(--warn); box-shadow: 0 0 0 3px rgba(245,158,11,0.25); }
+.node.state-bad .node-dot { background: var(--bad); box-shadow: 0 0 0 3px rgba(239,68,68,0.25); }
+.node .node-sub {
+  font-size: 11px; color: var(--dim); line-height: 1.3;
+  min-height: 28px;
+}
+.node .node-caption {
+  font-family: Consolas, "Cascadia Mono", monospace; font-size: 11px;
+  color: var(--text); margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  min-height: 15px;
+  word-break: break-word;
+}
+.node[data-key="await_evidence"] {
+  grid-row: 2; grid-column: 5;
+  opacity: 0.4;
+  border-style: dashed;
+}
+.node[data-key="await_evidence"].visible { opacity: 1; border-style: solid; }
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 20px rgba(251,191,36,0.35); }
+  50% { box-shadow: 0 0 34px rgba(251,191,36,0.65); }
+}
+@keyframes dot-blink { to { visibility: hidden; } }
+.panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+.panel h2 {
+  margin: 0 0 12px 0; font-size: 12px; color: var(--dim);
+  letter-spacing: 1px; text-transform: uppercase; font-weight: 600;
+}
+.panel .kv {
+  display: grid; grid-template-columns: 90px 1fr;
+  gap: 6px 10px; font-size: 12px;
+}
+.panel .kv .k { color: var(--dim); }
+.panel .kv .v {
+  color: var(--text); font-family: Consolas, "Cascadia Mono", monospace;
+  word-break: break-all;
+}
+.verdict-box {
+  margin-top: 14px; padding: 12px; border-radius: 8px;
+  background: var(--bg);
+  border-left: 4px solid var(--idle);
+}
+.verdict-box.urgent, .verdict-box.human_review { border-left-color: var(--bad); }
+.verdict-box.standard { border-left-color: var(--ok); }
+.verdict-box.needs_more_evidence { border-left-color: var(--info); }
+.verdict-box.known_image { border-left-color: var(--info); }
+.verdict-box .action {
+  font-weight: 700; font-size: 14px; letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.verdict-box.urgent .action, .verdict-box.human_review .action { color: var(--bad); }
+.verdict-box.standard .action { color: var(--ok); }
+.verdict-box.needs_more_evidence .action, .verdict-box.known_image .action { color: var(--info); }
+.verdict-box .rationale {
+  margin-top: 8px; color: var(--dim); font-size: 11px; line-height: 1.45;
+  max-height: 100px; overflow-y: auto;
+}
+.live-line {
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: Consolas, "Cascadia Mono", monospace; font-size: 11px;
+  color: var(--text);
+  min-height: 44px;
+  max-height: 120px; overflow-y: auto;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.live-line .lbl { color: var(--ok); }
+.live-line .dec { color: var(--warn); }
+footer {
+  padding: 0 14px 14px 14px;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+.recent {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+.recent h2 {
+  margin: 0 0 12px 0; font-size: 12px; color: var(--dim);
+  letter-spacing: 1px; text-transform: uppercase; font-weight: 600;
+}
+.recent-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.recent-item {
+  padding: 8px 12px;
+  background: var(--card2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  transition: background 0.15s, border-color 0.15s;
+  display: flex; align-items: center; gap: 8px;
+}
+.recent-item:hover { background: var(--border); }
+.recent-item.current {
+  border-color: var(--info);
+  background: rgba(56,189,248,0.1);
+}
+.recent-item .ri-action {
+  font-weight: 700;
+  padding: 2px 6px; border-radius: 4px; font-size: 10px;
+  background: var(--idle); color: var(--bg);
+  text-transform: uppercase; letter-spacing: 0.3px;
+}
+.recent-item .ri-action.urgent, .recent-item .ri-action.human_review { background: var(--bad); color: #fff; }
+.recent-item .ri-action.standard { background: var(--ok); color: var(--bg); }
+.recent-item .ri-action.needs_more_evidence { background: var(--info); color: var(--bg); }
+.recent-item .ri-action.known_image { background: var(--info); color: var(--bg); }
+#login {
+  position: fixed; inset: 0;
+  background: rgba(11,18,32,0.95);
+  display: none; align-items: center; justify-content: center;
+  z-index: 100; padding: 20px;
+}
+#login.on { display: flex; }
+#login form {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px;
+  min-width: 280px;
+  max-width: 360px;
+  width: 100%;
+}
+#login h3 { margin: 0 0 14px 0; font-size: 15px; color: var(--info); }
+#login input[type="password"] {
+  width: 100%; padding: 12px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px; font-size: 15px;
+  font-family: inherit;
+}
+#login button {
+  width: 100%; margin-top: 10px;
+  background: var(--info); color: #061020;
+  border: 0; padding: 12px; font-weight: 700;
+  min-height: 44px;
+}
+#login .err {
+  color: var(--bad); font-size: 12px; margin-top: 8px;
+  min-height: 16px;
+}
+.empty-state {
+  text-align: center; color: var(--dim);
+  padding: 30px 20px;
+  font-size: 13px;
+}
+.legend {
+  display: flex; gap: 14px; flex-wrap: wrap;
+  margin-top: 16px; padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--dim);
+}
+.legend .lg { display: inline-flex; align-items: center; gap: 6px; }
+.legend .lg-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  display: inline-block;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>RoadGuard Agent Flow</h1>
+  <span id="status-badge" class="badge">LIVE</span>
+  <span id="hz-display"></span>
+  <div class="header-spacer"></div>
+  <button id="pause-btn">Pause</button>
+</header>
+
+<main>
+  <div class="flow-container">
+    <svg class="arrows" id="arrows"></svg>
+    <div class="flow" id="flow"></div>
+    <div class="empty-state" id="empty-state" style="display:none">
+      No hazard being processed. Submit one from the webapp to see the agent at work.
+    </div>
+    <div class="legend">
+      <span class="lg"><span class="lg-dot" style="background:var(--idle)"></span>idle</span>
+      <span class="lg"><span class="lg-dot" style="background:var(--active)"></span>running</span>
+      <span class="lg"><span class="lg-dot" style="background:var(--ok)"></span>done / standard</span>
+      <span class="lg"><span class="lg-dot" style="background:var(--info)"></span>needs evidence</span>
+      <span class="lg"><span class="lg-dot" style="background:var(--warn)"></span>awaiting approval</span>
+      <span class="lg"><span class="lg-dot" style="background:var(--bad)"></span>urgent / human review</span>
+    </div>
+  </div>
+
+  <aside>
+    <div class="panel">
+      <h2>Current hazard</h2>
+      <div class="kv">
+        <span class="k">hazard id</span><span class="v" id="kv-id">&mdash;</span>
+        <span class="k">class</span><span class="v" id="kv-class">&mdash;</span>
+        <span class="k">confidence</span><span class="v" id="kv-conf">&mdash;</span>
+        <span class="k">road type</span><span class="v" id="kv-road">&mdash;</span>
+        <span class="k">lane</span><span class="v" id="kv-lane">&mdash;</span>
+        <span class="k">status</span><span class="v" id="kv-status">&mdash;</span>
+      </div>
+      <div class="verdict-box" id="verdict-box">
+        <div class="action" id="verdict-action">WAITING</div>
+        <div class="rationale" id="verdict-rationale">No hazard selected.</div>
+      </div>
+      <div class="live-line" id="live-line">waiting for events...</div>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  <div class="recent">
+    <h2>Recent hazards (click to pin)</h2>
+    <div class="recent-list" id="recent-list">
+      <span class="empty-state" style="padding:10px">No hazards yet.</span>
+    </div>
+  </div>
+</footer>
+
+<div id="login">
+  <form id="login-form" autocomplete="off">
+    <h3>RoadGuard passphrase</h3>
+    <input id="pw" type="password" autocomplete="current-password" placeholder="passphrase" enterkeyhint="go">
+    <button type="submit">Continue</button>
+    <div class="err" id="login-err"></div>
+  </form>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+const NODES = [
+  { key: "sanitize",         label: "Sanitize",         col: 1, hint: "redacts PII, neutralises injection" },
+  { key: "signal_extractor", label: "Signal Extractor", col: 2, hint: "reads reporter free text" },
+  { key: "profile_builder",  label: "Profile Builder",  col: 3, hint: "YOLO + metadata to profile" },
+  { key: "rag_retriever",    label: "RAG Retriever",    col: 4, hint: "queries repair standards" },
+  { key: "decision",         label: "Decision",         col: 5, hint: "ReAct loop, cites sources" },
+  { key: "approval_gate",    label: "Approval Gate",    col: 6, hint: "pends human sign-off" },
+  { key: "await_evidence",   label: "Await Evidence",   col: 5, hint: "paused on citizen reply", row: 2 },
+];
+const MAIN_ORDER = ["sanitize","signal_extractor","profile_builder","rag_retriever","decision","approval_gate"];
+const POLL_MS = 2000;
+
+// ---------------------------------------------------------------------------
+// DOM helpers
+// ---------------------------------------------------------------------------
+function el(id) { return document.getElementById(id); }
+function create(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+function svgNode(tag, attrs) {
+  const n = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+}
+
+// ---------------------------------------------------------------------------
+// API client
+// ---------------------------------------------------------------------------
+let token = "";
+try { token = localStorage.getItem("rg_token") || ""; } catch (e) {}
+
+function apiPath(path) {
+  const here = window.location.pathname;
+  const idx = here.indexOf("/flow");
+  return (idx >= 0 ? here.substring(0, idx) : "") + path;
+}
+
+async function apiGet(path) {
+  const r = await fetch(apiPath(path), { headers: { "X-RoadGuard-Token": token } });
+  if (r.status === 401) {
+    token = "";
+    try { localStorage.removeItem("rg_token"); } catch(e) {}
+    throw new Error("401");
+  }
+  if (!r.ok) throw new Error(String(r.status));
+  return r.json();
+}
+
+async function login(passphrase) {
+  const r = await fetch(apiPath("/auth/login"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ passphrase: passphrase }),
+  });
+  if (!r.ok) return { ok: false, status: r.status };
+  const data = await r.json();
+  token = data.token;
+  try { localStorage.setItem("rg_token", token); } catch(e) {}
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Flow diagram - build DOM nodes once
+// ---------------------------------------------------------------------------
+function buildFlow() {
+  const flow = el("flow");
+  flow.innerHTML = "";
+  for (const n of NODES) {
+    const node = create("div", "node state-idle");
+    node.dataset.key = n.key;
+    node.style.gridColumn = String(n.col);
+    if (n.row) node.style.gridRow = String(n.row);
+
+    const head = create("div", "node-head");
+    head.appendChild(create("span", "node-dot"));
+    head.appendChild(create("span", null, n.label));
+    node.appendChild(head);
+
+    node.appendChild(create("div", "node-sub", n.hint));
+    node.appendChild(create("div", "node-caption", "idle"));
+
+    flow.appendChild(node);
+  }
+}
+
+function drawArrows() {
+  const svg = el("arrows");
+  const flow = el("flow");
+  svg.innerHTML = "";
+  const w = flow.scrollWidth;
+  const h = flow.scrollHeight;
+  svg.setAttribute("width", w);
+  svg.setAttribute("height", h);
+  svg.setAttribute("viewBox", "0 0 " + w + " " + h);
+  const flowRect = flow.getBoundingClientRect();
+
+  function nodeBox(key) {
+    const n = flow.querySelector('.node[data-key="' + key + '"]');
+    if (!n) return null;
+    const r = n.getBoundingClientRect();
+    return {
+      left: r.left - flowRect.left + flow.scrollLeft,
+      right: r.right - flowRect.left + flow.scrollLeft,
+      top: r.top - flowRect.top,
+      bottom: r.bottom - flowRect.top,
+      cy: r.top - flowRect.top + r.height / 2,
+      cx: r.left - flowRect.left + flow.scrollLeft + r.width / 2,
+    };
+  }
+
+  function drawArrow(from, to, dashed) {
+    const a = nodeBox(from), b = nodeBox(to);
+    if (!a || !b) return;
+    let x1, y1, x2, y2;
+    if (from === "decision" && to === "await_evidence") {
+      x1 = a.cx; y1 = a.bottom; x2 = b.cx; y2 = b.top;
+    } else {
+      x1 = a.right; y1 = a.cy; x2 = b.left; y2 = b.cy;
+    }
+    const line = svgNode("line", {
+      x1: x1, y1: y1, x2: x2, y2: y2,
+      stroke: "#1f2a44", "stroke-width": "2",
+      "stroke-dasharray": dashed ? "3 5" : "6 6",
+      "data-from": from, "data-to": to,
+    });
+    svg.appendChild(line);
+    // Arrowhead triangle at the "to" end
+    const dx = x2 - x1, dy = y2 - y1;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len, uy = dy / len;
+    const headLen = 8, headW = 5;
+    const bx = x2 - ux * headLen, by = y2 - uy * headLen;
+    const px = -uy, py = ux;
+    const p1x = bx + px * headW, p1y = by + py * headW;
+    const p2x = bx - px * headW, p2y = by - py * headW;
+    const tri = svgNode("polygon", {
+      points: x2 + "," + y2 + " " + p1x + "," + p1y + " " + p2x + "," + p2y,
+      fill: "#1f2a44", "data-from": from, "data-to": to,
+    });
+    svg.appendChild(tri);
+  }
+
+  for (let i = 0; i < MAIN_ORDER.length - 1; i++) {
+    drawArrow(MAIN_ORDER[i], MAIN_ORDER[i+1], false);
+  }
+  drawArrow("decision", "await_evidence", true);
+}
+
+// ---------------------------------------------------------------------------
+// Interpret trace into node states
+// ---------------------------------------------------------------------------
+function interpretTrace(trace, hazard) {
+  const nodeState = {};
+  for (const n of NODES) nodeState[n.key] = { state: "idle", caption: "idle" };
+  if (!Array.isArray(trace) || trace.length === 0) return nodeState;
+
+  const seen = new Set();
+  for (const entry of trace) {
+    const sp = entry.speaker;
+    if (!sp || !nodeState[sp]) continue;
+    seen.add(sp);
+    const c = (entry.content && typeof entry.content === "object") ? entry.content : {};
+
+    if (sp === "sanitize") {
+      nodeState[sp].state = "done";
+      const flags = [];
+      if (c.ocr_suspicious) flags.push("ocr suspicious");
+      if (c.reporter_text_suspicious) flags.push("text suspicious");
+      if (c.location_scrubbed) flags.push("location scrubbed");
+      nodeState[sp].caption = flags.length ? flags.join(", ") : "clean";
+    } else if (sp === "signal_extractor") {
+      nodeState[sp].state = "done";
+      if (c.has_text) {
+        const m = c.mentioned || {};
+        nodeState[sp].caption = "class=" + (m.hazard_class || "?") + " lane=" + (m.lane_blocked || "?");
+      } else {
+        nodeState[sp].caption = "no reporter text";
+      }
+    } else if (sp === "profile_builder") {
+      nodeState[sp].state = "done";
+      const conf = c.confidence != null ? Number(c.confidence).toFixed(2) : "?";
+      nodeState[sp].caption = (c.primary_class || "?") + " conf=" + conf;
+    } else if (sp === "rag_retriever") {
+      nodeState[sp].state = "done";
+      const n = c.n_procedures != null ? c.n_procedures : ((c.tool_result_ids || []).length);
+      nodeState[sp].caption = n + " passages, " + (c.coverage || "?");
+    } else if (sp === "decision") {
+      if (entry.kind === "react_step") continue;
+      const action = c.action || "?";
+      nodeState[sp].caption = action + " prio=" + (c.priority != null ? c.priority : "?");
+      if (action === "urgent" || action === "human_review") nodeState[sp].state = "bad";
+      else if (action === "needs_more_evidence") nodeState[sp].state = "info";
+      else if (action === "known_image") nodeState[sp].state = "info";
+      else nodeState[sp].state = "done";
+    } else if (sp === "approval_gate") {
+      nodeState[sp].state = "warn";
+      nodeState[sp].caption = "approval " + (c.approval_id || "pending");
+    } else if (sp === "await_evidence") {
+      nodeState[sp].state = "info";
+      nodeState[sp].caption = "round " + (c.evidence_round || 1);
+    }
+  }
+
+  const status = hazard && hazard.verdict && hazard.verdict.status;
+  if (status === "queued" || status === "processing") {
+    let activeIdx = 0;
+    for (let i = MAIN_ORDER.length - 1; i >= 0; i--) {
+      if (seen.has(MAIN_ORDER[i])) { activeIdx = i + 1; break; }
+    }
+    if (activeIdx < MAIN_ORDER.length) {
+      nodeState[MAIN_ORDER[activeIdx]].state = "active";
+      nodeState[MAIN_ORDER[activeIdx]].caption = "running...";
+    }
+  }
+  return nodeState;
+}
+
+function applyNodeStates(nodeState) {
+  for (const n of NODES) {
+    const node = document.querySelector('.node[data-key="' + n.key + '"]');
+    if (!node) continue;
+    node.classList.remove("state-idle","state-active","state-done","state-info","state-warn","state-bad");
+    node.classList.add("state-" + nodeState[n.key].state);
+    const cap = node.querySelector(".node-caption");
+    if (cap) cap.textContent = nodeState[n.key].caption;
+    if (n.key === "await_evidence") {
+      node.classList.toggle("visible", nodeState[n.key].state !== "idle");
+    }
+  }
+  // Light arrows for traversed edges
+  const svg = el("arrows");
+  function set(from, to, lit) {
+    const nodes = svg.querySelectorAll('[data-from="' + from + '"][data-to="' + to + '"]');
+    nodes.forEach(n => {
+      if (n.tagName === "line") n.setAttribute("stroke", lit ? "#38bdf8" : "#1f2a44");
+      else if (n.tagName === "polygon") n.setAttribute("fill", lit ? "#38bdf8" : "#1f2a44");
+    });
+  }
+  for (let i = 0; i < MAIN_ORDER.length - 1; i++) {
+    const fromState = nodeState[MAIN_ORDER[i]].state;
+    const toState = nodeState[MAIN_ORDER[i+1]].state;
+    const lit = fromState !== "idle" && fromState !== "active" && toState !== "idle";
+    set(MAIN_ORDER[i], MAIN_ORDER[i+1], lit);
+  }
+  const litEvidence = nodeState["await_evidence"].state !== "idle";
+  set("decision", "await_evidence", litEvidence);
+}
+
+// ---------------------------------------------------------------------------
+// Right panel + live trace line
+// ---------------------------------------------------------------------------
+function updatePanel(hazard) {
+  if (!hazard) {
+    el("kv-id").textContent = "—";
+    el("kv-class").textContent = "—";
+    el("kv-conf").textContent = "—";
+    el("kv-road").textContent = "—";
+    el("kv-lane").textContent = "—";
+    el("kv-status").textContent = "—";
+    el("verdict-action").textContent = "WAITING";
+    el("verdict-rationale").textContent = "No hazard being processed.";
+    el("verdict-box").className = "verdict-box";
+    el("live-line").textContent = "waiting for events...";
+    el("hz-display").textContent = "";
+    return;
+  }
+  const md = hazard.metadata || {};
+  const v = hazard.verdict || {};
+  el("kv-id").textContent = hazard.hazard_id || "—";
+  el("kv-class").textContent = md.class || "—";
+  el("kv-conf").textContent = md.confidence != null ? Number(md.confidence).toFixed(2) : "—";
+  el("kv-road").textContent = md.road_type || "—";
+  el("kv-lane").textContent = md.lane_blocked || "—";
+  el("kv-status").textContent = v.status || "—";
+  const action = v.action || "WAITING";
+  el("verdict-action").textContent = String(action).toUpperCase();
+  el("verdict-rationale").textContent = v.rationale || v.assessment || "Still processing.";
+  el("verdict-box").className = "verdict-box " + String(v.action || "").replace(/[^a-z_]/g, "");
+  const lines = hazard.trace_lines || [];
+  el("live-line").textContent = lines.length ? lines[lines.length - 1] : "(no trace lines yet)";
+  el("hz-display").textContent = hazard.hazard_id ? "@ " + hazard.hazard_id : "";
+}
+
+function updateRecent(items, currentId) {
+  const list = el("recent-list");
+  if (!items || !items.length) {
+    list.innerHTML = '<span class="empty-state" style="padding:10px">No hazards yet.</span>';
+    return;
+  }
+  list.innerHTML = "";
+  for (const it of items.slice(0, 10)) {
+    const row = create("div", "recent-item");
+    if (it.hazard_id === currentId) row.classList.add("current");
+    row.dataset.id = it.hazard_id;
+    row.appendChild(create("span", null, it.hazard_id || ""));
+    const action = it.agent_decision || it.action || "pending";
+    const chip = create("span", "ri-action " + String(action).replace(/[^a-z_]/g, ""), action);
+    row.appendChild(chip);
+    row.addEventListener("click", () => {
+      pinnedId = (pinnedId === it.hazard_id) ? null : it.hazard_id;
+      tick();
+    });
+    list.appendChild(row);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
+let timer = null, paused = false, pinnedId = null;
+
+async function tick() {
+  if (paused) return;
+  try {
+    const history = await apiGet("/hazards/history?limit=10");
+    const items = history.items || [];
+    const targetId = pinnedId || (items[0] ? items[0].hazard_id : null);
+    if (!targetId) {
+      updatePanel(null);
+      updateRecent([], null);
+      el("empty-state").style.display = "block";
+      el("flow").style.display = "none";
+      applyNodeStates(interpretTrace([], null));
+      return;
+    }
+    el("empty-state").style.display = "none";
+    el("flow").style.display = "grid";
+    const hazard = await apiGet("/report/" + encodeURIComponent(targetId));
+    const nodeState = interpretTrace(hazard.trace, hazard);
+    applyNodeStates(nodeState);
+    updatePanel(hazard);
+    updateRecent(items, targetId);
+    requestAnimationFrame(drawArrows);
+  } catch (err) {
+    if (err.message === "401") {
+      el("login").classList.add("on");
+      stop();
+      return;
+    }
+    // Transient tunnel errors are expected between runs. Swallow.
+  }
+}
+
+function start() {
+  if (timer) clearInterval(timer);
+  tick();
+  timer = setInterval(tick, POLL_MS);
+}
+function stop() {
+  if (timer) { clearInterval(timer); timer = null; }
+}
+
+// ---------------------------------------------------------------------------
+// Login flow
+// ---------------------------------------------------------------------------
+el("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const value = el("pw").value;
+  el("pw").value = "";
+  el("login-err").textContent = "";
+  const r = await login(value);
+  if (r.ok) {
+    el("login").classList.remove("on");
+    start();
+  } else {
+    el("login-err").textContent = (r.status === 401)
+      ? "wrong passphrase"
+      : "login failed (" + r.status + ")";
+  }
+});
+
+el("pause-btn").addEventListener("click", () => {
+  paused = !paused;
+  el("pause-btn").textContent = paused ? "Resume" : "Pause";
+  el("status-badge").textContent = paused ? "PAUSED" : "LIVE";
+  el("status-badge").classList.toggle("paused", paused);
+  if (!paused) tick();
+});
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+buildFlow();
+window.addEventListener("resize", drawArrows);
+setTimeout(drawArrows, 50);
+
+if (token) start(); else el("login").classList.add("on");
+</script>
+</body>
+</html>
+"""
+_STATIC_PAGES = {"trace.html": _TRACE_HTML, "supervisor.html": _SUPERVISOR_HTML, "flow.html": _FLOW_HTML}
 
 # ---------------------------------------------------------------------------
 # section: api/schemas.py
@@ -1922,6 +2686,17 @@ def create_app() -> FastAPI:
         hazards waiting for citizen evidence (see _private_page_or_404)."""
         return _private_page_or_404(request, "supervisor.html")
 
+    @app.get("/flow", response_class=HTMLResponse)
+    @app.get("/flow/")
+    def flow_viewer(request: Request) -> HTMLResponse:
+        """Private visual agent-flow page: live node diagram of the pipeline
+        (sanitize -> signal_extractor -> profile_builder -> rag_retriever ->
+        decision -> approval_gate, with await_evidence branching from
+        decision). Polls /report/{hazard_id} every 2s and colours each node
+        by state. Same host-gate as /trace and /supervisor
+        (see _private_page_or_404)."""
+        return _private_page_or_404(request, "flow.html")
+
     @app.get("/health", response_model=HealthResponse)
     def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         agent_ok = _agent_ready(settings)
@@ -2163,6 +2938,7 @@ def create_app() -> FastAPI:
             f"<h1>RoadGuard <span class='live'>LIVE</span></h1>"
             f"<div class='nav-right'>"
             f"<a href='/roadguard/trace' class='np'>Live trace &rarr;</a>"
+            f"<a href='/roadguard/flow' class='np'>Agent flow &rarr;</a>"
             f"<a href='/roadguard/supervisor' class='np'>Supervisor inbox &rarr;</a>"
             f"<span class='k'>{NOW.strftime('%Y-%m-%d %H:%M UTC')} - last {window_hours}h <span id='refresh-dot'>&middot; auto-refresh 30s</span></span>"
             f"</div>"
