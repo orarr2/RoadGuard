@@ -12,4 +12,4 @@ email-validator>=2.2,<3
 openai>=1.52,<2
 langgraph>=0.2,<0.3
 langgraph-checkpoint-sqlite>=2.0,<3
-chromadb>=0.5,<0.6
+chromadb>=1.5,<2
