@@ -868,6 +868,16 @@ class Database:
             ).fetchall()
         return [self._row_to_hazard(r) for r in rows]
 
+    def list_recent_hazards(self, limit: int = 50) -> list[Hazard]:
+        """Fleet-wide recent hazards for the private operator pages. Used
+        by /flow and /trace when the request arrives on a tailnet host
+        past the Caddy basicauth gate."""
+        rows = self._conn.execute(
+            "SELECT * FROM hazards ORDER BY reported_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [self._row_to_hazard(r) for r in rows]
+
     def set_hazard_status(self, hazard_id: str, status: str) -> None:
         self._conn.execute(
             "UPDATE hazards SET status = ? WHERE id = ?",

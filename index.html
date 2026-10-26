@@ -519,14 +519,14 @@
       <form class="signin-form" id="signin-form-signin" autocomplete="off">
         <div class="signin-field">
           <label for="signin-username">Username or email</label>
-          <input type="text" id="signin-username" name="username" placeholder="orpsp8" required autocomplete="username" maxlength="200">
+          <input type="text" id="signin-username" name="signin-user-no-autofill" placeholder="your username" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" maxlength="200">
         </div>
         <div class="signin-field">
           <label class="row-split" for="signin-password">
             <span>Password</span>
             <button type="button" class="link-tiny" id="signin-pw-toggle" aria-pressed="false" aria-label="Show password">Show</button>
           </label>
-          <input type="password" id="signin-password" name="password" placeholder="Enter your password" required autocomplete="current-password">
+          <input type="password" id="signin-password" name="signin-pass-no-autofill" placeholder="Enter your password" required autocomplete="new-password">
         </div>
         <button class="btn-primary-xl" type="submit" id="signin-submit-btn">Sign in</button>
       </form>

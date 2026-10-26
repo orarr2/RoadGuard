@@ -846,14 +846,16 @@ footer {
 </main>
 
 
-<div id="login">
-  <form id="login-form" autocomplete="off">
-    <h3>RoadGuard passphrase</h3>
-    <input id="pw" type="password" autocomplete="current-password" placeholder="passphrase" enterkeyhint="go">
-    <button type="submit">Continue</button>
-    <div class="err" id="login-err"></div>
-  </form>
-</div>
+<!-- The passphrase modal was removed. /flow is reached through the Caddy
+     basicauth operator proxy on the tailnet, so by the time this page
+     renders the viewer has already passed one auth gate; a second one
+     only added friction (and was serving an API path Caddy returns 501
+     on). Public hosts never see this page because the FastAPI route
+     returns 404 for anything that is not a private host. -->
+<div id="login" hidden><form id="login-form" autocomplete="off" hidden>
+  <input id="pw" type="password" autocomplete="new-password" hidden>
+  <div class="err" id="login-err"></div>
+</form></div>
 
 <script>
 // ---------------------------------------------------------------------------
@@ -900,27 +902,12 @@ function apiPath(path) {
 }
 
 async function apiGet(path) {
-  const r = await fetch(apiPath(path), { headers: { "X-RoadGuard-Token": token } });
-  if (r.status === 401) {
-    token = "";
-    try { localStorage.removeItem("rg_token"); } catch(e) {}
-    throw new Error("401");
-  }
+  // Private operator pages trust Caddy's basicauth gate: no bearer token
+  // is attached. The server-side API endpoints that back the page
+  // (/hazards/history, /report/{id}) short-circuit on a private host.
+  const r = await fetch(apiPath(path));
   if (!r.ok) throw new Error(String(r.status));
   return r.json();
-}
-
-async function login(passphrase) {
-  const r = await fetch(apiPath("/auth/login"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ passphrase: passphrase }),
-  });
-  if (!r.ok) return { ok: false, status: r.status };
-  const data = await r.json();
-  token = data.token;
-  try { localStorage.setItem("rg_token", token); } catch(e) {}
-  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -1255,12 +1242,9 @@ async function tick() {
     updatePanel(hazard);
     requestAnimationFrame(drawArrows);
   } catch (err) {
-    if (err.message === "401") {
-      el("login").classList.add("on");
-      stop();
-      return;
-    }
-    // Transient tunnel errors are expected between runs. Swallow.
+    // Transient tunnel / 401 / 403 are expected during restarts.
+    // There is no passphrase modal to open, so just swallow and retry
+    // on the next tick.
   }
 }
 
@@ -1272,25 +1256,6 @@ function start() {
 function stop() {
   if (timer) { clearInterval(timer); timer = null; }
 }
-
-// ---------------------------------------------------------------------------
-// Login flow
-// ---------------------------------------------------------------------------
-el("login-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const value = el("pw").value;
-  el("pw").value = "";
-  el("login-err").textContent = "";
-  const r = await login(value);
-  if (r.ok) {
-    el("login").classList.remove("on");
-    start();
-  } else {
-    el("login-err").textContent = (r.status === 401)
-      ? "wrong passphrase"
-      : "login failed (" + r.status + ")";
-  }
-});
 
 el("pause-btn").addEventListener("click", () => {
   paused = !paused;
@@ -3448,8 +3413,10 @@ def create_app() -> FastAPI:
         operator_urls = []
         if is_admin:
             operator_urls = [
-                "https://netsec-agent.tail37ac21.ts.net/roadguard/trace",
                 "https://netsec-agent.tail37ac21.ts.net/digest/latest",
+                "https://netsec-agent.tail37ac21.ts.net/trace",
+                "https://netsec-agent.tail37ac21.ts.net/flow",
+                "https://netsec-agent.tail37ac21.ts.net/supervisor",
             ]
         return Me(
             sub=sub, email=user.get("email", ""), name=user.get("name", ""),
@@ -3831,12 +3798,20 @@ def create_app() -> FastAPI:
 
     @app.get("/hazards/history", response_model=HazardHistoryResponse)
     def hazards_history(
+        request: Request,
         limit: int = 100,
-        user: dict[str, Any] = Depends(get_current_user),
         db=Depends(get_db),
     ) -> HazardHistoryResponse:
+        """Owned hazards for the signed-in user; on a private operator host
+        (tailnet / loopback) returns the full recent fleet instead so the
+        /flow and /trace pages work without a JWT, since Caddy basicauth
+        has already gatekept access."""
         limit = max(1, min(limit, 500))
-        rows = db.list_user_hazards(_user_id_of(user), limit=limit)
+        if _is_private_host(request):
+            rows = db.list_recent_hazards(limit=limit)
+        else:
+            user = get_current_user(request)
+            rows = db.list_user_hazards(_user_id_of(user), limit=limit)
         return HazardHistoryResponse(
             items=[
                 HazardHistoryItem(
@@ -3909,12 +3884,17 @@ def create_app() -> FastAPI:
     @app.get("/report/{hazard_id}")
     def report_hazard(
         hazard_id: str,
-        user: dict[str, Any] = Depends(get_current_user),
+        request: Request,
         db=Depends(get_db),
     ) -> dict:
         """Full case report: metadata, verdict, per-agent trace, grounded
-        sources, decision timeline, token usage."""
-        r = db.get_hazard(hazard_id, user_id=_user_id_of(user))
+        sources, decision timeline, token usage. Private operator hosts
+        read any hazard; the citizen path still enforces ownership."""
+        if _is_private_host(request):
+            r = db.get_hazard(hazard_id)
+        else:
+            user = get_current_user(request)
+            r = db.get_hazard(hazard_id, user_id=_user_id_of(user))
         if r is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
