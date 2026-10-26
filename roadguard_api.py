@@ -478,18 +478,29 @@ _FLOW_HTML = r"""<!doctype html>
 <title>RoadGuard - Agent Flow (private)</title>
 <style>
 :root {
-  --bg: #0b1220;
-  --card: #121a2e;
-  --card2: #1a2340;
-  --border: #1f2a44;
-  --text: #e6ecff;
-  --dim: #8a95b3;
-  --idle: #4a5a7a;
-  --active: #fbbf24;
-  --ok: #22c55e;
-  --info: #38bdf8;
-  --warn: #f59e0b;
-  --bad: #ef4444;
+  /* Match the RoadGuard LIVE webapp (orarr2.github.io/RoadGuard) palette:
+     bright surfaces, sky-to-emerald accents, dark readable text. */
+  --bg: #ecfeff;         /* page background */
+  --card: #ffffff;        /* card surface */
+  --card2: #f0f9ff;       /* nested surface */
+  --border: rgba(14, 165, 233, 0.18);
+  --border-2: rgba(14, 165, 233, 0.32);
+  --text: #0b1a2b;
+  --text-mid: #334155;
+  --dim: #64748b;
+  --fade: #94a3b8;
+  --idle: #cbd5e1;
+  --active: #0ea5e9;      /* sky - the running color */
+  --ok: #22c55e;          /* emerald - done / standard */
+  --info: #0284c7;        /* darker sky - needs evidence */
+  --warn: #f59e0b;        /* amber - awaiting approval */
+  --bad: #ef4444;         /* red - urgent / human review */
+  --brand-1: #0ea5e9;
+  --brand-2: #06b6d4;
+  --brand-3: #22c55e;
+  --brand-grad: linear-gradient(120deg, #0ea5e9, #06b6d4 50%, #22c55e);
+  --shadow-sm: 0 2px 8px rgba(14, 165, 233, 0.08);
+  --shadow-md: 0 10px 30px rgba(14, 165, 233, 0.14);
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body {
@@ -501,30 +512,36 @@ html, body {
 }
 header {
   display: flex; align-items: center; gap: 14px;
-  padding: 12px 20px;
+  padding: 14px 24px;
   background: var(--card);
   border-bottom: 1px solid var(--border);
   position: sticky; top: 0; z-index: 10;
   flex-wrap: wrap;
+  box-shadow: var(--shadow-sm);
 }
-header h1 { margin: 0; font-size: 18px; color: var(--info); font-weight: 600; letter-spacing: 0.3px; }
+header h1 {
+  margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.01em;
+  background: var(--brand-grad); -webkit-background-clip: text;
+  background-clip: text; color: transparent;
+}
 .badge {
   padding: 4px 10px; border-radius: 999px; font-size: 11px;
   font-weight: 700; letter-spacing: 0.5px;
-  background: rgba(34,197,94,.18); color: var(--ok);
+  background: rgba(34,197,94,.14); color: var(--ok);
 }
-.badge.paused { background: rgba(239,68,68,.18); color: var(--bad); }
-#hz-display { color: var(--dim); font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
+.badge.paused { background: rgba(239,68,68,.12); color: var(--bad); }
+#hz-display { color: var(--dim); font-family: "JetBrains Mono", ui-monospace, Consolas, monospace; font-size: 12px; }
 .header-spacer { flex: 1; }
 button {
   background: var(--card2); color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 8px; padding: 8px 14px;
-  font-size: 13px; cursor: pointer;
+  border: 1px solid var(--border-2);
+  border-radius: 8px; padding: 8px 16px;
+  font-size: 13px; font-weight: 500; cursor: pointer;
   font-family: inherit;
   min-height: 38px;
+  transition: all 0.15s;
 }
-button:hover { background: var(--border); }
+button:hover { background: var(--brand-1); color: #ffffff; border-color: var(--brand-1); }
 button:active { transform: scale(0.97); }
 main {
   display: grid;
@@ -540,11 +557,12 @@ main {
 .flow-container {
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 18px 18px 24px 18px;
+  border-radius: 14px;
+  padding: 20px 18px 26px 18px;
   overflow-x: auto;
   position: relative;
-  min-height: 260px;
+  min-height: 280px;
+  box-shadow: var(--shadow-md);
 }
 .flow {
   position: relative;
@@ -562,26 +580,29 @@ main {
 }
 .node {
   grid-row: 1;
-  background: var(--card2);
+  background: var(--card);
   border: 2px solid var(--idle);
-  border-radius: 10px;
-  padding: 12px;
+  border-radius: 12px;
+  padding: 14px;
   position: relative;
-  transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.15s ease;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.15s ease, background 0.3s ease;
   cursor: pointer;
   z-index: 2;
+  box-shadow: var(--shadow-sm);
 }
-.node:hover { transform: translateY(-2px); }
+.node:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(14,165,233,0.12); }
 .node.state-active {
   border-color: var(--active);
-  box-shadow: 0 0 24px rgba(251,191,36,0.35);
+  background: rgba(14, 165, 233, 0.06);
+  box-shadow: 0 0 24px rgba(14,165,233,0.35);
   animation: pulse 1.6s ease-in-out infinite;
 }
-.node.state-done { border-color: var(--ok); }
-.node.state-info { border-color: var(--info); }
-.node.state-warn { border-color: var(--warn); }
+.node.state-done { border-color: var(--ok); background: rgba(34, 197, 94, 0.04); }
+.node.state-info { border-color: var(--info); background: rgba(2, 132, 199, 0.04); }
+.node.state-warn { border-color: var(--warn); background: rgba(245, 158, 11, 0.04); }
 .node.state-bad {
   border-color: var(--bad);
+  background: rgba(239, 68, 68, 0.04);
   box-shadow: 0 0 24px rgba(239,68,68,0.3);
 }
 .node .node-head {
@@ -604,8 +625,8 @@ main {
   min-height: 28px;
 }
 .node .node-caption {
-  font-family: Consolas, "Cascadia Mono", monospace; font-size: 11px;
-  color: var(--text); margin-top: 6px;
+  font-family: "JetBrains Mono", ui-monospace, Consolas, monospace; font-size: 11px;
+  color: var(--text-mid); margin-top: 6px;
   padding-top: 6px;
   border-top: 1px dashed var(--border);
   min-height: 15px;
@@ -618,38 +639,39 @@ main {
 }
 .node[data-key="await_evidence"].visible { opacity: 1; border-style: solid; }
 @keyframes pulse {
-  0%, 100% { box-shadow: 0 0 20px rgba(251,191,36,0.35); }
-  50% { box-shadow: 0 0 34px rgba(251,191,36,0.65); }
+  0%, 100% { box-shadow: 0 0 20px rgba(14,165,233,0.35); }
+  50% { box-shadow: 0 0 34px rgba(14,165,233,0.6); }
 }
 @keyframes dot-blink { to { visibility: hidden; } }
 .panel {
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 16px;
+  border-radius: 14px;
+  padding: 18px;
+  box-shadow: var(--shadow-md);
 }
 .panel h2 {
-  margin: 0 0 12px 0; font-size: 12px; color: var(--dim);
-  letter-spacing: 1px; text-transform: uppercase; font-weight: 600;
+  margin: 0 0 12px 0; font-size: 11px; color: var(--dim);
+  letter-spacing: 1px; text-transform: uppercase; font-weight: 700;
 }
 .panel .kv {
   display: grid; grid-template-columns: 90px 1fr;
-  gap: 6px 10px; font-size: 12px;
+  gap: 7px 10px; font-size: 12px;
 }
-.panel .kv .k { color: var(--dim); }
+.panel .kv .k { color: var(--dim); font-weight: 500; }
 .panel .kv .v {
-  color: var(--text); font-family: Consolas, "Cascadia Mono", monospace;
+  color: var(--text); font-family: "JetBrains Mono", ui-monospace, Consolas, monospace;
   word-break: break-all;
 }
 .verdict-box {
-  margin-top: 14px; padding: 12px; border-radius: 8px;
-  background: var(--bg);
+  margin-top: 16px; padding: 14px; border-radius: 10px;
+  background: var(--card2);
   border-left: 4px solid var(--idle);
 }
-.verdict-box.urgent, .verdict-box.human_review { border-left-color: var(--bad); }
-.verdict-box.standard { border-left-color: var(--ok); }
-.verdict-box.needs_more_evidence { border-left-color: var(--info); }
-.verdict-box.known_image { border-left-color: var(--info); }
+.verdict-box.urgent, .verdict-box.human_review { border-left-color: var(--bad); background: rgba(239,68,68,0.06); }
+.verdict-box.standard { border-left-color: var(--ok); background: rgba(34,197,94,0.06); }
+.verdict-box.needs_more_evidence { border-left-color: var(--info); background: rgba(2,132,199,0.06); }
+.verdict-box.known_image { border-left-color: var(--info); background: rgba(2,132,199,0.06); }
 .verdict-box .action {
   font-weight: 700; font-size: 14px; letter-spacing: 0.5px;
   text-transform: uppercase;
@@ -658,16 +680,16 @@ main {
 .verdict-box.standard .action { color: var(--ok); }
 .verdict-box.needs_more_evidence .action, .verdict-box.known_image .action { color: var(--info); }
 .verdict-box .rationale {
-  margin-top: 8px; color: var(--dim); font-size: 11px; line-height: 1.45;
+  margin-top: 8px; color: var(--text-mid); font-size: 11px; line-height: 1.5;
   max-height: 100px; overflow-y: auto;
 }
 .live-line {
-  margin-top: 14px;
+  margin-top: 16px;
   padding: 10px 12px;
-  background: var(--bg);
+  background: var(--card2);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  font-family: Consolas, "Cascadia Mono", monospace; font-size: 11px;
+  border-radius: 10px;
+  font-family: "JetBrains Mono", ui-monospace, Consolas, monospace; font-size: 11px;
   color: var(--text);
   min-height: 44px;
   max-height: 120px; overflow-y: auto;
@@ -681,46 +703,37 @@ footer {
   max-width: 1600px;
   margin: 0 auto;
 }
-.recent {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 16px;
+/* SNA-style flow enhancements: parallel-path edges + animated flow pulse.
+   Default edges are the solid pipeline (sanitize - signal - supervisor -
+   profile - rag - decision - approval). Parallel marks the profile/rag
+   lane that can run concurrently with signal in some verdicts. Loopback
+   is the await-evidence return to sanitize when the decision asks for
+   more photos. The .active class drives the animated dash so the viewer
+   can SEE which edge the process is traversing right now. */
+.arrows path, .arrows line { fill: none; stroke-linecap: round; }
+.edge-main { stroke: var(--border-2); stroke-width: 2; }
+.edge-parallel { stroke: var(--brand-2); stroke-width: 2; stroke-dasharray: 6 4; opacity: 0.65; }
+.edge-loopback { stroke: var(--warn); stroke-width: 2; stroke-dasharray: 4 6; opacity: 0.8; }
+.edge-main.active, .edge-parallel.active, .edge-loopback.active {
+  stroke: var(--active); stroke-width: 3; opacity: 1;
+  stroke-dasharray: 12 6;
+  animation: flow-dash 1.1s linear infinite;
+  filter: drop-shadow(0 0 6px rgba(14,165,233,0.55));
 }
-.recent h2 {
-  margin: 0 0 12px 0; font-size: 12px; color: var(--dim);
-  letter-spacing: 1px; text-transform: uppercase; font-weight: 600;
+@keyframes flow-dash {
+  to { stroke-dashoffset: -36; }
 }
-.recent-list { display: flex; flex-wrap: wrap; gap: 8px; }
-.recent-item {
-  padding: 8px 12px;
-  background: var(--card2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 12px;
-  cursor: pointer;
-  font-family: Consolas, "Cascadia Mono", monospace;
-  transition: background 0.15s, border-color 0.15s;
-  display: flex; align-items: center; gap: 8px;
+.edge-label {
+  font-family: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  font-size: 10px; fill: var(--dim);
+  pointer-events: none;
 }
-.recent-item:hover { background: var(--border); }
-.recent-item.current {
-  border-color: var(--info);
-  background: rgba(56,189,248,0.1);
-}
-.recent-item .ri-action {
-  font-weight: 700;
-  padding: 2px 6px; border-radius: 4px; font-size: 10px;
-  background: var(--idle); color: var(--bg);
-  text-transform: uppercase; letter-spacing: 0.3px;
-}
-.recent-item .ri-action.urgent, .recent-item .ri-action.human_review { background: var(--bad); color: #fff; }
-.recent-item .ri-action.standard { background: var(--ok); color: var(--bg); }
-.recent-item .ri-action.needs_more_evidence { background: var(--info); color: var(--bg); }
-.recent-item .ri-action.known_image { background: var(--info); color: var(--bg); }
+.edge-label.active { fill: var(--active); font-weight: 700; }
+
 #login {
   position: fixed; inset: 0;
-  background: rgba(11,18,32,0.95);
+  background: rgba(14, 165, 233, 0.14);
+  backdrop-filter: blur(8px);
   display: none; align-items: center; justify-content: center;
   z-index: 100; padding: 20px;
 }
@@ -728,24 +741,30 @@ footer {
 #login form {
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 14px;
   padding: 28px;
   min-width: 280px;
   max-width: 360px;
   width: 100%;
+  box-shadow: var(--shadow-md);
 }
-#login h3 { margin: 0 0 14px 0; font-size: 15px; color: var(--info); }
+#login h3 {
+  margin: 0 0 14px 0; font-size: 16px; font-weight: 700;
+  background: var(--brand-grad); -webkit-background-clip: text;
+  background-clip: text; color: transparent;
+}
 #login input[type="password"] {
   width: 100%; padding: 12px;
-  background: var(--bg); color: var(--text);
-  border: 1px solid var(--border);
+  background: var(--card2); color: var(--text);
+  border: 1px solid var(--border-2);
   border-radius: 8px; font-size: 15px;
   font-family: inherit;
 }
 #login button {
   width: 100%; margin-top: 10px;
-  background: var(--info); color: #061020;
+  background: var(--brand-grad); color: #ffffff;
   border: 0; padding: 12px; font-weight: 700;
+  border-radius: 8px;
   min-height: 44px;
 }
 #login .err {
@@ -765,9 +784,15 @@ footer {
 }
 .legend .lg { display: inline-flex; align-items: center; gap: 6px; }
 .legend .lg-dot {
-  width: 8px; height: 8px; border-radius: 50%;
+  width: 10px; height: 10px; border-radius: 50%;
   display: inline-block;
+  box-shadow: 0 0 0 1px rgba(14,165,233,0.15);
 }
+.legend .lg-line {
+  width: 22px; height: 2px; display: inline-block;
+}
+.legend .lg-line.parallel { border-top: 2px dashed var(--brand-2); background: transparent; height: 0; }
+.legend .lg-line.loopback { border-top: 2px dashed var(--warn); background: transparent; height: 0; }
 </style>
 </head>
 <body>
@@ -794,6 +819,9 @@ footer {
       <span class="lg"><span class="lg-dot" style="background:var(--info)"></span>needs evidence</span>
       <span class="lg"><span class="lg-dot" style="background:var(--warn)"></span>awaiting approval</span>
       <span class="lg"><span class="lg-dot" style="background:var(--bad)"></span>urgent / human review</span>
+      <span class="lg"><span class="lg-line" style="background:var(--border-2)"></span>sequential edge</span>
+      <span class="lg"><span class="lg-line parallel"></span>parallel (profile + rag)</span>
+      <span class="lg"><span class="lg-line loopback"></span>loopback (await evidence)</span>
     </div>
   </div>
 
@@ -817,14 +845,6 @@ footer {
   </aside>
 </main>
 
-<footer>
-  <div class="recent">
-    <h2>Recent hazards (click to pin)</h2>
-    <div class="recent-list" id="recent-list">
-      <span class="empty-state" style="padding:10px">No hazards yet.</span>
-    </div>
-  </div>
-</footer>
 
 <div id="login">
   <form id="login-form" autocomplete="off">
@@ -927,6 +947,25 @@ function buildFlow() {
   }
 }
 
+// SNA-style edge map. Each edge declares its topology (which nodes it
+// connects) and its kind (main / parallel / loopback). The "activeWhen"
+// predicate decides, given the current nodeState, whether the edge is
+// the one the process is traversing RIGHT NOW: so the viewer sees a
+// pulsing cyan arrow walk the pipeline, dashed turquoise lines mark the
+// profile+rag parallel band, and a dashed amber arrow curls back from
+// decision to sanitize when the Decision agent asks for more evidence.
+const EDGES = [
+  { from: "sanitize",         to: "signal_extractor", kind: "main" },
+  { from: "signal_extractor", to: "profile_builder",  kind: "main" },
+  { from: "profile_builder",  to: "rag_retriever",    kind: "parallel", label: "parallel" },
+  { from: "signal_extractor", to: "rag_retriever",    kind: "parallel" },
+  { from: "profile_builder",  to: "decision",         kind: "main" },
+  { from: "rag_retriever",    to: "decision",         kind: "main" },
+  { from: "decision",         to: "approval_gate",    kind: "main" },
+  { from: "decision",         to: "await_evidence",   kind: "main", label: "needs_more_evidence" },
+  { from: "await_evidence",   to: "sanitize",         kind: "loopback", label: "citizen reply" },
+];
+
 function drawArrows() {
   const svg = el("arrows");
   const flow = el("flow");
@@ -947,47 +986,110 @@ function drawArrows() {
       right: r.right - flowRect.left + flow.scrollLeft,
       top: r.top - flowRect.top,
       bottom: r.bottom - flowRect.top,
-      cy: r.top - flowRect.top + r.height / 2,
       cx: r.left - flowRect.left + flow.scrollLeft + r.width / 2,
+      cy: r.top - flowRect.top + r.height / 2,
+      w: r.width, h: r.height,
     };
   }
 
-  function drawArrow(from, to, dashed) {
-    const a = nodeBox(from), b = nodeBox(to);
-    if (!a || !b) return;
-    let x1, y1, x2, y2;
-    if (from === "decision" && to === "await_evidence") {
-      x1 = a.cx; y1 = a.bottom; x2 = b.cx; y2 = b.top;
-    } else {
-      x1 = a.right; y1 = a.cy; x2 = b.left; y2 = b.cy;
+  // Build a quick index: {from->to -> state} from the current node states.
+  // The edge is "active" if its target is the currently-running node or
+  // its source just became done but the target has not yet started.
+  const ns = latestNodeState || {};
+  function isActive(edge) {
+    const toSt = (ns[edge.to] || {}).state;
+    const fromSt = (ns[edge.from] || {}).state;
+    if (toSt === "active") return true;
+    if (edge.kind === "loopback") {
+      // loopback fires when decision verdict is needs_more_evidence
+      return (ns.decision && ns.decision.caption || "").indexOf("needs_more_evidence") >= 0
+          && (ns.await_evidence && ns.await_evidence.state) === "info";
     }
-    const line = svgNode("line", {
-      x1: x1, y1: y1, x2: x2, y2: y2,
-      stroke: "#1f2a44", "stroke-width": "2",
-      "stroke-dasharray": dashed ? "3 5" : "6 6",
-      "data-from": from, "data-to": to,
-    });
-    svg.appendChild(line);
-    // Arrowhead triangle at the "to" end
+    return false;
+  }
+
+  function arrowHead(x1, y1, x2, y2, cls) {
     const dx = x2 - x1, dy = y2 - y1;
     const len = Math.hypot(dx, dy) || 1;
     const ux = dx / len, uy = dy / len;
-    const headLen = 8, headW = 5;
+    const headLen = 10, headW = 6;
     const bx = x2 - ux * headLen, by = y2 - uy * headLen;
     const px = -uy, py = ux;
     const p1x = bx + px * headW, p1y = by + py * headW;
     const p2x = bx - px * headW, p2y = by - py * headW;
-    const tri = svgNode("polygon", {
+    return svgNode("polygon", {
       points: x2 + "," + y2 + " " + p1x + "," + p1y + " " + p2x + "," + p2y,
-      fill: "#1f2a44", "data-from": from, "data-to": to,
+      class: "arrowhead " + cls,
+      fill: "currentColor",
     });
-    svg.appendChild(tri);
   }
 
-  for (let i = 0; i < MAIN_ORDER.length - 1; i++) {
-    drawArrow(MAIN_ORDER[i], MAIN_ORDER[i+1], false);
+  for (const edge of EDGES) {
+    const a = nodeBox(edge.from), b = nodeBox(edge.to);
+    if (!a || !b) continue;
+    const active = isActive(edge);
+    const cls = ["edge-" + (edge.kind || "main"), active ? "active" : ""].join(" ").trim();
+
+    let x1, y1, x2, y2;
+    let pathD = null;
+
+    if (edge.kind === "loopback") {
+      // Draw a wide arc from await_evidence UP and LEFT back to sanitize.
+      x1 = a.cx; y1 = a.top;
+      x2 = b.cx; y2 = b.bottom;
+      const archY = Math.max(10, Math.min(a.top, b.bottom) - Math.max(80, a.h * 1.4));
+      pathD = "M " + x1 + " " + y1
+            + " C " + x1 + " " + archY + ", " + x2 + " " + archY + ", " + x2 + " " + y2;
+    } else if (edge.kind === "parallel" && edge.from === "profile_builder" && edge.to === "rag_retriever") {
+      // Vertical parallel band on the same stage - keep it short + straight.
+      x1 = a.right; y1 = a.cy;
+      x2 = b.left;  y2 = b.cy;
+    } else if (edge.from === "signal_extractor" && edge.to === "rag_retriever") {
+      // Bypass arrow that skips profile_builder - gentle curve under it.
+      x1 = a.right; y1 = a.bottom - 8;
+      x2 = b.left;  y2 = b.bottom - 8;
+      const midX = (x1 + x2) / 2;
+      const midY = Math.max(y1, y2) + 36;
+      pathD = "M " + x1 + " " + y1
+            + " Q " + midX + " " + midY + " " + x2 + " " + y2;
+    } else if (edge.from === "decision" && edge.to === "await_evidence") {
+      x1 = a.cx; y1 = a.bottom;
+      x2 = b.cx; y2 = b.top;
+    } else {
+      x1 = a.right; y1 = a.cy;
+      x2 = b.left;  y2 = b.cy;
+    }
+
+    let shape;
+    if (pathD) {
+      shape = svgNode("path", { d: pathD, class: cls });
+    } else {
+      shape = svgNode("line", { x1: x1, y1: y1, x2: x2, y2: y2, class: cls });
+    }
+    shape.setAttribute("data-from", edge.from);
+    shape.setAttribute("data-to", edge.to);
+    svg.appendChild(shape);
+
+    const head = arrowHead(x1, y1, x2, y2, cls);
+    // Color the arrowhead to match the edge class via currentColor.
+    const color = active ? "var(--active)"
+                : edge.kind === "parallel" ? "var(--brand-2)"
+                : edge.kind === "loopback" ? "var(--warn)"
+                : "var(--border-2)";
+    head.setAttribute("style", "color:" + color);
+    svg.appendChild(head);
+
+    if (edge.label) {
+      const lx = (x1 + x2) / 2;
+      const ly = (y1 + y2) / 2 - 6;
+      const txt = svgNode("text", {
+        x: lx, y: ly, class: "edge-label " + (active ? "active" : ""),
+        "text-anchor": "middle",
+      });
+      txt.textContent = edge.label;
+      svg.appendChild(txt);
+    }
   }
-  drawArrow("decision", "await_evidence", true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,55 +1227,32 @@ function updatePanel(hazard) {
   el("hz-display").textContent = hazard.hazard_id ? "@ " + hazard.hazard_id : "";
 }
 
-function updateRecent(items, currentId) {
-  const list = el("recent-list");
-  if (!items || !items.length) {
-    list.innerHTML = '<span class="empty-state" style="padding:10px">No hazards yet.</span>';
-    return;
-  }
-  list.innerHTML = "";
-  for (const it of items.slice(0, 10)) {
-    const row = create("div", "recent-item");
-    if (it.hazard_id === currentId) row.classList.add("current");
-    row.dataset.id = it.hazard_id;
-    row.appendChild(create("span", null, it.hazard_id || ""));
-    const action = it.agent_decision || it.action || "pending";
-    const chip = create("span", "ri-action " + String(action).replace(/[^a-z_]/g, ""), action);
-    row.appendChild(chip);
-    row.addEventListener("click", () => {
-      pinnedId = (pinnedId === it.hazard_id) ? null : it.hazard_id;
-      tick();
-    });
-    list.appendChild(row);
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
-let timer = null, paused = false, pinnedId = null;
+let timer = null, paused = false, latestNodeState = null;
 
 async function tick() {
   if (paused) return;
   try {
-    const history = await apiGet("/hazards/history?limit=10");
+    const history = await apiGet("/hazards/history?limit=1");
     const items = history.items || [];
-    const targetId = pinnedId || (items[0] ? items[0].hazard_id : null);
+    const targetId = items[0] ? items[0].hazard_id : null;
     if (!targetId) {
       updatePanel(null);
-      updateRecent([], null);
       el("empty-state").style.display = "block";
       el("flow").style.display = "none";
-      applyNodeStates(interpretTrace([], null));
+      latestNodeState = interpretTrace([], null);
+      applyNodeStates(latestNodeState);
+      requestAnimationFrame(drawArrows);
       return;
     }
     el("empty-state").style.display = "none";
     el("flow").style.display = "grid";
     const hazard = await apiGet("/report/" + encodeURIComponent(targetId));
-    const nodeState = interpretTrace(hazard.trace, hazard);
-    applyNodeStates(nodeState);
+    latestNodeState = interpretTrace(hazard.trace, hazard);
+    applyNodeStates(latestNodeState);
     updatePanel(hazard);
-    updateRecent(items, targetId);
     requestAnimationFrame(drawArrows);
   } catch (err) {
     if (err.message === "401") {
