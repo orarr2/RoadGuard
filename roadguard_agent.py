@@ -4261,17 +4261,29 @@ class RagClient:
                 settings=ChromaSettings(anonymized_telemetry=False),
             )
             # Use the built-in ONNX MiniLM so we do not need sentence-transformers
-            # (which pulls torch, far too heavy for the VM).
+            # (which pulls torch, far too heavy for the VM). Same model as what
+            # Benny's corpus was embedded with - different runtime, compatible
+            # vectors.
             from chromadb.utils.embedding_functions import (
                 ONNXMiniLM_L6_V2,
             )
 
             self._embedding_fn = ONNXMiniLM_L6_V2()
-            self._collection = client.get_or_create_collection(
-                name=_collection_name(),
-                embedding_function=self._embedding_fn,
-                metadata={"description": "RoadGuard repair-standards corpus"},
-            )
+            # Prefer opening an existing collection WITHOUT attaching our
+            # embedding function: chromadb >= 1.0 refuses to let you override
+            # the embedding function that was persisted at creation time (e.g.
+            # Benny's `charter_grounded_corpus` was created with
+            # sentence-transformers' default). Query-time we pass pre-computed
+            # vectors (see `_query_where`), so we never need the collection's
+            # own embedder.
+            try:
+                self._collection = client.get_collection(name=_collection_name())
+            except Exception:
+                self._collection = client.get_or_create_collection(
+                    name=_collection_name(),
+                    embedding_function=self._embedding_fn,
+                    metadata={"description": "RoadGuard repair-standards corpus"},
+                )
         except Exception as exc:
             LOGGER.info("chromadb_unavailable: %s", exc)
             self._collection = None
@@ -4344,8 +4356,26 @@ class RagClient:
 
     def _query_where(self, query_text: str, where: dict | None, k: int) -> list[dict]:
         try:
+            # Always embed the query ourselves (ONNX MiniLM, same model as
+            # the one Benny's corpus was embedded with). Passing
+            # `query_embeddings` instead of `query_texts` means we are
+            # independent of whatever embedding function was persisted on the
+            # collection, so any corpus the operator seeds works, including
+            # Benny's charter_grounded_corpus which has its own embedder.
+            if self._embedding_fn is None:
+                return []
+            embedded = self._embedding_fn([query_text])
+            # chromadb 1.5.x refuses `list(ndarray[0])` (which produces a list
+            # of numpy scalars) and refuses a bare numpy row. The accepted
+            # shape is a list of plain python floats, OR a 2D numpy array.
+            # Coerce once, defensively.
+            try:
+                import numpy as _np
+                query_vec = _np.asarray(embedded[0], dtype="float32").tolist()
+            except Exception:
+                query_vec = [float(x) for x in embedded[0]]
             query_kwargs: dict[str, Any] = {
-                "query_texts": [query_text],
+                "query_embeddings": [query_vec],
                 "n_results": max(1, min(k, 5)),
             }
             # `where=None` means "no metadata filter" - a pure semantic
