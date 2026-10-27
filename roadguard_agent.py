@@ -5746,11 +5746,30 @@ def _detector_prediction_from_state(state: dict | None) -> tuple[str | None, flo
     return cls_s, conf_f
 
 
-def _known_image_decision(match: dict, state: dict | None = None) -> dict:
-    """The verdict for a catalogued photo. A clean match short-circuits to
-    ``known_image``; a catalog-vs-detector contradiction routes to
-    ``human_review`` instead - the catalog label alone cannot be trusted
-    when the current detector sees a different class at real confidence.
+def _known_image_decision(match: dict, state: dict | None = None) -> dict | None:
+    """The verdict for a catalogued photo.
+
+    Three branches, decided by severity * catalog agreement:
+
+    1. catalog-vs-detector contradiction (labels disagree, detector confidence
+       >= threshold) → ``human_review``. The catalog label alone cannot be
+       trusted when the live detector sees a different class.
+
+    2. clean match + current severity in {minor, moderate} → ``known_image``
+       priority=0. The citizen uploaded an image we have already triaged;
+       sealing it as a known case is cheap and correct.
+
+    3. clean match + current severity in {severe, urgent}: return ``None``,
+       which tells the caller "I recognise this image but the current frame
+       is severe enough that a priority-0 short-circuit is unsafe. Keep
+       running the regular rule tree so the Decision agent still gets a say,
+       and let it cite the catalog as a supporting source instead of as the
+       sole verdict". This is the fix for the P0 observed in the 27.10.2026
+       batch: multiple D20 severe images closed as known_image priority=0.
+
+    cited_sources are populated with the catalog pic_id in branches 1-2 so
+    the UI shows WHICH catalog entry drove the verdict; the previous version
+    returned [] and the operator could not tell.
     """
     summary = _dataset_lookup_summary(match)
     pred = summary.get("model_prediction")
@@ -5761,6 +5780,7 @@ def _known_image_decision(match: dict, state: dict | None = None) -> dict:
         f"({summary.get('n_labels')} boxes); recorded prediction "
         f"{pred or 'none recorded'}; match by {summary.get('match')}"
     )
+    catalog_cite = [f"catalog:pic_id={summary.get('pic_id')}"]
     catalog_classes = _catalog_classes_set(summary.get("classes") or "")
     detector_class, detector_confidence = _detector_prediction_from_state(state)
     contradicted = (
@@ -5781,14 +5801,29 @@ def _known_image_decision(match: dict, state: dict | None = None) -> dict:
             "action": "human_review",
             "rationale": rationale[:500],
             "priority": 50,
-            "cited_sources": [],
+            "cited_sources": catalog_cite,
             "missing_evidence": [],
+            "floor_applied": True,
+            "floor_reason": "known_image_catalog_detector_contradiction",
+            "floor_trigger": (
+                f"catalog_classes={sorted(catalog_classes)} vs "
+                f"detector_class={detector_class} at conf={detector_confidence:.2f}"
+            ),
         }
+    severity = ""
+    if state:
+        profile = state.get("hazard_profile") or {}
+        severity = str(profile.get("severity_signal") or "").lower()
+    if severity in {"severe", "urgent"}:
+        # Signal to _decide_rule_based: do not short-circuit. The rule tree
+        # will decide, and the Decision agent will cite the catalog pic_id
+        # as a supporting source.
+        return None
     return {
         "action": "known_image",
         "rationale": base_rationale[:500],
         "priority": 0,
-        "cited_sources": [],
+        "cited_sources": catalog_cite,
         "missing_evidence": [],
     }
 
@@ -7512,6 +7547,26 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
         hazard_class=hazard_class, road_type=road_type, k=3
     )
 
+    # Trace enrichment (27.10.2026): the batch log hid WHAT the RAG actually
+    # retrieved - only ids and findings were printed, so an auditor could
+    # not tell whether the Decision agent cited passages that were really
+    # on-topic. Capture the raw passage text, the per-chunk relevance score
+    # (ChromaDB returns a cosine distance; smaller is better) and the query
+    # the tool was called with. The /flow and /trace pages render these
+    # verbatim without further truncation.
+    rag_query_str = _semantic_rag_query(hazard_class, road_type)
+    passage_previews = []
+    for p in result["procedures"]:
+        text = str(p.get("passage") or "").strip().replace("\n", " ")
+        if len(text) > 160:
+            text = text[:157] + "..."
+        passage_previews.append({
+            "id": (p.get("article_ids") or ["?"])[0],
+            "distance": p.get("distance"),
+            "score": p.get("score"),
+            "preview": text,
+        })
+
     procedures_safe = []
     for p in result["procedures"]:
         quarantined = _quarantine_extract(
@@ -7576,6 +7631,12 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
             "tool_result_ids": result["tool_result_ids"],
             "key_findings": findings,
             "llm_used": in_tok > 0,
+            # 27.10.2026 trace enrichment: expose what WAS asked and what
+            # came back, so the operator can audit retrieval without a DB
+            # dump. passage_previews are already truncated per-chunk.
+            "rag_query": rag_query_str,
+            "rag_filter": {"hazard_class": hazard_class, "road_type": road_type, "k": 3},
+            "passage_previews": passage_previews,
         },
     }
     _llm_calls = end_llm_log()
@@ -7707,8 +7768,16 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
     fails grounding or the budget guard fires mid-reasoning.
     """
     match = state.get("dataset_match")
+    image_match_cite: list[str] = []
     if match:
-        return _known_image_decision(match, state)
+        km = _known_image_decision(match, state)
+        if km is not None:
+            return km
+        # severe severity on a known image: keep running the rule tree,
+        # but record the catalog entry so the final Decision rationale and
+        # the cited_sources show that the system also recognised the frame.
+        _summary = _dataset_lookup_summary(match)
+        image_match_cite = [f"catalog:pic_id={_summary.get('pic_id')}"]
     profile = state.get("hazard_profile") or {}
     md = state.get("metadata") or {}
     tool_result_ids = state.get("tool_result_ids") or []
@@ -8037,6 +8106,27 @@ def _run_decision_tool(name: str, args: dict, state: RoadGuardState, tools_run: 
             if result.get("ok"):
                 tools_run[name] = result
             return result
+        # 27.10.2026 tool registry fix: check_system_health was listed in
+        # the ReAct toolset and the model called it 6+ times in the batch,
+        # but no dispatcher branch existed, so every call fell through to
+        # the "not executable here" error. Wire it to the actual probe.
+        if name == "check_system_health":
+            result = fn()
+            return {"ok": True, **result}
+        # Read-only diagnostic tools the model may call but we do not
+        # expose a real implementation yet. Return a structured "stub"
+        # response rather than a hard failure so the Decision agent can
+        # keep reasoning and does not retry the same tool forever.
+        if name in ("check_recent_cluster", "rank_similarity_to_catalog"):
+            return {
+                "ok": True,
+                "stub": True,
+                "note": (
+                    f"{name} is not wired to a real backend yet; treat as "
+                    "unknown and fall back to the hazard profile + RAG "
+                    "passages when deciding."
+                ),
+            }
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     return {"ok": False, "error": f"tool {name!r} is not executable here"}
@@ -8119,6 +8209,11 @@ def _llm_decide_react(
             if budget is not None and not cap_hit:
                 fired, _reason = budget.check_tool_hop("decision")
                 cap_hit = cap_hit or fired
+            # 27.10.2026 trace enrichment: time every tool call so a failed
+            # one shows "duration: 0.02s" (registry miss) vs "duration:
+            # 5.4s" (slow upstream). Captured whether the call succeeded or
+            # was blocked by the budget guard.
+            _t0 = time.monotonic()
             if cap_hit:
                 result = {
                     "ok": False,
@@ -8134,18 +8229,33 @@ def _llm_decide_react(
                 hops += 1
                 if budget is not None:
                     budget.tick_tool_hop("decision")
-            calls.append({"tool": name, "ok": bool(result.get("ok", False)), "executed": not cap_hit and args is not None})
+            duration_s = round(time.monotonic() - _t0, 4)
+            calls.append({
+                "tool": name,
+                "ok": bool(result.get("ok", False)),
+                "executed": not cap_hit and args is not None,
+                "args": args if args is not None else raw_args,
+                "error": result.get("error") if not result.get("ok") else None,
+                "duration_s": duration_s,
+            })
             step = {
                 "iter": state.get("iterations", 0) + 1,
                 "speaker": "decision",
                 "kind": "react_step",
                 "content": {
                     "hop": len(calls),
-                    "thought": (msg.content or "").strip()[:300],
+                    # 27.10.2026: reasoning text was being clipped at 300
+                    # chars and often arrived as "step 1: (no reasoning
+                    # text)" - the model wrote none, now we at least do not
+                    # truncate those that do exist. Formatter prints up to
+                    # 500 chars; the content keeps the raw text (up to 800).
+                    "thought": (msg.content or "").strip()[:800],
                     "tool": name,
-                    "args": _short_json(args if args is not None else raw_args, 160),
+                    "args": args if args is not None else raw_args,
                     "ok": bool(result.get("ok", False)),
-                    "result": _short_json(result, 220),
+                    "result": result,
+                    "error": result.get("error") if not result.get("ok") else None,
+                    "duration_s": duration_s,
                 },
             }
             steps.append(step)
@@ -8470,6 +8580,22 @@ def decision_node(state: RoadGuardState) -> dict:
             k: overridden_llm_verdict[k]
             for k in ("action", "rationale", "priority", "cited_sources")
         }
+        # 27.10.2026 trace enrichment: name the floor and its trigger so the
+        # /flow and /trace pages tell the operator WHICH rule overrode the
+        # model, not just that one did. _known_image_decision already fills
+        # these on its contradiction branch; the three generic floor paths
+        # (known_image / human_review / urgent) fall back to a slug keyed
+        # off the rule_hint action.
+        if not trace_content.get("floor_reason"):
+            trace_content["floor_reason"] = (
+                decision.get("floor_reason")
+                or f"deterministic_floor_{rule_hint.get('action', 'unknown')}"
+            )
+        if not trace_content.get("floor_trigger"):
+            trace_content["floor_trigger"] = (
+                decision.get("floor_trigger")
+                or _short(rule_hint.get("rationale") or "", 240)
+            )
     if cap_applied:
         trace_content["evidence_cap_applied"] = True
     if evidence_request:
@@ -9071,19 +9197,62 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             f"{lbl} query_repair_standards -> {c.get('n_procedures', len(ids))} passages  "
             f"coverage={c.get('coverage')}  llm_used={c.get('llm_used')}"
         )
+        # 27.10.2026 trace enrichment: show what was actually asked and what
+        # came back. _short limits grew to 400+ so a passage preview up to
+        # 160 chars prints in one line, not truncated by the formatter.
+        rag_q = c.get("rag_query")
+        rag_f = c.get("rag_filter") or {}
+        if rag_q:
+            out.append(f"{_INDENT}rag_query: \"{_short(rag_q, 240)}\"")
+        if rag_f:
+            out.append(
+                f"{_INDENT}rag_filter: hazard_class={rag_f.get('hazard_class')}  "
+                f"road_type={rag_f.get('road_type')}  k={rag_f.get('k')}"
+            )
         out.append(f"{_INDENT}tool_result_ids={ids}")
+        previews = c.get("passage_previews") or []
+        for pv in previews[:3]:
+            pid = pv.get("id") or "?"
+            score_bits = []
+            if pv.get("score") is not None:
+                score_bits.append(f"score={pv.get('score')}")
+            if pv.get("distance") is not None:
+                score_bits.append(f"dist={pv.get('distance')}")
+            score_str = ("  " + "  ".join(score_bits)) if score_bits else ""
+            text = pv.get("preview") or ""
+            out.append(f"{_INDENT}- {pid}{score_str}")
+            if text:
+                out.append(f"{_INDENT}  text=\"{text}\"")
         for finding in (c.get("key_findings") or [])[:3]:
-            out.append(f"{_INDENT}- {_short(finding, 120)}")
+            out.append(f"{_INDENT}finding: {_short(finding, 220)}")
         if c.get("llm_skipped_reason"):
             out.append(f"{_INDENT}llm skipped: {c['llm_skipped_reason']}")
         out.append(f"{_INDENT}handoff -> {c.get('to') or 'decision'}")
     elif speaker == "decision" and kind == "react_step":
         thought = c.get("thought") or "(no reasoning text)"
-        out.append(f"{lbl} step {c.get('hop')}: {_short(thought, 200)}")
-        out.append(
-            f"{_INDENT}tool {c.get('tool')}({c.get('args')}) -> "
-            f"{'ok' if c.get('ok') else 'failed'}: {_short(c.get('result'), 200)}"
-        )
+        out.append(f"{lbl} step {c.get('hop')}: {_short(thought, 500)}")
+        tool_name = c.get("tool") or "?"
+        tool_args = c.get("args")
+        tool_result = c.get("result")
+        duration = c.get("duration_s")
+        status = "ok" if c.get("ok") else "failed"
+        out.append(f"{_INDENT}tool attempted: {tool_name}")
+        try:
+            args_json = json.dumps(tool_args, ensure_ascii=False, default=str)
+        except Exception:
+            args_json = str(tool_args)
+        out.append(f"{_INDENT}  payload: {_short(args_json, 320)}")
+        out.append(f"{_INDENT}  status: {status}")
+        if duration is not None:
+            try:
+                out.append(f"{_INDENT}  duration: {float(duration):.2f}s")
+            except (TypeError, ValueError):
+                pass
+        if status == "ok":
+            out.append(f"{_INDENT}  result: {_short(tool_result, 320)}")
+        else:
+            err = c.get("error") or tool_result or "(no error text)"
+            out.append(f"{_INDENT}  error: {_short(err, 320)}")
     elif speaker == "decision":
         action = str(c.get("action") or "?")
         out.append(
@@ -9104,16 +9273,43 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
                 flag = "failed"
             else:
                 flag = "skipped"
+            # 27.10.2026 trace enrichment: when a tool call failed, print
+            # the full payload + error + duration on separate indented lines
+            # so the operator can see WHY it failed without opening the DB.
             out.append(f"{_INDENT}tool called: {call.get('tool')} ({flag})")
+            if flag == "failed":
+                try:
+                    payload_json = json.dumps(call.get("args"), ensure_ascii=False, default=str)
+                except Exception:
+                    payload_json = str(call.get("args"))
+                out.append(f"{_INDENT}  payload: {_short(payload_json, 320)}")
+                err = call.get("error") or call.get("result") or "(no error text)"
+                out.append(f"{_INDENT}  error: {_short(err, 320)}")
+                dur = call.get("duration_s")
+                if dur is not None:
+                    try:
+                        out.append(f"{_INDENT}  duration: {float(dur):.2f}s")
+                    except (TypeError, ValueError):
+                        pass
         if c.get("floor_applied"):
             ov = c.get("overridden_llm_verdict") or {}
-            out.append(
-                f"{_INDENT}floor applied: the rule tree verdict {action} overrode "
-                f"the model verdict {ov.get('action')}"
-            )
+            # 27.10.2026 trace enrichment: name the rule that fired instead
+            # of the generic "rule tree verdict overrode". Floor records now
+            # include floor_reason (short slug) and floor_trigger (the exact
+            # inputs that triggered it) so the operator can audit policy.
+            floor_reason = c.get("floor_reason") or "unnamed_floor"
+            floor_trigger = c.get("floor_trigger") or ""
+            out.append(f"{_INDENT}floor applied: {floor_reason}")
+            if floor_trigger:
+                out.append(f"{_INDENT}  trigger: {_short(floor_trigger, 320)}")
+            if ov.get("action"):
+                out.append(
+                    f"{_INDENT}  verdict_before: {ov.get('action')}  "
+                    f"verdict_after: {action}"
+                )
         if c.get("fallback_reason"):
             out.append(f"{_INDENT}fallback_reason={c['fallback_reason']}")
-        out.append(f"{_INDENT}rationale: {_short(c.get('rationale') or '', 200)}")
+        out.append(f"{_INDENT}rationale: {_short(c.get('rationale') or '', 500)}")
         cited = [str(x) for x in (c.get("cited_sources") or [])]
         out.append(f"{_INDENT}cited_sources={cited}")
         if action in ("urgent", "standard"):
@@ -9126,7 +9322,7 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
         if ev:
             out.append(
                 f"{_INDENT}evidence request: {ev.get('missing_field')} - "
-                f"\"{_short(ev.get('message') or '', 120)}\" "
+                f"\"{_short(ev.get('message') or '', 300)}\" "
                 f"(phrased by {ev.get('phrased_by')})"
             )
         elif c.get("missing_evidence"):
