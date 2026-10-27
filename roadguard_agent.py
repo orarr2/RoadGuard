@@ -6381,8 +6381,17 @@ def _maybe_run_supervisor_agent(state: dict) -> dict:
     """
     if not worker_react_enabled():
         return {}
+    # Dedup belt + braces (27.10.2026): LangGraph sometimes delivers
+    # state.supervisor_plan as None between hops, so the state-field check
+    # alone was missing dup detections and the LLM ran 3-5 times per
+    # hazard - visible as repeated identical supervisor_plan entries in
+    # the trace of the 26-27.10 batches. Also scan the accumulating trace
+    # list, which the graph does carry forward hop to hop.
     if state.get("supervisor_plan"):
         return {}
+    for _e in (state.get("trace") or []):
+        if _e.get("speaker") == "supervisor" and _e.get("kind") == "supervisor_plan":
+            return {}
     provider = worker_provider("supervisor")
     if not provider:
         return {}
@@ -7547,6 +7556,36 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
         hazard_class=hazard_class, road_type=road_type, k=3
     )
 
+    # 27.10.2026 relevance filter: non-road passages (safety-non-road-* in
+    # mini_corpus) were being returned for every D40/D20 road query, and
+    # the LLM's own key_findings called them "non-applicable". Drop them
+    # unless the current frame actually reads as a non-road scene; in
+    # that case the perception_confidence floor already routes to
+    # human_review, which uses the passage directly.
+    perception_conf = state.get("perception_confidence", "medium")
+    if perception_conf != "low":
+        filtered_procs = []
+        filtered_ids: set[str] = set()
+        for p in result["procedures"]:
+            ids = p.get("article_ids") or []
+            drop = any(
+                str(aid).lower().startswith(("safety-non-road", "non-road"))
+                for aid in ids
+            )
+            if drop:
+                for aid in ids:
+                    filtered_ids.add(str(aid))
+                continue
+            filtered_procs.append(p)
+        if filtered_procs or filtered_ids:
+            result["procedures"] = filtered_procs
+            result["tool_result_ids"] = [
+                aid for aid in result.get("tool_result_ids", [])
+                if aid not in filtered_ids
+            ]
+            # Recompute coverage based on what is actually left.
+            result["coverage"] = _coverage(filtered_procs, hazard_class, road_type)
+
     # Trace enrichment (27.10.2026): the batch log hid WHAT the RAG actually
     # retrieved - only ids and findings were printed, so an auditor could
     # not tell whether the Decision agent cited passages that were really
@@ -7798,8 +7837,28 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
     )
     priority = severity_tool["priority"]
 
+    # 27.10.2026: when image_match_cite is non-empty, we KNOW the current
+    # frame matched the catalog but severity=severe (or urgent) blocked
+    # the short-circuit. Thread the catalog cite + a plain-language hint
+    # through every return so the operator sees that both signals shaped
+    # the verdict.
+    def _finalize(d: dict) -> dict:
+        if image_match_cite:
+            cites = list(d.get("cited_sources") or [])
+            for c in image_match_cite:
+                if c not in cites:
+                    cites.append(c)
+            d["cited_sources"] = cites
+            hint = (
+                f" (catalog recognised this frame as {image_match_cite[0]}, "
+                f"severity override routed through regular triage)"
+            )
+            d["rationale"] = (str(d.get("rationale") or "") + hint)[:500]
+            d["image_matched"] = True
+        return d
+
     if perception_conf == "low":
-        return {
+        return _finalize({
             "action": "human_review",
             "rationale": (
                 f"routed to human: perception={perception_conf} "
@@ -7808,22 +7867,22 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
             "priority": priority,
             "cited_sources": [],
             "missing_evidence": [],
-        }
+        })
 
     # Roadmap section 1: the reporter's description names a different
     # class than the detector found. Not resolved here; a human decides.
     contradiction, detail = _intake_class_contradiction(state)
     if contradiction:
-        return {
+        return _finalize({
             "action": "human_review",
             "rationale": f"routed to human: {detail} (unresolved contradiction)",
             "priority": priority,
             "cited_sources": [],
             "missing_evidence": [],
-        }
+        })
 
     if 0.4 <= confidence < 0.6 and not profile.get("is_recurring_location"):
-        return {
+        return _finalize({
             "action": "needs_more_evidence",
             "rationale": (
                 f"confidence {confidence:.2f} in ambiguous band for {hazard_class}"
@@ -7831,16 +7890,16 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
             "priority": priority,
             "cited_sources": [],
             "missing_evidence": ["second_angle"],
-        }
+        })
 
     if coverage == "no_match":
-        return {
+        return _finalize({
             "action": "human_review",
             "rationale": f"no RAG match for {hazard_class} on {road_type}",
             "priority": priority,
             "cited_sources": [],
             "missing_evidence": [],
-        }
+        })
 
     if (
         hazard_class == "D40"
@@ -7848,7 +7907,7 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
         and road_type == "main"
         and confidence >= 0.6
     ):
-        return {
+        return _finalize({
             "action": "urgent",
             "rationale": (
                 f"D40 pothole on main road with lane_blocked={lane_blocked} "
@@ -7857,15 +7916,15 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
             "priority": priority,
             "cited_sources": tool_result_ids[:2],
             "missing_evidence": [],
-        }
+        })
 
-    return {
+    return _finalize({
         "action": "standard",
         "rationale": f"routine queue for {hazard_class} on {road_type} road",
         "priority": priority,
         "cited_sources": tool_result_ids[:1],
         "missing_evidence": [],
-    }
+    })
 
 
 _ASCII_PUNCT = str.maketrans({
@@ -8605,6 +8664,23 @@ def decision_node(state: RoadGuardState) -> dict:
             "hops": react_info.get("hops", 0),
             "calls": react_info.get("calls", []),
         }
+    # 27.10.2026 trace enrichment: snapshot the budget tracker on the
+    # final decision so the operator sees how close the run was to the
+    # wall-clock / token / iteration caps at verdict time.
+    _b = state.get("budget") or current_budget()
+    try:
+        trace_content["budget_state"] = {
+            "tokens_in": int(getattr(_b, "tokens_in", 0) or 0),
+            "tokens_out": int(getattr(_b, "tokens_out", 0) or 0),
+            "tokens_cap": int(TOKEN_CAP_PER_RUN) if "TOKEN_CAP_PER_RUN" in globals() else None,
+            "iterations": int(getattr(_b, "iterations", 0) or 0),
+            "iterations_cap": int(MAX_ITERATIONS),
+            "wall_s": float(getattr(_b, "wall_clock_seconds", 0.0) or 0.0),
+            "wall_cap_s": int(WALL_CLOCK_CAP_SECONDS),
+            "cost_usd": float(getattr(_b, "cost_usd", 0.0) or 0.0),
+        }
+    except Exception:
+        pass
     trace_entry = {
         "iter": state.get("iterations", 0) + 1,
         "speaker": "decision",
@@ -8732,6 +8808,30 @@ def _await_evidence_node(state: RoadGuardState) -> dict:
     perception -> research -> decision. Decision reads evidence_round
     to enforce the cap of one request per hazard.
     """
+    # 27.10.2026 trace enrichment: compute a before/after delta between the
+    # original frame and the one the reporter just sent in, so the operator
+    # can see whether the new upload actually changes the hazard profile or
+    # whether the reporter re-uploaded the same thing. The previous frame's
+    # yolo output and metadata are kept on state["previous_yolo"] /
+    # ["previous_metadata"] by the submit-evidence API before resuming.
+    prev_yolo = state.get("previous_yolo") or {}
+    prev_md = state.get("previous_metadata") or {}
+    now_yolo = state.get("yolo_output") or {}
+    now_md = state.get("metadata") or {}
+    def _bef_aft(before, after):
+        return {"before": before, "after": after} if before != after else None
+    delta: dict[str, Any] = {}
+    for k, b, a in (
+        ("hazard_class", prev_yolo.get("top1_class"), now_yolo.get("top1_class")),
+        ("confidence", prev_yolo.get("top1_confidence"), now_yolo.get("top1_confidence")),
+        ("lane_blocked", prev_md.get("lane_blocked"), now_md.get("lane_blocked")),
+        ("sha256_match", (prev_md.get("image_sha256") or "")[:12],
+                         (now_md.get("image_sha256") or "")[:12]),
+    ):
+        d = _bef_aft(b, a)
+        if d is not None:
+            delta[k] = d
+
     entry = {
         "iter": state.get("iterations", 0) + 1,
         "speaker": "await_evidence",
@@ -8739,6 +8839,7 @@ def _await_evidence_node(state: RoadGuardState) -> dict:
         "content": {
             "evidence_round": int(state.get("evidence_round", 0) or 0) + 1,
             "previous_request": state.get("evidence_request") or {},
+            "delta": delta,
         },
     }
     return {
@@ -9309,14 +9410,41 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
                 )
         if c.get("fallback_reason"):
             out.append(f"{_INDENT}fallback_reason={c['fallback_reason']}")
-        out.append(f"{_INDENT}rationale: {_short(c.get('rationale') or '', 500)}")
+        # 27.10.2026 trace enrichment: pull the model's uncertainty blob
+        # out of rationale (it is stuffed in as "[uncertain: ...]") so the
+        # operator sees WHY the model hedged on its own line, not glued to
+        # the rest of the rationale.
+        rat = c.get("rationale") or ""
+        import re as _re
+        um = _re.search(r"\[uncertain:\s*([^\]]*)\]", rat)
+        rat_main = _re.sub(r"\s*\[uncertain:[^\]]*\]\s*", " ", rat).strip()
+        out.append(f"{_INDENT}rationale: {_short(rat_main, 500)}")
+        if um:
+            out.append(f"{_INDENT}uncertainty: {_short(um.group(1).strip(), 300)}")
         cited = [str(x) for x in (c.get("cited_sources") or [])]
         out.append(f"{_INDENT}cited_sources={cited}")
+        # 27.10.2026 trace enrichment: per-source grounding breakdown so
+        # the operator sees WHICH citation is grounded in RAG vs the
+        # catalog vs ungrounded, not just a single PASS/FAIL. "catalog:*"
+        # cites are grounded by the dataset_lookup side-channel, not RAG.
+        if cited:
+            lines = []
+            for s in cited:
+                if s.startswith("catalog:"):
+                    lines.append(f"{s}=catalog")
+                elif s in tool_ids:
+                    lines.append(f"{s}=rag")
+                else:
+                    lines.append(f"{s}=UNGROUNDED")
+            out.append(f"{_INDENT}grounded_per_source: " + "  ".join(lines))
         if action in ("urgent", "standard"):
-            grounded = bool(cited) and all(s in tool_ids for s in cited)
+            rag_cites = [s for s in cited if not s.startswith("catalog:")]
+            grounded = bool(cited) and all(
+                s in tool_ids for s in rag_cites
+            )
             out.append(
                 f"{_INDENT}grounding check: {'PASS' if grounded else 'FAIL'} "
-                f"(cited_sources subset of tool_result_ids)"
+                f"(cited_sources subset of tool_result_ids ∪ catalog)"
             )
         ev = c.get("evidence_request")
         if ev:
@@ -9329,6 +9457,27 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             out.append(f"{_INDENT}missing_evidence={c['missing_evidence']}")
         if c.get("evidence_cap_applied"):
             out.append(f"{_INDENT}evidence cap reached: one request per hazard")
+        # 27.10.2026 trace enrichment: expose model fallback error so a
+        # degraded LLM call is visible in the trace, not only in the
+        # internal llm_summary blob. ok_calls=0 + failed_calls>0 means
+        # every call failed and the rule tree took over.
+        llm_s = c.get("llm") or {}
+        if llm_s.get("failed_calls", 0) > 0:
+            errs = ", ".join((llm_s.get("errors") or [])[:3])
+            out.append(
+                f"{_INDENT}llm_fallback: {llm_s.get('failed_calls')}/{llm_s.get('ok_calls', 0) + llm_s.get('failed_calls', 0)} calls failed "
+                f"[{_short(errs, 240)}]"
+            )
+        # 27.10.2026 trace enrichment: budget state so the operator sees
+        # how close the run was to the wall-clock / token cap when the
+        # verdict was issued, not only after the fact.
+        bs = c.get("budget_state") or {}
+        if bs:
+            out.append(
+                f"{_INDENT}budget_state: tokens={bs.get('tokens_in', 0)}/{bs.get('tokens_cap')}  "
+                f"iters={bs.get('iterations', 0)}  "
+                f"wall={bs.get('wall_s', 0):.1f}s / {bs.get('wall_cap_s', '?')}s"
+            )
     elif speaker == "approval_gate":
         ap = c.get("approval_id") or ("dry-run" if c.get("dry_run") else "?")
         out.append(
@@ -9343,6 +9492,18 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             f"{lbl} evidence received  round={c.get('evidence_round')}  "
             f"for={prev.get('missing_field')}"
         )
+        # 27.10.2026 trace enrichment: when evidence returns, show how the
+        # new frame differs from the one the Decision agent asked about.
+        # Helps the operator spot a reporter who re-uploaded the same
+        # frame or who sent an unrelated hazard image.
+        delta = c.get("delta") or {}
+        if delta:
+            parts = []
+            for k in ("hazard_class", "confidence", "lane_blocked", "sha256_match"):
+                if k in delta:
+                    parts.append(f"{k}: {delta[k].get('before')} -> {delta[k].get('after')}")
+            if parts:
+                out.append(f"{_INDENT}delta: " + "  ".join(parts))
     elif speaker == "pipeline":
         out.append(f"{lbl} graph failed: {c.get('error')} -> routed to a human")
     elif kind == "llm_call":
@@ -9364,6 +9525,20 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
     elif kind == "supervisor_llm":
         note = _short(c.get("note") or c.get("plan") or "", 160)
         out.append(f"[LIVE-SUP] {note}")
+    elif kind == "supervisor_plan":
+        # 27.10.2026 trace enrichment: expose force_action explicitly on
+        # its own token (not buried in the note), so an auditor sees at a
+        # glance whether the supervisor overrode routing. Also widen the
+        # note to 300 so the full concern description shows.
+        force = c.get("force_action")
+        force_s = str(force) if force is not None else "none"
+        out.append(
+            f"{lbl} supervisor_plan  pipeline_concern={c.get('pipeline_concern')}  "
+            f"expected_difficulty={c.get('expected_difficulty')}  force_action={force_s}"
+        )
+        note = c.get("note") or ""
+        if note:
+            out.append(f"{_INDENT}note: {_short(note, 300)}")
     else:
         kv = "  ".join(f"{k}={_short(v, 60)}" for k, v in c.items())
         out.append(f"{lbl} {kind}  {kv}".rstrip())
