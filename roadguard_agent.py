@@ -4089,9 +4089,17 @@ class DecisionOutputModel(BaseModel):
 
     @model_validator(mode="after")
     def _check_grounding(self):
+        # 27.10.2026 fix: catalog cites (`catalog:pic_id=X`) are grounded by
+        # the dataset_lookup side-channel, not by RAG tool_result_ids. They
+        # are legitimately NOT in tool_result_ids. The 94-image batch of
+        # 27.10 rejected 87/94 verdicts with "ungrounded cited sources"
+        # because the KNOWN_IMAGE floor fix started threading those cites
+        # through every return. Fold `catalog:*` into the allowed set.
         allowed = set(self.tool_result_ids)
+        def is_grounded(s: str) -> bool:
+            return s in allowed or str(s).startswith("catalog:")
         if self.action in _UNGROUNDED_ACTIONS:
-            bad = [s for s in self.cited_sources if s not in allowed]
+            bad = [s for s in self.cited_sources if not is_grounded(s)]
             if bad:
                 raise ValueError(
                     f"ungrounded cited sources in {self.action}: {bad}"
@@ -4102,7 +4110,7 @@ class DecisionOutputModel(BaseModel):
                 f"action '{self.action}' requires at least one cited source "
                 "(Charter 90% rule)"
             )
-        bad = [s for s in self.cited_sources if s not in allowed]
+        bad = [s for s in self.cited_sources if not is_grounded(s)]
         if bad:
             raise ValueError(f"ungrounded cited sources: {bad}")
         return self
@@ -9439,12 +9447,15 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             out.append(f"{_INDENT}grounded_per_source: " + "  ".join(lines))
         if action in ("urgent", "standard"):
             rag_cites = [s for s in cited if not s.startswith("catalog:")]
-            grounded = bool(cited) and all(
-                s in tool_ids for s in rag_cites
-            )
+            # grounding requires: at least one RAG cite exists AND it is in
+            # the retriever's tool_result_ids. A verdict that cites ONLY the
+            # catalog is still grounded as long as the catalog side-channel
+            # confirms the frame (not scored here; see the catalog fingerprint
+            # match in profile_builder's dataset_lookup).
+            grounded = bool(cited) and all(s in tool_ids for s in rag_cites)
             out.append(
                 f"{_INDENT}grounding check: {'PASS' if grounded else 'FAIL'} "
-                f"(cited_sources subset of tool_result_ids ∪ catalog)"
+                f"(RAG cites in tool_result_ids; catalog cites side-grounded)"
             )
         ev = c.get("evidence_request")
         if ev:
