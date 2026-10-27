@@ -180,3 +180,40 @@ At the mid-project checkpoint, the team makes a Go or No-Go decision on
 supporting all four classes. Expansion occurs only after the two-class
 version works end to end. Every substantial change is reviewed by
 another team member.
+
+## Addendum - 2026-10-27
+
+The 26.10 batch of 94 citizen hazard images was replayed on the
+production VM after wiring in Benny's `charter_grounded_corpus`
+(2,433 passages, ChromaDB 1.5.9, nomic-embed-text embedder). The
+batch surfaced four classes of defect that have since been fixed:
+
+1. **KNOWN_IMAGE floor** on catalogued photos was closing severe
+   hazards at `priority=0`, hiding the live detector's reading of
+   high severity. The floor is now gated on
+   `severity in {minor, moderate}`; severe or urgent catalog matches
+   flow through the regular rule tree with `catalog:pic_id=X`
+   appended to `cited_sources` and the rationale tagged with
+   `catalog recognised this frame...`.
+2. **Three Decision ReAct tools** (`check_system_health`,
+   `check_recent_cluster`, `rank_similarity_to_catalog`) were listed
+   in the schema with no dispatcher branch. The first is now wired to
+   the real probe; the other two return a structured stub so the
+   model stops retrying and the trace records the attempt.
+3. **RAG retrieval** returned `safety-non-road-*` chunks for every
+   D40/D20/D10/D00 road query. Those chunks are now filtered out
+   unless the current frame reads as a non-road scene
+   (`perception_confidence=low`); coverage is recomputed on the
+   filtered set.
+4. **Supervisor LLM** ran 3-5 times per hazard because the dedup
+   check missed `None` deliveries from LangGraph. A belt-and-braces
+   trace scan was added; the LLM now runs exactly once per hazard.
+
+Trace output was enriched for post-hoc audit:
+`rag_query`, `rag_filter`, `passage_previews`,
+`floor_reason` + `floor_trigger`, per-cite `grounded_per_source`,
+`uncertainty`, `llm_fallback`, `budget_state`, and an
+`await_evidence` `delta` showing before/after of the reporter's
+upload. Line-length budgets grew too, so trace lines are no longer
+clipped mid-sentence. See `PLAN.md` section 11 and
+`docs/agents-architecture.md` for the detail.

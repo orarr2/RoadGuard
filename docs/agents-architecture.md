@@ -1331,3 +1331,73 @@ ROADGUARD_USE_LIVE=1 \
 | מחברת walkthrough | [`../notebooks/agent_walkthrough.ipynb`](../notebooks/agent_walkthrough.ipynb) |
 
 </div>
+
+---
+
+## 26-27.10.2026 - Batch audit deltas
+
+The 26.10 batch of 94 citizen images was replayed on the production
+VM against Benny's `charter_grounded_corpus` (2,433 passages). The
+following agent-layer changes landed as a result; see `PLAN.md`
+section 11 for the full narrative.
+
+### Floor logic
+
+- `_known_image_decision` now returns `None` on severe-severity
+  frames with catalog label agreement, letting the regular rule tree
+  decide. `catalog:pic_id=X` is appended to `cited_sources` and the
+  rationale is tagged with `catalog recognised this frame...
+  severity override routed through regular triage`.
+- The catalog-vs-detector contradiction branch records
+  `floor_reason=known_image_catalog_detector_contradiction` and the
+  trigger inputs.
+- Every generic floor path (`known_image` / `human_review` /
+  `urgent`) now surfaces a `floor_reason` + `floor_trigger` pair
+  through the trace, so the operator sees WHICH rule fired.
+
+### Decision tool registry
+
+- `check_system_health`, `check_recent_cluster` and
+  `rank_similarity_to_catalog` were listed in the Decision ReAct
+  schema but had no dispatcher branch. `check_system_health` is now
+  wired to the real probe; the other two return a structured stub so
+  the model stops retrying and the trace records the call.
+
+### RAG retriever
+
+- Semantic queries that return `safety-non-road-*` chunks are
+  filtered out unless the current frame reads as a non-road scene
+  (`perception_confidence=low`). Coverage is recomputed on the
+  filtered set.
+- Trace entry now carries `rag_query` (the semantic query string
+  that was fired), `rag_filter` (hazard_class / road_type / k) and
+  `passage_previews` (id + distance + 160-char preview of each
+  returned chunk).
+
+### Supervisor
+
+- Dedup is belt-and-braces: `state.supervisor_plan` AND a scan of
+  the growing trace list. The LLM supervisor runs exactly once per
+  hazard; the previous 3-5 runs per hazard are gone.
+
+### Trace formatter
+
+- `grounded_per_source`: per-cite breakdown of catalog / rag /
+  UNGROUNDED, replacing the single PASS/FAIL on the subset check.
+- `uncertainty`: the `[uncertain: ...]` blob is extracted to its
+  own line.
+- `supervisor_plan`: `force_action` and `expected_difficulty` print
+  as their own tokens, note on its own line.
+- `delta` on `await_evidence`: before/after of hazard_class,
+  confidence, lane_blocked, sha256 prefix.
+- `llm_fallback`: counts of failed LLM calls + first three error
+  strings.
+- `budget_state` on final Decision: tokens / iterations / wall-clock
+  snapshot.
+
+### Line-length
+
+Raised across the board so trace lines are no longer clipped mid-
+sentence: rationale 200 -> 500, react thought 300 stored -> 800
+stored / 500 printed, evidence message 120 -> 300, floor trigger up
+to 320.

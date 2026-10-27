@@ -2,6 +2,11 @@
 
 **Live site: https://orarr2.github.io/RoadGuard/**
 
+Status: delivered end-to-end on the Agent track. Last agent-layer
+update 2026-10-27 (KNOWN_IMAGE floor fix, tool registry fix, RAG
+trace enrichment, safety-non-road filter, supervisor dedup). See
+`PLAN.md` section 11 for the 26-27.10 batch audit fix log.
+
 Road-damage triage for a smart city. A citizen photographs road damage with a
 phone; YOLOv8n detects the four RDD2022 classes (D00 longitudinal cracks, D10
 transverse cracks, D20 alligator cracking, D40 potholes) inside the browser; the
