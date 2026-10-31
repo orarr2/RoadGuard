@@ -59,3 +59,13 @@ refine_entry:
   max_refines: 1
   triggers:
     - "perception_confidence == medium AND research_coverage == partial_match"
+
+latency:
+  # Clear-case fast path: profile_builder and rag_retriever skip their
+  # optional LLM refine / relabel when the detector is confident, the image
+  # is usable and the reporter wrote nothing that needs interpreting. The
+  # rule-based profile and the tool-graded coverage stand on their own
+  # there; the LLM pass only lowered confidence on such input (audit 22.10).
+  fast_path:
+    min_detector_confidence: 0.8
+    min_blur_score: 100

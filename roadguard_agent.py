@@ -3495,6 +3495,105 @@ def load_policy() -> dict[str, Any]:
     return out
 
 
+def _policy_severity() -> dict[str, Any]:
+    """severity.* thresholds from policy.yaml with the historical literals
+    as fallback, so a malformed file degrades to today's behaviour."""
+    try:
+        sev = (load_policy() or {}).get("severity") or {}
+    except Exception:
+        sev = {}
+
+    def _f(key: str, default: float) -> float:
+        try:
+            return float(sev.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    minor = sev.get("cracks_minor")
+    return {
+        "large_area_min_ratio": _f("d40_or_d20_large_area_min_ratio", 0.05),
+        "large_area_min_confidence": _f("d40_or_d20_large_area_min_confidence", 0.6),
+        "moderate_min_confidence": _f("d40_or_d20_moderate_min_confidence", 0.5),
+        "cracks_minor": tuple(minor) if isinstance(minor, list) and minor else ("D00", "D10"),
+    }
+
+
+def _policy_decision_thresholds() -> dict[str, Any]:
+    """decision.* preconditions from policy.yaml with the historical
+    literals as fallback. The minimal parser keeps list items as strings,
+    so the confidence range is cast here."""
+    try:
+        dec = (load_policy() or {}).get("decision") or {}
+    except Exception:
+        dec = {}
+    urgent = dec.get("urgent") or {}
+    nme = dec.get("needs_more_evidence") or {}
+    rng = nme.get("confidence_range") or []
+    try:
+        lo, hi = float(rng[0]), float(rng[1])
+    except (TypeError, ValueError, IndexError):
+        lo, hi = 0.4, 0.6
+    try:
+        min_conf = float(urgent.get("min_confidence", 0.6))
+    except (TypeError, ValueError):
+        min_conf = 0.6
+
+    def _set(key: str, default: tuple[str, ...]) -> frozenset[str]:
+        val = urgent.get(key)
+        return frozenset(val) if isinstance(val, list) and val else frozenset(default)
+
+    return {
+        "nme_lo": lo,
+        "nme_hi": hi,
+        "urgent_classes": _set("hazard_class", ("D40",)),
+        "urgent_roads": _set("road_type", ("main",)),
+        "urgent_lanes": _set("lane_blocked", ("partial", "full")),
+        "urgent_min_conf": min_conf,
+    }
+
+
+def _policy_latency() -> dict[str, Any]:
+    """latency.fast_path thresholds from policy.yaml with safe defaults."""
+    try:
+        fp = ((load_policy() or {}).get("latency") or {}).get("fast_path") or {}
+    except Exception:
+        fp = {}
+
+    def _f(key: str, default: float) -> float:
+        try:
+            return float(fp.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "min_detector_confidence": _f("min_detector_confidence", 0.8),
+        "min_blur_score": _f("min_blur_score", 100.0),
+    }
+
+
+def _clear_case_fast_path(yolo: dict, iq: dict, md: dict) -> str | None:
+    """Return a reason slug when the optional worker LLM passes may be
+    skipped for this submission, else None. Deterministic, policy-driven."""
+    lim = _policy_latency()
+    try:
+        conf = float(yolo.get("top1_confidence") or 0.0)
+        blur = float(iq.get("blur_score", 100.0))
+    except (TypeError, ValueError):
+        return None
+    ocr_bad = bool((iq.get("ocr_sanitized") or {}).get("is_suspicious_pattern", False))
+    if (
+        conf >= lim["min_detector_confidence"]
+        and blur >= lim["min_blur_score"]
+        and bool(iq.get("is_road_scene", True))
+        and not (md.get("reporter_text") or "").strip()
+        and not md.get("reporter_text_suspicious")
+        and not md.get("location_was_scrubbed")
+        and not ocr_bad
+    ):
+        return f"clear_case_fast_path (conf>={lim['min_detector_confidence']}, no reporter text, usable image)"
+    return None
+
+
 def _policy_summary_for_prompt() -> str:
     """Short, LLM-friendly summary of the policy rules.
 
@@ -4423,8 +4522,10 @@ class RagClient:
         docs = (res.get("documents") or [[]])[0]
         metas = (res.get("metadatas") or [[]])[0]
         ids = (res.get("ids") or [[]])[0]
-        for text, meta, _id in zip(docs, metas, ids, strict=False):
+        dists = (res.get("distances") or [[]])[0]
+        for i, (text, meta, _id) in enumerate(zip(docs, metas, ids, strict=False)):
             meta = dict(meta or {})
+            dist = dists[i] if i < len(dists) else None
             passages.append(
                 {
                     "passage": text,
@@ -4434,6 +4535,7 @@ class RagClient:
                     "hazard_types": [meta.get("hazard_class", "")],
                     "road_types": [meta.get("road_type") or "any"],
                     "article_ids": [str(_id)],
+                    "distance": float(dist) if dist is not None else None,
                 }
             )
         return passages
@@ -5101,20 +5203,69 @@ def _semantic_rag_query(hazard_class: str, road_type: str) -> str:
     )
 
 
-def _augment_passage_for_coverage(
-    p: dict, hazard_class: str, road_type: str
-) -> dict:
-    """Semantic retrieval returns chunks without {hazard_class, road_type}
-    tags, so `_coverage` would otherwise always fall to partial_match.
-    We stamp both tags on the retrieved passage: ChromaDB returned it as
-    the nearest-neighbour match to our structured query, so from the
-    retriever's point of view it IS about that pair."""
+# A nearest-neighbour hit is a ranking, not evidence: the 27.10 batch
+# cited NTIS distribution boilerplate as the D40 standard because every
+# semantic hit was stamped as a class match. A passage may ground a
+# verdict about a class only if its text names that class.
+_CLASS_EVIDENCE_TERMS = {
+    "D40": ("pothole", "pot hole", "pot-hole"),
+    "D20": ("alligator", "crocodile", "fatigue crack", "map crack", "block crack"),
+    "D10": ("transverse crack", "transverse"),
+    "D00": ("longitudinal crack", "longitudinal"),
+}
+_REPAIR_TERMS = (
+    "repair", "patch", "seal", "crack", "pavement", "maintenance",
+    "resurfac", "distress", "asphalt", "pothole",
+)
+
+
+def _passage_relevance(text: str, hazard_class: str) -> dict[str, Any]:
+    low = (text or "").lower()
+    return {
+        "class_keyword_hit": any(t in low for t in _CLASS_EVIDENCE_TERMS.get(hazard_class, ())),
+        "repair_term_hit": any(t in low for t in _REPAIR_TERMS),
+    }
+
+
+def _rag_max_distance() -> float | None:
+    raw = (os.environ.get("ROADGUARD_RAG_MAX_DISTANCE") or "").strip()
+    try:
+        return float(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def _grade_passage(p: dict, hazard_class: str, *, tagged: bool) -> dict | None:
+    """Attach `relevance` to a retrieved passage and decide whether it stays.
+
+    tagged=True: the passage came through the metadata where-filter (or
+    the stub corpus), so its hazard_class tag is authoritative and it is
+    never dropped. tagged=False: pure semantic hit; it earns the queried
+    class only when its text names that class, is dropped when it names
+    neither the class nor any repair term (boilerplate), and is dropped
+    past the optional ROADGUARD_RAG_MAX_DISTANCE cut.
+    """
     out = dict(p)
-    types = list(out.get("hazard_types") or [])
-    if hazard_class not in types:
+    rel = _passage_relevance(out.get("passage") or "", hazard_class)
+    tag_hit = hazard_class in (out.get("hazard_types") or [])
+    rel["tag_hit"] = bool(tag_hit)
+    rel["distance"] = out.get("distance")
+    if tagged:
+        rel["class_keyword_hit"] = rel["class_keyword_hit"] or tag_hit
+        out["relevance"] = rel
+        return out
+    max_d = _rag_max_distance()
+    dist = out.get("distance")
+    if max_d is not None and dist is not None and float(dist) > max_d:
+        return None
+    if not rel["class_keyword_hit"] and not rel["repair_term_hit"]:
+        return None
+    types = [t for t in (out.get("hazard_types") or []) if t]
+    if rel["class_keyword_hit"] and hazard_class not in types:
         types.append(hazard_class)
     out["hazard_types"] = types
-    out["road_types"] = [road_type]
+    out["road_types"] = ["any"]
+    out["relevance"] = rel
     return out
 
 
@@ -5165,26 +5316,27 @@ def query_repair_standards(
         try:
             # Structured path first - works with mini_corpus-style
             # schemas that tag each passage by {hazard_class, road_type}.
-            passages = client.query(
-                hazard_class=hazard_class, road_type=road_type, k=k
-            )
-            # Semantic fallback - works with corpora whose metadata lacks
-            # our tags (Benny's charter_grounded_corpus). The returned
-            # chunks are stamped with the queried pair so _coverage reads
-            # them as a direct match.
+            passages = [
+                g for g in (
+                    _grade_passage(p, hazard_class, tagged=True)
+                    for p in client.query(hazard_class=hazard_class, road_type=road_type, k=k)
+                ) if g is not None
+            ]
+            # Semantic fallback for corpora whose metadata lacks our tags
+            # (charter_grounded_corpus). Each hit is graded on its text:
+            # boilerplate is dropped and only class-naming chunks count as
+            # a class match, so coverage reflects evidence, not ranking.
             if not passages and hasattr(client, "query_semantic"):
                 query_text = _semantic_rag_query(hazard_class, road_type)
-                raw = client.query_semantic(query_text, k=max(k, 5))
-                passages = [
-                    _augment_passage_for_coverage(p, hazard_class, road_type)
-                    for p in raw[:k]
-                ]
+                raw = client.query_semantic(query_text, k=max(k * 2, 6))
+                graded = (_grade_passage(p, hazard_class, tagged=False) for p in raw)
+                passages = [g for g in graded if g is not None][:k]
         except Exception:
             passages = []
 
     if not passages and not corpus_answered:
         passages = [
-            dict(p, road_types=[road_type])
+            _grade_passage(dict(p, road_types=[road_type]), hazard_class, tagged=True)
             for p in _STUB_CORPUS.get((hazard_class, road_type), [])[:k]
         ]
 
@@ -5768,6 +5920,58 @@ def _detector_prediction_from_state(state: dict | None) -> tuple[str | None, flo
     return cls_s, conf_f
 
 
+def _image_match_status(
+    match: dict | None,
+    live_class: str | None,
+    severity: str | None,
+    live_confidence: float | None = None,
+) -> dict[str, Any]:
+    """Keep 'is this frame in the catalogue' apart from 'what is the hazard
+    verdict'. Sealing a frame as known_image priority=0 is only safe when
+    the bytes are identical (sha256), the catalogue holds a recorded
+    detector score for exactly those bytes, that score names the class the
+    live detector sees now, and the frame is not severe. A phash hit is a
+    similar photo, not the same file; an unscored row proves nothing about
+    the hazard. Both are context for regular triage, not a verdict."""
+    if not match or not match.get("found"):
+        return {"matched": False, "short_circuit_ok": False, "reason": "no_match"}
+    pred = match.get("model_prediction")
+    pred = pred if isinstance(pred, dict) else {}
+    stored_cls = str(pred.get("top1_class") or "").upper() or None
+    stored_conf = pred.get("top1_confidence")
+    live = str(live_class).upper() if live_class else None
+    # The webapp sends top1 D40 at 0.00 when the detector found nothing;
+    # that placeholder is not a live detection to compare against.
+    if live_confidence is not None and float(live_confidence) <= 0.0:
+        live = None
+    kind = str(match.get("match") or "")
+    status: dict[str, Any] = {
+        "matched": True,
+        "match": kind,
+        "pic_id": match.get("pic_id"),
+        "distance": match.get("distance"),
+        "stored_prediction": f"{stored_cls} {float(stored_conf or 0):.2f}" if stored_cls else None,
+        "stored_class": stored_cls,
+        "live_class": live,
+        "agrees": (stored_cls == live) if (stored_cls and live) else None,
+        "short_circuit_ok": False,
+        "reason": "ok",
+    }
+    if kind != "sha256":
+        status["reason"] = "phash_similar_not_same_file"
+    elif not stored_cls:
+        status["reason"] = "no_stored_prediction"
+    elif not live:
+        status["reason"] = "no_live_detection"
+    elif stored_cls != live:
+        status["reason"] = "stored_vs_live_class_mismatch"
+    elif str(severity or "").lower() in {"severe", "urgent"}:
+        status["reason"] = "severity_blocks_shortcut"
+    else:
+        status["short_circuit_ok"] = True
+    return status
+
+
 def _known_image_decision(match: dict, state: dict | None = None) -> dict | None:
     """The verdict for a catalogued photo.
 
@@ -5836,17 +6040,22 @@ def _known_image_decision(match: dict, state: dict | None = None) -> dict | None
     if state:
         profile = state.get("hazard_profile") or {}
         severity = str(profile.get("severity_signal") or "").lower()
-    if severity in {"severe", "urgent"}:
+    status = _image_match_status(match, detector_class, severity, detector_confidence)
+    if not status["short_circuit_ok"]:
         # Signal to _decide_rule_based: do not short-circuit. The rule tree
-        # will decide, and the Decision agent will cite the catalog pic_id
-        # as a supporting source.
+        # decides and cites the catalog pic_id as a supporting source.
         return None
+    rationale = (
+        f"{base_rationale}; stored detector {status['stored_class']} agrees "
+        f"with live {status['live_class']}"
+    )
     return {
         "action": "known_image",
-        "rationale": base_rationale[:500],
+        "rationale": rationale[:500],
         "priority": 0,
         "cited_sources": catalog_cite,
         "missing_evidence": [],
+        "image_match_status": status,
     }
 
 
@@ -5854,7 +6063,6 @@ _READ_ONLY_DECISION_TOOLS = (
     "check_hazard_severity",
     "lookup_dataset_image",
     "rank_similarity_to_catalog",
-    "check_system_health",
     "check_recent_cluster",
 )
 
@@ -5891,11 +6099,13 @@ RESEARCH_TOOLS = {
     "query_repair_standards": (query_repair_standards, RAG_SCHEMA),
 }
 
+# check_system_health is deliberately not offered to Decision: in the
+# 27.10 log the model spent one of its two tool hops on it in six runs
+# and it never changed a verdict. It stays available to /health.
 DECISION_TOOLS = {
     "check_hazard_severity": (check_hazard_severity, SEVERITY_SCHEMA),
     "lookup_dataset_image": (lookup_dataset_image, DATASET_SCHEMA),
     "rank_similarity_to_catalog": (rank_similarity_to_catalog, RANK_SIMILARITY_SCHEMA),
-    "check_system_health": (check_system_health, SYSTEM_HEALTH_SCHEMA),
     "check_recent_cluster": (check_recent_cluster, RECENT_CLUSTER_SCHEMA),
     "request_additional_evidence": (request_additional_evidence, EVIDENCE_SCHEMA),
     "create_draft_work_order": (create_draft_work_order, DRAFT_SCHEMA),
@@ -6554,7 +6764,7 @@ def sanitize_node(state: RoadGuardState) -> dict:
     # we don't spend 60-120 s on signal_extractor + profile_builder +
     # rag_retriever + their supervisor turns just to arrive at
     # known_image. The dataset_match lookup is a cheap SQLite query.
-    early_match = None
+    catalog_hit = None
     if md.get("image_sha256") or md.get("image_phash"):
         try:
             hit = PERCEPTION_TOOLS["lookup_dataset_image"][0](
@@ -6562,9 +6772,16 @@ def sanitize_node(state: RoadGuardState) -> dict:
                 phash=md.get("image_phash") or None,
             )
             if hit.get("found"):
-                early_match = hit
+                catalog_hit = hit
         except Exception as _exc:
             LOGGER.warning("sanitize_dataset_lookup_failed: %s", _exc)
+    # Skipping signal/profile/rag is only safe when Decision would seal the
+    # frame anyway; a phash or unscored hit must still be triaged in full.
+    _yolo = state.get("yolo_output") or {}
+    match_status = _image_match_status(
+        catalog_hit, _yolo.get("top1_class"), None, _yolo.get("top1_confidence")
+    )
+    shortcut = bool(catalog_hit) and match_status["short_circuit_ok"]
 
     trace_entry = {
         "iter": 0,
@@ -6574,7 +6791,8 @@ def sanitize_node(state: RoadGuardState) -> dict:
             "location_scrubbed": md["location_was_scrubbed"],
             "ocr_suspicious": ocr["is_suspicious_pattern"],
             "reporter_text_suspicious": reporter["is_suspicious_pattern"],
-            "known_image_shortcut": bool(early_match),
+            "known_image_shortcut": shortcut,
+            "image_match_reason": match_status.get("reason"),
         },
     }
 
@@ -6584,10 +6802,10 @@ def sanitize_node(state: RoadGuardState) -> dict:
         "sanitized": True,
         "trace": [trace_entry],
         "last_speaker": "sanitize",
-        "next_hop": "decision" if early_match else "profile_builder",
+        "next_hop": "decision" if shortcut else "profile_builder",
     }
-    if early_match:
-        update["dataset_match"] = early_match
+    if catalog_hit:
+        update["dataset_match"] = catalog_hit
     return update
 
 
@@ -6879,9 +7097,9 @@ def _extract_by_llm(text: str, md: dict, yolo: dict, state: dict | None = None) 
             state=state or {},
             provider_override=provider,
         )
-        if parsed is not None:
-            return parsed, in_tok, out_tok
-        # Fall through to single-call path on parse failure
+        # No second single-call round on a ReAct miss: it re-asks the same
+        # model the same question and was the third call in the 27.10 log.
+        return parsed, in_tok, out_tok
     try:
         msg, in_tok, out_tok = chat(
             [
@@ -7045,13 +7263,18 @@ def _severity_from_signals(
     lane_blocked: str,
 ) -> tuple[str, str]:
     """Rule-based severity label with a one-sentence rationale."""
+    sev = _policy_severity()
     if hazard_class == "D40" and lane_blocked in ("partial", "full"):
         return "severe", "pothole with lane obstruction"
-    if hazard_class in ("D40", "D20") and area_ratio >= 0.05 and confidence >= 0.6:
+    if (
+        hazard_class in ("D40", "D20")
+        and area_ratio >= sev["large_area_min_ratio"]
+        and confidence >= sev["large_area_min_confidence"]
+    ):
         return "severe", f"{hazard_class} with large bbox area"
-    if hazard_class in ("D40", "D20") and confidence >= 0.5:
+    if hazard_class in ("D40", "D20") and confidence >= sev["moderate_min_confidence"]:
         return "moderate", f"{hazard_class} detected with usable confidence"
-    if hazard_class in ("D00", "D10"):
+    if hazard_class in sev["cracks_minor"]:
         return "minor", f"{hazard_class} is a linear crack, routine"
     return "moderate", "default severity for ambiguous signal"
 
@@ -7146,8 +7369,10 @@ def _llm_refine(
 
     parsed = None
     in_tok = out_tok = 0
+    react_attempted = False
     # ReAct path first when the perception LLM has its own model + flag on
     if worker_react_enabled() and provider:
+        react_attempted = True
         parsed, in_tok, out_tok, _info = _llm_react_worker(
             agent_name="profile_builder",
             system_prompt=PROFILE_BUILDER_SYSTEM_PROMPT,
@@ -7159,7 +7384,9 @@ def _llm_refine(
         if parsed is not None:
             parsed = _parse_perception_json(json.dumps(parsed))
 
-    if parsed is None:
+    # A ReAct miss falls back to the rule profile directly; a second
+    # single-call round was the third LLM call per run in the 27.10 log.
+    if parsed is None and not react_attempted:
         try:
             messages = [
                 {"role": "system", "content": PROFILE_BUILDER_SYSTEM_PROMPT},
@@ -7180,6 +7407,9 @@ def _llm_refine(
                 "confidence": base_confidence,
                 "needs_more_evidence": base_needs_more,
                 "missing_fields": base_missing,
+                "fallback_reason": (
+                    "react_reply_off_contract" if react_attempted else "reply_off_contract"
+                ),
             },
             in_tok,
             out_tok,
@@ -7334,7 +7564,8 @@ def profile_builder_node(state: RoadGuardState) -> dict:
     if iq.get("brightness_mean", 0.5) < 0.2:
         base_missing.append("lighting")
 
-    llm_enabled = _profile_llm_enabled()
+    fast_path = _clear_case_fast_path(yolo, iq, md)
+    llm_enabled = _profile_llm_enabled() and fast_path is None
     if llm_enabled:
         refined, in_tok, out_tok = _llm_refine(
             base_profile=base_profile,
@@ -7395,7 +7626,11 @@ def profile_builder_node(state: RoadGuardState) -> dict:
                 "llm_calls_all_failed: " + ",".join(_summary.get("errors") or ["unknown"])
             )
     if not llm_enabled:
-        trace_entry["content"]["llm_skipped_reason"] = "AGENT_PROFILE_BUILDER_LLM=0"
+        trace_entry["content"]["llm_skipped_reason"] = fast_path or "AGENT_PROFILE_BUILDER_LLM=0"
+    elif refined.get("fallback_reason"):
+        # The model answered off-contract and the rule profile stands;
+        # say so instead of letting llm_used=True imply a model verdict.
+        trace_entry["content"].setdefault("llm_fallback_reason", refined["fallback_reason"])
     trace_entry["content"]["dataset_lookup"] = _dataset_lookup_summary(dataset_hit)
 
     update: dict = {
@@ -7525,7 +7760,9 @@ def _llm_label(
 
     parsed = None
     in_tok = out_tok = 0
+    react_attempted = False
     if worker_react_enabled() and provider:
+        react_attempted = True
         react_parsed, in_tok, out_tok, _info = _llm_react_worker(
             agent_name="rag_retriever",
             system_prompt=RAG_RETRIEVER_SYSTEM_PROMPT,
@@ -7537,7 +7774,8 @@ def _llm_label(
         if react_parsed is not None:
             parsed = _parse_research_json(json.dumps(react_parsed))
 
-    if parsed is None:
+    # A ReAct miss keeps the tool-graded coverage; no second single call.
+    if parsed is None and not react_attempted:
         try:
             messages = [
                 {"role": "system", "content": RAG_RETRIEVER_SYSTEM_PROMPT},
@@ -7548,10 +7786,11 @@ def _llm_label(
             )
         except Exception as exc:
             LOGGER.warning("research_llm_failed: %s", exc)
-            return base_coverage, base_confidence, [], 0, 0
+            return base_coverage, base_confidence, [], 0, 0, None
         parsed = _parse_research_json(msg.content or "")
     if parsed is None:
-        return base_coverage, base_confidence, [], in_tok, out_tok
+        reason = "react_reply_off_contract" if react_attempted else "reply_off_contract"
+        return base_coverage, base_confidence, [], in_tok, out_tok, reason
 
     findings = parsed.get("key_findings") or []
     if not isinstance(findings, list):
@@ -7562,6 +7801,7 @@ def _llm_label(
         [str(f)[:200] for f in findings][:5],
         in_tok,
         out_tok,
+        None,
     )
 
 
@@ -7621,10 +7861,13 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
         text = str(p.get("passage") or "").strip().replace("\n", " ")
         if len(text) > 160:
             text = text[:157] + "..."
+        rel = p.get("relevance") or {}
         passage_previews.append({
             "id": (p.get("article_ids") or ["?"])[0],
             "distance": p.get("distance"),
             "score": p.get("score"),
+            "class_hit": rel.get("class_keyword_hit"),
+            "repair_hit": rel.get("repair_term_hit"),
             "preview": text,
         })
 
@@ -7640,15 +7883,20 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
                 "date": p.get("date"),
                 "article_ids": p.get("article_ids", []),
                 "quarantined_summary": quarantined,
+                "relevance": p.get("relevance") or {},
             }
         )
 
     base_coverage = result["coverage"]
     base_confidence = "high" if base_coverage == "direct_match" else "medium"
 
-    llm_enabled = _rag_llm_enabled()
+    fast_path = _clear_case_fast_path(
+        state.get("yolo_output") or {}, state.get("image_quality") or {}, md
+    )
+    llm_enabled = _rag_llm_enabled() and fast_path is None
+    fb_reason: str | None = None
     if llm_enabled:
-        coverage, confidence, findings, in_tok, out_tok = _llm_label(
+        coverage, confidence, findings, in_tok, out_tok, fb_reason = _llm_label(
             hazard_class=hazard_class,
             road_type=road_type,
             procedures_safe=procedures_safe,
@@ -7709,7 +7957,9 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
                 "llm_calls_all_failed: " + ",".join(_summary.get("errors") or ["unknown"])
             )
     if not llm_enabled:
-        trace_entry["content"]["llm_skipped_reason"] = "AGENT_RAG_RETRIEVER_LLM=0"
+        trace_entry["content"]["llm_skipped_reason"] = fast_path or "AGENT_RAG_RETRIEVER_LLM=0"
+    elif fb_reason:
+        trace_entry["content"].setdefault("llm_fallback_reason", fb_reason)
 
     update: dict = {
         "procedures": procedures_safe,
@@ -7830,15 +8080,19 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
     """
     match = state.get("dataset_match")
     image_match_cite: list[str] = []
+    image_status: dict[str, Any] | None = None
     if match:
         km = _known_image_decision(match, state)
         if km is not None:
             return km
-        # severe severity on a known image: keep running the rule tree,
-        # but record the catalog entry so the final Decision rationale and
-        # the cited_sources show that the system also recognised the frame.
+        # Recognised frame that may not be sealed (phash only, no stored
+        # score, score disagrees with the live detector, or severe): run
+        # the regular tree and cite the catalogue as a supporting source.
         _summary = _dataset_lookup_summary(match)
         image_match_cite = [f"catalog:pic_id={_summary.get('pic_id')}"]
+        _live_cls, _live_conf = _detector_prediction_from_state(state)
+        _sev = str((state.get("hazard_profile") or {}).get("severity_signal") or "")
+        image_status = _image_match_status(match, _live_cls, _sev, _live_conf)
     profile = state.get("hazard_profile") or {}
     md = state.get("metadata") or {}
     tool_result_ids = state.get("tool_result_ids") or []
@@ -7849,6 +8103,7 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
     confidence = float(profile.get("primary_confidence", 0.0))
     road_type = md.get("road_type", "main")
     lane_blocked = md.get("lane_blocked", "none")
+    pol = _policy_decision_thresholds()
 
     severity_tool = DECISION_TOOLS["check_hazard_severity"][0](
         hazard_class=hazard_class,
@@ -7871,12 +8126,14 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
                 if c not in cites:
                     cites.append(c)
             d["cited_sources"] = cites
+            reason = (image_status or {}).get("reason", "regular_triage")
             hint = (
-                f" (catalog recognised this frame as {image_match_cite[0]}, "
-                f"severity override routed through regular triage)"
+                f" (catalog recognised this frame as {image_match_cite[0]}; "
+                f"not sealed as known_image: {reason})"
             )
             d["rationale"] = (str(d.get("rationale") or "") + hint)[:500]
             d["image_matched"] = True
+            d["image_match_status"] = image_status
         return d
 
     if perception_conf == "low":
@@ -7903,7 +8160,7 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
             "missing_evidence": [],
         })
 
-    if 0.4 <= confidence < 0.6 and not profile.get("is_recurring_location"):
+    if pol["nme_lo"] <= confidence < pol["nme_hi"] and not profile.get("is_recurring_location"):
         return _finalize({
             "action": "needs_more_evidence",
             "rationale": (
@@ -7924,10 +8181,10 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
         })
 
     if (
-        hazard_class == "D40"
-        and lane_blocked in ("partial", "full")
-        and road_type == "main"
-        and confidence >= 0.6
+        hazard_class in pol["urgent_classes"]
+        and lane_blocked in pol["urgent_lanes"]
+        and road_type in pol["urgent_roads"]
+        and confidence >= pol["urgent_min_conf"]
     ):
         return _finalize({
             "action": "urgent",
@@ -7936,7 +8193,7 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
                 f"and confidence {confidence:.2f}"
             ),
             "priority": priority,
-            "cited_sources": tool_result_ids[:2],
+            "cited_sources": (_supported_rag_ids(state) or tool_result_ids)[:2],
             "missing_evidence": [],
         })
 
@@ -7944,7 +8201,7 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
         "action": "standard",
         "rationale": f"routine queue for {hazard_class} on {road_type} road",
         "priority": priority,
-        "cited_sources": tool_result_ids[:1],
+        "cited_sources": (_supported_rag_ids(state) or tool_result_ids)[:1],
         "missing_evidence": [],
     })
 
@@ -8060,7 +8317,46 @@ def _decision_messages(state: RoadGuardState, rule_hint: dict) -> list[dict]:
     ]
 
 
-def _grounded_or_none(parsed: dict | None, tool_result_ids: list[str]) -> dict | None:
+def _supported_rag_ids(state: dict) -> list[str]:
+    """article_ids whose passage names the hazard class. Entries without
+    a `relevance` key predate grading (tests, injected clients) and count
+    as supported so the rule tree behaves as before on that data."""
+    ids: list[str] = []
+    for p in state.get("procedures") or []:
+        rel = p.get("relevance")
+        if rel is None or rel.get("class_keyword_hit"):
+            ids.extend(str(a) for a in (p.get("article_ids") or []))
+    return ids
+
+
+def _cites_supported(cited: list[str], state: dict, action: str) -> tuple[bool, list[str]]:
+    """For urgent/standard, every RAG cite must point at a passage that
+    names the hazard class; existence in tool_result_ids is not support.
+    With no graded procedures on state there is nothing to check against."""
+    if action not in ("urgent", "standard") or not state.get("procedures"):
+        return True, []
+    supported = set(_supported_rag_ids(state))
+    bad = [str(s) for s in cited if not str(s).startswith("catalog:") and str(s) not in supported]
+    return (not bad), bad
+
+
+def _cite_support_map(cited: list[str], state: dict) -> dict[str, str]:
+    supported = set(_supported_rag_ids(state))
+    out: dict[str, str] = {}
+    for s in cited or []:
+        s = str(s)
+        if s.startswith("catalog:"):
+            out[s] = "catalog"
+        elif s in supported:
+            out[s] = "class_keyword"
+        else:
+            out[s] = "unsupported"
+    return out
+
+
+def _grounded_or_none(
+    parsed: dict | None, tool_result_ids: list[str], state: dict | None = None
+) -> dict | None:
     if parsed is None:
         return None
     try:
@@ -8072,6 +8368,11 @@ def _grounded_or_none(parsed: dict | None, tool_result_ids: list[str]) -> dict |
     except HandoffAssertionError as exc:
         LOGGER.info("decision_llm_ungrounded: %s", exc)
         return None
+    if state is not None:
+        ok, bad = _cites_supported(parsed["cited_sources"], state, parsed["action"])
+        if not ok:
+            LOGGER.info("decision_llm_cite_unsupported: %s", bad)
+            return None
     return parsed
 
 
@@ -8094,7 +8395,7 @@ def _llm_decide(
         LOGGER.warning("decision_llm_failed: %s", exc)
         return None, 0, 0
 
-    parsed = _grounded_or_none(_parse_decision_json(msg.content or ""), tool_result_ids)
+    parsed = _grounded_or_none(_parse_decision_json(msg.content or ""), tool_result_ids, state)
     return parsed, in_tok, out_tok
 
 
@@ -8351,7 +8652,7 @@ def _llm_decide_react(
     info["hops"] = hops
     if msg is None:
         return None, total_in, total_out, info
-    parsed = _grounded_or_none(_parse_decision_json(msg.content or ""), tool_result_ids)
+    parsed = _grounded_or_none(_parse_decision_json(msg.content or ""), tool_result_ids, state)
     return parsed, total_in, total_out, info
 
 
@@ -8571,6 +8872,10 @@ def decision_node(state: RoadGuardState) -> dict:
                     tool_result_ids=tool_result_ids,
                     action=candidate["action"],
                 )
+                ok, bad = _cites_supported(candidate["cited_sources"], state, candidate["action"])
+                if not ok:
+                    last_error = f"cited passage does not name the hazard class: {bad}"
+                    continue
                 decision = candidate
                 break
             except HandoffAssertionError as e:
@@ -8587,6 +8892,8 @@ def decision_node(state: RoadGuardState) -> dict:
             }
 
     assert decision is not None
+    if state.get("dataset_match") and "image_match_status" not in decision:
+        decision["image_match_status"] = rule_hint.get("image_match_status")
     if decision["action"] == "known_image" and not state.get("dataset_match"):
         # the model may not declare a photo known on its own
         fallback_reason = "known_image_without_match"
@@ -8650,6 +8957,7 @@ def decision_node(state: RoadGuardState) -> dict:
         decision["missing_evidence"] = [evidence_request["missing_field"]]
 
     trace_content = {**decision, "source": source}
+    trace_content["cite_support"] = _cite_support_map(decision.get("cited_sources") or [], state)
     if decision["action"] == "known_image":
         trace_content["dataset_match"] = _dataset_lookup_summary(state.get("dataset_match"))
     _llm_calls = end_llm_log()
@@ -9362,7 +9670,11 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             if pv.get("score") is not None:
                 score_bits.append(f"score={pv.get('score')}")
             if pv.get("distance") is not None:
-                score_bits.append(f"dist={pv.get('distance')}")
+                score_bits.append(f"dist={float(pv.get('distance')):.3f}")
+            if pv.get("class_hit") is not None:
+                score_bits.append(f"class_hit={pv.get('class_hit')}")
+            if pv.get("repair_hit") is not None:
+                score_bits.append(f"repair_hit={pv.get('repair_hit')}")
             score_str = ("  " + "  ".join(score_bits)) if score_bits else ""
             text = pv.get("preview") or ""
             out.append(f"{_INDENT}- {pid}{score_str}")
@@ -9474,14 +9786,24 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
         # cites are grounded by the dataset_lookup side-channel, not RAG.
         if cited:
             lines = []
+            support = c.get("cite_support") or {}
             for s in cited:
                 if s.startswith("catalog:"):
                     lines.append(f"{s}=catalog")
-                elif s in tool_ids:
+                elif s in tool_ids and support.get(s, "class_keyword") == "class_keyword":
                     lines.append(f"{s}=rag")
+                elif s in tool_ids:
+                    lines.append(f"{s}=rag_unsupported")
                 else:
                     lines.append(f"{s}=UNGROUNDED")
             out.append(f"{_INDENT}grounded_per_source: " + "  ".join(lines))
+        ims = c.get("image_match_status")
+        if isinstance(ims, dict) and ims.get("matched"):
+            out.append(
+                f"{_INDENT}image_match_status: match={ims.get('match')}  pic_id={ims.get('pic_id')}  "
+                f"stored={ims.get('stored_prediction') or 'none'}  live={ims.get('live_class') or '?'}  "
+                f"agrees={ims.get('agrees')}  short_circuit={ims.get('short_circuit_ok')}  ({ims.get('reason')})"
+            )
         if action in ("urgent", "standard"):
             rag_cites = [s for s in cited if not s.startswith("catalog:")]
             # grounding requires: at least one RAG cite exists AND it is in

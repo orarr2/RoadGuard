@@ -107,7 +107,8 @@ def test_decision_short_circuits_to_known_image_when_catalogue_hits(seeded_db):
     }
     out = _decide_rule_based(state)
     assert out["action"] == "known_image"
-    assert out["cited_sources"] == []
+    assert out["cited_sources"] == ["catalog:pic_id=1"]
+    assert out["image_match_status"]["short_circuit_ok"] is True
     assert "pic_id=1" in out["rationale"]
     assert "firc_10001" in out["rationale"]
 
@@ -144,9 +145,11 @@ def test_known_image_contradiction_routes_to_human_review(seeded_db):
 
 
 def test_known_image_contradiction_ignored_when_detector_confidence_low(seeded_db):
-    """A detector that reports a different class but at near-zero
-    confidence (<0.30) is noise, not a real contradiction. Keep the
-    catalog verdict."""
+    """A detector that reports a different class at near-zero confidence
+    (<0.30) is not a catalog-vs-detector contradiction (no human_review
+    floor), but the stored score (D20) and the live class (D40) still
+    disagree, so the frame is not sealed as known_image: the regular rule
+    tree decides and cites the catalogue as a supporting source."""
     from roadguard_agent import _decide_rule_based
 
     state = {
@@ -168,34 +171,43 @@ def test_known_image_contradiction_ignored_when_detector_confidence_low(seeded_d
         },
     }
     out = _decide_rule_based(state)
-    assert out["action"] == "known_image", out
+    assert out["action"] != "known_image", out
+    assert out["image_match_status"]["reason"] == "stored_vs_live_class_mismatch"
+    assert "catalog:pic_id=1" in out["cited_sources"]
 
 
 def test_known_image_contradiction_overlapping_class_is_not_a_contradiction(seeded_db):
     """Catalog has D00,D20 and detector reports D20. The detector's call
-    is covered by the catalog labels; no contradiction, keep known_image."""
+    is covered by the catalog labels; no contradiction. An identical file
+    (sha256) with an agreeing stored score is sealed as known_image; the
+    same frame matched only by phash is a similar photo and is not."""
     from roadguard_agent import _decide_rule_based
 
-    state = {
-        "hazard_profile": {"primary_class": "D20", "primary_confidence": 0.72},
-        "metadata": {"road_type": "main", "lane_blocked": "none"},
-        "tool_result_ids": [],
-        "research_coverage": "no_match",
-        "perception_confidence": "high",
-        "dataset_match": {
-            "found": True,
-            "match": "phash",
-            "distance": 3,
-            "pic_id": 1,
-            "file_name": "firc_10001.jpg",
-            "split": "train",
-            "classes": "D00,D20",
-            "n_labels": 2,
-            "model_prediction": {"top1_class": "D20", "top1_confidence": 0.42},
-        },
-    }
-    out = _decide_rule_based(state)
-    assert out["action"] == "known_image", out
+    def _state(match: str, distance: int) -> dict:
+        return {
+            "hazard_profile": {"primary_class": "D20", "primary_confidence": 0.72},
+            "metadata": {"road_type": "main", "lane_blocked": "none"},
+            "tool_result_ids": [],
+            "research_coverage": "no_match",
+            "perception_confidence": "high",
+            "dataset_match": {
+                "found": True,
+                "match": match,
+                "distance": distance,
+                "pic_id": 1,
+                "file_name": "firc_10001.jpg",
+                "split": "train",
+                "classes": "D00,D20",
+                "n_labels": 2,
+                "model_prediction": {"top1_class": "D20", "top1_confidence": 0.42},
+            },
+        }
+
+    sealed = _decide_rule_based(_state("sha256", 0))
+    assert sealed["action"] == "known_image", sealed
+    similar = _decide_rule_based(_state("phash", 3))
+    assert similar["action"] != "known_image", similar
+    assert similar["image_match_status"]["reason"] == "phash_similar_not_same_file"
 
 
 def test_profile_builder_annotates_dataset_match_in_trace(seeded_db):

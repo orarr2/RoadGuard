@@ -2083,6 +2083,9 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
                      "action_urgent": 0},
     }
     llm_fallback_runs = 0
+    fallback_by_cause: dict[str, int] = {}
+    fallback_by_agent: dict[str, dict[str, int]] = {}
+    fast_path_skips: dict[str, int] = {}
     for row in rows or []:
         try:
             trace = json.loads((row["agent_trace_json"] if hasattr(row, "__getitem__") else getattr(row, "agent_trace_json", None)) or "[]")
@@ -2152,12 +2155,49 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
             llm_s = c.get("llm") or {}
             if isinstance(llm_s, dict) and llm_s.get("failed_calls", 0) > 0:
                 had_fallback = True
+                cause = _classify_llm_failure(llm_s)
+                fallback_by_cause[cause] = fallback_by_cause.get(cause, 0) + 1
+                by_speaker = fallback_by_agent.setdefault(speaker or "?", {})
+                by_speaker[cause] = by_speaker.get(cause, 0) + 1
+            reason = str(c.get("llm_fallback_reason") or "")
+            if reason.endswith("off_contract"):
+                key = "react_reply_off_contract" if reason.startswith("react") else "reply_off_contract"
+                fallback_by_cause[key] = fallback_by_cause.get(key, 0) + 1
+                by_speaker = fallback_by_agent.setdefault(speaker or "?", {})
+                by_speaker[key] = by_speaker.get(key, 0) + 1
+            if c.get("llm_skipped_reason", "").startswith("clear_case_fast_path"):
+                fast_path_skips[speaker or "?"] = fast_path_skips.get(speaker or "?", 0) + 1
         if had_fallback:
             llm_fallback_runs += 1
     return {
         "per_agent": counters,
         "llm_fallback_runs": llm_fallback_runs,
+        "llm_fallback_by_cause": fallback_by_cause,
+        "llm_fallback_by_agent": fallback_by_agent,
+        "fast_path_skips": fast_path_skips,
     }
+
+
+def _classify_llm_failure(llm_s: dict) -> str:
+    """Bucket a node's failed LLM calls by the first concrete error text,
+    falling back to the exception type. Buckets: timeout, http_5xx,
+    http_429, http_4xx, connection, parse, other."""
+    msg = str(llm_s.get("error_sample") or "").lower()
+    types = " ".join(str(t) for t in (llm_s.get("errors") or [])).lower()
+    text = msg + " " + types
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "429" in text or "ratelimit" in text or "rate limit" in text or "quota" in text:
+        return "http_429"
+    if any(code in text for code in ("http_5", " 500", " 502", " 503", " 504", "_50")):
+        return "http_5xx"
+    if any(code in text for code in ("401", "403", "404", "400", "http_4")):
+        return "http_4xx"
+    if "connect" in text or "refused" in text or "unreachable" in text or "dns" in text:
+        return "connection"
+    if "json" in text or "parse" in text or "contract" in text or "decode" in text:
+        return "parse"
+    return "other"
 
 
 # ---------------------------------------------------------------------------
@@ -3976,7 +4016,7 @@ def create_app() -> FastAPI:
         if _is_private_host(request):
             rows = db.list_recent_hazards(limit=limit)
         else:
-            user = get_current_user(request)
+            user = get_current_user(request, get_settings())
             rows = db.list_user_hazards(_user_id_of(user), limit=limit)
         return HazardHistoryResponse(
             items=[
@@ -4059,7 +4099,7 @@ def create_app() -> FastAPI:
         if _is_private_host(request):
             r = db.get_hazard(hazard_id)
         else:
-            user = get_current_user(request)
+            user = get_current_user(request, get_settings())
             r = db.get_hazard(hazard_id, user_id=_user_id_of(user))
         if r is None:
             raise HTTPException(
