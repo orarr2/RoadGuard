@@ -16,6 +16,18 @@ agent layer on the server recommends one of four actions - `urgent`, `standard`,
 the municipal repair standards. Nothing closes a road or dispatches a contractor:
 every `urgent` or `human_review` verdict waits for a human on the approval page.
 
+## Screenshots
+
+![Agent flow page while a run is in progress: sanitize, signal extractor and profile builder done, RAG retriever running, the autonomy line of the current worker on the right](docs/images/agent-flow-live.jpg)
+
+![Live digest: the day's cases with the KPI strip (new reports, urgent, standard queue, human review, needs more evidence, known image, approvals pending, awaiting photo) and the selected case's photo](docs/images/live-digest-cases.jpg)
+
+![Live trace terminal: one run end to end, model line, per-agent lines with LLM latency and tokens, RAG passages with distance and class hits, autonomy lines, and the KNOWN_IMAGE verdict grounded in the catalogue](docs/images/live-trace-known-image.jpg)
+
+![Webapp sign-in modal in sign-up mode: Google button, username, optional email, password rules](docs/images/webapp-create-account.jpg)
+
+![Webapp landing page signed in: the header shows the username and the Log out button](docs/images/webapp-signed-in.jpg)
+
 ## Layout
 
 ```
