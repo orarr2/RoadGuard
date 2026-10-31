@@ -722,6 +722,53 @@ class Database:
         Caller enforces the 10-user cap against this count at registration."""
         return int(self._conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
 
+    def merge_prefixed_users(self) -> int:
+        """Fold ``user:<id>`` rows into the ``<id>`` row they shadow.
+
+        Until 31.10.2026 the API upserted a registered user's token subject
+        (``user:<id>``) as a second users row on the first upload. That row
+        carried no admin flag and /auth/me resolved to it. The hazards move
+        to the real row and the shadow row goes. Idempotent; returns the
+        number of rows folded.
+        """
+        shadows = self._conn.execute(
+            "SELECT id FROM users WHERE id LIKE 'user:%' "
+            "AND substr(id, 6) IN (SELECT id FROM users)"
+        ).fetchall()
+        for (shadow,) in shadows:
+            real = shadow[5:]
+            self._conn.execute(
+                "UPDATE hazards SET user_id = ? WHERE user_id = ?", (real, shadow)
+            )
+            self._conn.execute("DELETE FROM users WHERE id = ?", (shadow,))
+        return len(shadows)
+
+    def get_user_by_google_sub(self, google_sub: str) -> User | None:
+        if not google_sub:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM users WHERE google_sub = ?", (google_sub,)
+        ).fetchone()
+        return self._row_to_user(row) if row else None
+
+    def get_user_by_email(self, email: str) -> User | None:
+        """The account behind a verified e-mail: a registered row (username)
+        first, admins first, oldest first; a legacy passphrase row only when
+        nothing else carries the address."""
+        if not email:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM users WHERE lower(email) = lower(?) "
+            "ORDER BY (username IS NOT NULL) DESC, is_admin DESC, created_at ASC LIMIT 1",
+            (email,),
+        ).fetchone()
+        return self._row_to_user(row) if row else None
+
+    def set_google_sub(self, user_id: str, google_sub: str) -> None:
+        self._conn.execute(
+            "UPDATE users SET google_sub = ? WHERE id = ?", (google_sub, user_id)
+        )
+
     def create_user_full(
         self,
         user_id: str,
@@ -1845,12 +1892,12 @@ class BudgetTracker:
         return self.tokens_in * PRICE_IN + self.tokens_out * PRICE_OUT
 
     def start_clock(self) -> None:
-        """Stamp started_at at the Supervisor's first check of this run.
+        """Stamp started_at when the run enters the graph (sanitize).
 
         The tracker is built in initial_state(), before the graph runs. On
         a cold process that is tens of seconds earlier (chromadb import,
         graph compile) and must not count against the wall-clock cap.
-        Later calls are no-ops, so the cap counts from the first check.
+        Later calls are no-ops, so the cap counts from the run's entry.
         """
         if not self.clock_started:
             self.started_at = time.time()
@@ -2672,6 +2719,18 @@ def _call_timeout(deadline: float | None) -> float | None:
     return max(_MIN_CALL_TIMEOUT_SECONDS, min(provider_timeout_seconds(), remaining))
 
 
+# A ReAct round (one provider call plus its tool calls) is not started when
+# fewer seconds than this remain before the deadline: it could not finish,
+# and the rule path stands anyway.
+_MIN_HOP_HEADROOM_SECONDS = 5.0
+
+
+def _deadline_blocks_hop(deadline: float | None) -> bool:
+    """True when the time left before ``deadline`` is under the hop headroom."""
+    remaining = _remaining_seconds(deadline)
+    return remaining is not None and remaining < _MIN_HOP_HEADROOM_SECONDS
+
+
 # ---------------------------------------------------------------------------
 # Dead-vendor memory
 # ---------------------------------------------------------------------------
@@ -3422,6 +3481,52 @@ def _llm_react_worker(
     max_hops: int | None = None,
     time_cap_s: float | None = None,
 ) -> tuple[dict | None, int, int, dict]:
+    """Run the worker's ReAct rounds under the tighter of the run deadline
+    and the worker's own time cap.
+
+    The cap is published through the thread-local deadline for the length
+    of the loop, so chat() cuts every call's timeout to what is left of it
+    (a call could otherwise start at second 44 of a 45 s cap and run the
+    full provider timeout); the previous value is restored afterwards.
+    """
+    run_deadline = _run_deadline()
+    deadline = run_deadline
+    if time_cap_s is not None:
+        cap_deadline = time.time() + float(time_cap_s)
+        deadline = cap_deadline if run_deadline is None else min(run_deadline, cap_deadline)
+    narrowed = deadline is not None and deadline != run_deadline
+    previous = current_deadline()
+    if narrowed:
+        set_deadline(deadline)
+    try:
+        return _react_worker_rounds(
+            agent_name=agent_name,
+            system_prompt=system_prompt,
+            user_payload=user_payload,
+            tool_registry=tool_registry,
+            state=state,
+            provider_override=provider_override,
+            max_hops=max_hops,
+            time_cap_s=time_cap_s,
+            deadline=deadline,
+        )
+    finally:
+        if narrowed:
+            set_deadline(previous)
+
+
+def _react_worker_rounds(
+    *,
+    agent_name: str,
+    system_prompt: str,
+    user_payload: dict,
+    tool_registry: dict,
+    state: dict,
+    provider_override: str | None = None,
+    max_hops: int | None = None,
+    time_cap_s: float | None = None,
+    deadline: float | None = None,
+) -> tuple[dict | None, int, int, dict]:
     """Generic ReAct loop for a worker agent.
 
     tool_registry maps ``name -> (callable, schema)``. The callable is
@@ -3465,6 +3570,15 @@ def _llm_react_worker(
             LOGGER.info("%s_react_time_cap: %.0fs spent, rule path stands", agent_name, time_cap_s)
             info["hops"] = hops
             info["timed_out"] = True
+            return None, total_in, total_out, info
+        if _deadline_blocks_hop(deadline):
+            LOGGER.info(
+                "%s_react_deadline: %.0fs left before the deadline, rule path stands",
+                agent_name, max(0.0, _remaining_seconds(deadline) or 0.0),
+            )
+            info["hops"] = hops
+            info["timed_out"] = True
+            info["deadline_hit"] = True
             return None, total_in, total_out, info
         offer = schemas if (hops < max_hops and schemas) else None
         try:
@@ -3652,6 +3766,7 @@ def _verified_signals(text: str, claimed: Any, info: dict, record: dict) -> dict
     tool = ((info or {}).get("tools_run") or {}).get("extract_measurements")
     if not isinstance(tool, dict) or not tool.get("ok"):
         tool = _tool_extract_measurements(text)
+        record["auto_ran"] = ["extract_measurements"]
     verified = _coerce_signals(claimed)
     for key in ("size_cm", "depth_cm", "vehicles_swerving", "standing_water"):
         tool_value = tool.get(key)
@@ -3864,6 +3979,19 @@ def _policy_queues() -> dict[str, float]:
         "approval_sla_hours": _f("approval_sla_hours", 24.0),
         "evidence_ttl_hours": _f("evidence_ttl_hours", 72.0),
     }
+
+
+def _policy_known_image() -> dict[str, float]:
+    """known_image.* thresholds from policy.yaml with a safe default."""
+    try:
+        ki = (load_policy() or {}).get("known_image") or {}
+    except Exception:
+        ki = {}
+    try:
+        floor = float(ki.get("min_stored_confidence", 0.4))
+    except (TypeError, ValueError):
+        floor = 0.4
+    return {"min_stored_confidence": floor}
 
 
 def _policy_summary_for_prompt() -> str:
@@ -6217,6 +6345,8 @@ def _image_match_status(
     if live_confidence is not None and float(live_confidence) <= 0.0:
         live = None
     kind = str(match.get("match") or "")
+    catalog_classes = _catalog_classes_set(match.get("classes") or "")
+    floor = _policy_known_image()["min_stored_confidence"]
     status: dict[str, Any] = {
         "matched": True,
         "match": kind,
@@ -6224,8 +6354,11 @@ def _image_match_status(
         "distance": match.get("distance"),
         "stored_prediction": f"{stored_cls} {float(stored_conf or 0):.2f}" if stored_cls else None,
         "stored_class": stored_cls,
+        "stored_confidence": float(stored_conf) if stored_conf not in (None, "") else None,
         "live_class": live,
+        "catalog_classes": sorted(catalog_classes),
         "agrees": (stored_cls == live) if (stored_cls and live) else None,
+        "min_stored_confidence": floor,
         "short_circuit_ok": False,
         "reason": "ok",
     }
@@ -6237,6 +6370,14 @@ def _image_match_status(
         status["reason"] = "no_live_detection"
     elif stored_cls != live:
         status["reason"] = "stored_vs_live_class_mismatch"
+    elif catalog_classes and live not in catalog_classes:
+        # Two detector readings agree with each other but not with the
+        # human labels of this very image (31.10.2026 review, pic_id=13786:
+        # labels D20, recorded D00 0.20, live D00). Agreement between two
+        # model outputs is not agreement with the ground truth.
+        status["reason"] = "catalog_labels_disagree"
+    elif float(stored_conf or 0.0) < floor:
+        status["reason"] = "stored_confidence_below_floor"
     elif str(severity or "").lower() in {"severe", "urgent"}:
         status["reason"] = "severity_blocks_shortcut"
     else:
@@ -6313,6 +6454,31 @@ def _known_image_decision(match: dict, state: dict | None = None) -> dict | None
         profile = state.get("hazard_profile") or {}
         severity = str(profile.get("severity_signal") or "").lower()
     status = _image_match_status(match, detector_class, severity, detector_confidence)
+    if status["reason"] == "catalog_labels_disagree":
+        # The recorded score and the live detector agree with each other and
+        # both contradict the human label of this exact image. Whatever the
+        # confidence, that is a label-vs-model dispute a person must settle;
+        # it must never close as known_image priority 0.
+        rationale = (
+            f"catalog label vs model dispute on a known image: catalogued labels "
+            f"{summary.get('classes')} but both the recorded detector score "
+            f"({status.get('stored_prediction')}) and the live detector ({status.get('live_class')}) "
+            f"say otherwise. A human should resolve the label before any triage. ({base_rationale})"
+        )
+        return {
+            "action": "human_review",
+            "rationale": rationale[:500],
+            "priority": 50,
+            "cited_sources": catalog_cite,
+            "missing_evidence": [],
+            "floor_applied": True,
+            "floor_reason": "known_image_catalog_label_vs_prediction",
+            "floor_trigger": (
+                f"catalog_classes={status.get('catalog_classes')} vs stored={status.get('stored_class')} "
+                f"live={status.get('live_class')}"
+            ),
+            "image_match_status": status,
+        }
     if not status["short_circuit_ok"]:
         # Signal to _decide_rule_based: do not short-circuit. The rule tree
         # decides and cites the catalog pic_id as a supporting source.
@@ -7064,9 +7230,14 @@ def current_budget() -> BudgetTracker:
 
 def sanitize_node(state: RoadGuardState) -> dict:
     """First node in the graph. Not an LLM. Runs boundary defence."""
-    # Entry point of every run and resume: a deadline left on this thread
-    # by an earlier run must not bound the signal extractor before the first check.
-    clear_deadline()
+    # Entry point of every run: the wall clock starts here and the deadline
+    # is published to chat() at once, so the signal extractor's calls are
+    # bounded like every later node's. Until 31.10.2026 the clock started at
+    # the Supervisor's first check, one node later, and a 650 s intake call
+    # ran in a run capped at 240 s.
+    budget = state.get("budget") or current_budget()
+    budget.start_clock()
+    set_deadline(budget.deadline)
     original_md = state.get("metadata") or {}
     md = dict(original_md)
     original_location = md.get("location", "")
@@ -7143,9 +7314,10 @@ def supervisor_node(state: RoadGuardState) -> dict:
     Reads the tracker from state (production path). Falls back to the
     context var when state has no budget set (legacy tests).
 
-    The first check starts the wall-clock budget (process cold start is
-    not counted) and publishes the run deadline to chat(), so provider
-    retries, fallback links and panel seats stop where the cap would fire.
+    The wall clock and the run deadline start in sanitize_node; the check
+    here re-publishes the deadline to chat() (a no-op on the same run), so
+    provider retries, fallback links and panel seats stop where the cap
+    would fire.
     """
     budget = state.get("budget") or current_budget()
     budget.start_clock()
@@ -7744,13 +7916,25 @@ def _llm_refine(
                 claimed = raw.get("is_recurring_location") if isinstance(raw, dict) else None
                 if isinstance(claimed, bool) and claimed != bool(base_profile.get("is_recurring_location")):
                     autonomy["violations"].append("recurrence_claim_contradicts_lookup")
-                if any(v.startswith("required_not_called") for v in autonomy["violations"]):
-                    # Judged the image without looking at it: the rule
-                    # profile stands and the trace says why.
-                    parsed = None
-                    fallback_reason = "autonomy_required_tool_not_called"
+                quality = ((info or {}).get("tools_run") or {}).get("inspect_image_quality")
+                if not isinstance(quality, dict) or not quality.get("ok"):
+                    # The agent judged the frame without the quality tool
+                    # (31.10 review: almost every run). The code runs the
+                    # tool it skipped and feeds the result into the
+                    # contract: a "low" verdict caps the agent's confidence.
+                    quality = _tool_inspect_image_quality(
+                        blur_score=float(iq.get("blur_score", 100.0) or 0.0),
+                        is_road_scene=bool(iq.get("is_road_scene", True)),
+                        brightness_mean=float(iq.get("brightness_mean", 0.5) or 0.5),
+                        ocr_suspicious=bool((iq.get("ocr_sanitized") or {}).get("is_suspicious_pattern", False)),
+                    )
+                    autonomy["auto_ran"] = ["inspect_image_quality"]
+                autonomy["quality_verdict"] = quality.get("quality_verdict")
+                if quality.get("quality_verdict") == "low" and parsed.get("confidence") != "low":
+                    autonomy["violations"].append("confidence_capped_by_quality_tool")
+                    parsed["confidence"] = "low"
             elif (info or {}).get("timed_out"):
-                fallback_reason = "autonomy_time_cap"
+                fallback_reason = "run_deadline" if info.get("deadline_hit") else "autonomy_time_cap"
 
     # A ReAct miss falls back to the rule profile directly; a second
     # single-call round was the third LLM call per run in the 27.10 log.
@@ -8222,8 +8406,12 @@ def _autonomous_retrieval(
             "tool_result_ids": [aid for p in merged for aid in (p.get("article_ids") or [])],
             "coverage": _coverage(merged, hazard_class, road_type),
         }
+        record["source"] = "agent_retrieval"
     else:
-        record["violations"].append("no_passages_retrieved")
+        # Not a missing retrieval: the caller runs the deterministic query
+        # and records it as the fallback, so the trace never reads as if
+        # Decision got no passages.
+        record["agent_retrieved"] = False
     # A coverage judgement without any retrieval is not a judgement.
     label = (
         _parse_research_json(json.dumps(raw))
@@ -8268,6 +8456,11 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
         result = RESEARCH_TOOLS["query_repair_standards"][0](
             hazard_class=hazard_class, road_type=road_type, k=3
         )
+        if autonomy is not None:
+            autonomy["fallback"] = (
+                f"deterministic_query ({len(result.get('procedures') or [])} passages)"
+            )
+            autonomy["auto_ran"] = ["query_repair_standards"]
 
     # 27.10.2026 relevance filter: non-road passages (safety-non-road-* in
     # mini_corpus) were being returned for every D40/D20 road query, and
@@ -9020,6 +9213,11 @@ def _llm_decide_react(
 
     msg = None
     for _round in range(DECISION_REACT_MAX_HOPS + 1):
+        if _deadline_blocks_hop(_run_deadline()):
+            LOGGER.info("decision_react_deadline: run deadline reached after %d hops, rule tree decides", hops)
+            info["hops"] = hops
+            info["deadline_hit"] = True
+            return None, total_in, total_out, info
         offer = schemas if hops < DECISION_REACT_MAX_HOPS else None
         try:
             msg, in_tok, out_tok = chat(messages, tools=offer, temperature=0.0, use_panel=False)
@@ -9334,7 +9532,9 @@ def decision_node(state: RoadGuardState) -> dict:
                 "missing_evidence": [],
             }
     else:
-        fallback_reason = "llm_unavailable_or_unparseable"
+        fallback_reason = (
+            "run_deadline" if (react_info or {}).get("deadline_hit") else "llm_unavailable_or_unparseable"
+        )
         last_error = ""
         for _ in range(MAX_GROUNDING_RETRIES):
             candidate = _decide_rule_based(state)
@@ -10398,9 +10598,14 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
     if isinstance(auto, dict):
         tools = ",".join(auto.get("tools_used") or []) or "none"
         violations = ",".join(auto.get("violations") or []) or "none"
-        out.append(
-            f"{_INDENT}autonomy: tools={tools}  hops={auto.get('hops', 0)}  violations={violations}"
-        )
+        line = f"{_INDENT}autonomy: tools={tools}  hops={auto.get('hops', 0)}  violations={violations}"
+        if auto.get("auto_ran"):
+            line += f"  auto_ran={','.join(auto['auto_ran'])}"
+        if auto.get("fallback"):
+            line += f"  fallback={auto['fallback']}"
+        if auto.get("source"):
+            line += f"  source={auto['source']}"
+        out.append(line)
     ts = entry.get("ts")
     if ts and out:
         out[0] = f"{_clock(ts)} {out[0]}"

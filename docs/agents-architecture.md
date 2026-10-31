@@ -5,7 +5,7 @@
 > הערת פריסה (24.10.2026): הפרודקשן רץ על Oracle `VM.Standard.A1.Flex` (4 OCPU ARM, 24 GB RAM, Always Free). כל ה-LLMs הם Ollama לוקאלי ב-Docker, בפריסה הבאה:
 > - `AGENT_SIGNAL_LLM=ollama:llama3.2:3b` (signal_extractor)
 > - `AGENT_PERCEPTION_LLM=ollama:qwen2.5:3b` (profile_builder)
-> - `AGENT_RESEARCH_LLM=ollama:granite3.3:2b` (rag_retriever)
+> - `AGENT_RESEARCH_LLM=ollama:qwen2.5:3b` (rag_retriever; עד 31.10.2026 רץ על granite3.3:2b, שלא הפעיל אף כלי ב-17 ריצות אוטונומיות)
 > - `AGENT_LLM_PROVIDER=ollama:qwen2.5:3b` (Decision; הוחלף מ-`qwen2.5:7b` ל-`3b` ב-24.10.2026 אחרי שה-latency ירד 3-5x על ה-host הזה בלי regression בסבב ה-eval)
 > - RAG embeddings: `all-MiniLM-L6-v2` (ONNX, 384 ממדים, אותו מודל שבו נבנה הקורפוס; `nomic-embed-text` מותקן ב-Ollama אך אינו בשימוש)
 >
@@ -1286,7 +1286,7 @@ uvicorn roadguard_api:app --reload --port 8000
 
 # live mode כמו באורקל: Ollama מקומי לכל סוכן, ReAct ב-Decision, עובדים אוטונומיים
 ROADGUARD_USE_LIVE=1 AGENT_LLM_PROVIDER=ollama:qwen2.5:3b \
-  AGENT_SIGNAL_LLM=ollama:llama3.2:3b AGENT_PERCEPTION_LLM=ollama:qwen2.5:3b AGENT_RESEARCH_LLM=ollama:granite3.3:2b \
+  AGENT_SIGNAL_LLM=ollama:llama3.2:3b AGENT_PERCEPTION_LLM=ollama:qwen2.5:3b AGENT_RESEARCH_LLM=ollama:qwen2.5:3b \
   AGENT_PROFILE_BUILDER_LLM=1 AGENT_RAG_RETRIEVER_LLM=1 AGENT_DECISION_REACT=1 AGENT_WORKER_AUTONOMY=1 \
   uvicorn roadguard_api:app --reload --port 8000
 

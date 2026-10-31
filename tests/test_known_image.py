@@ -334,3 +334,65 @@ def test_submit_async_rejects_wrongly_shaped_hash(client):
         "image_sha256": "not-a-hash",
     })
     assert r.status_code == 422
+
+
+def test_known_image_label_vs_model_dispute_routes_to_human(seeded_db):
+    """31.10 review, pic_id=13786: the recorded score and the live detector
+    agree with each other (D00) but the catalogue labels say D20. Agreement
+    between two model readings is not agreement with the ground truth, so
+    the frame must never close as known_image priority 0, whatever the
+    confidence; a human settles the label."""
+    from roadguard_agent import _decide_rule_based, _image_match_status
+
+    match = {
+        "found": True, "match": "sha256", "distance": 0, "pic_id": 1,
+        "file_name": "firc_10001.jpg", "split": "train", "classes": "D20", "n_labels": 1,
+        "model_prediction": {"top1_class": "D00", "top1_confidence": 0.20},
+    }
+    status = _image_match_status(match, "D00", "minor", 0.21)
+    assert status["reason"] == "catalog_labels_disagree"
+    assert status["catalog_classes"] == ["D20"] and status["short_circuit_ok"] is False
+
+    state = {
+        "hazard_profile": {"primary_class": "D00", "primary_confidence": 0.21},
+        "metadata": {"road_type": "main", "lane_blocked": "none"},
+        "tool_result_ids": [], "research_coverage": "no_match", "perception_confidence": "medium",
+        "dataset_match": match,
+    }
+    out = _decide_rule_based(state)
+    assert out["action"] == "human_review", out
+    assert out["priority"] == 50
+    assert out["floor_reason"] == "known_image_catalog_label_vs_prediction"
+    assert "D20" in out["rationale"] and "D00" in out["rationale"]
+    assert out["cited_sources"] == ["catalog:pic_id=1"]
+
+
+def test_known_image_needs_stored_confidence_above_policy_floor(seeded_db, monkeypatch):
+    """A recorded score under known_image.min_stored_confidence is not
+    evidence; the regular tree decides with the catalogue cited."""
+    from roadguard_agent import _decide_rule_based, _image_match_status, _policy_known_image
+    import roadguard_agent as ra
+
+    assert _policy_known_image() == {"min_stored_confidence": 0.4}
+    match = {
+        "found": True, "match": "sha256", "distance": 0, "pic_id": 1,
+        "file_name": "firc_10001.jpg", "split": "train", "classes": "D20", "n_labels": 1,
+        "model_prediction": {"top1_class": "D20", "top1_confidence": 0.25},
+    }
+    assert _image_match_status(match, "D20", "minor", 0.6)["reason"] == "stored_confidence_below_floor"
+    state = {
+        "hazard_profile": {"primary_class": "D20", "primary_confidence": 0.6},
+        "metadata": {"road_type": "secondary", "lane_blocked": "none"},
+        "tool_result_ids": [], "research_coverage": "direct_match", "perception_confidence": "high",
+        "procedures": [{"article_ids": ["p1"], "passage": "alligator crack sealing"}],
+        "dataset_match": match,
+    }
+    out = _decide_rule_based(state)
+    assert out["action"] != "known_image"
+    assert out["image_match_status"]["reason"] == "stored_confidence_below_floor"
+    assert "catalog:pic_id=1" in out["cited_sources"]
+    # The floor is policy: lowering it seals the same frame.
+    monkeypatch.setattr(ra, "load_policy", lambda: {"known_image": {"min_stored_confidence": 0.2}})
+    assert _image_match_status(match, "D20", "minor", 0.6)["short_circuit_ok"] is True
+    monkeypatch.setattr(ra, "load_policy", lambda: {"known_image": {"min_stored_confidence": "bad"}})
+    assert _policy_known_image()["min_stored_confidence"] == 0.4

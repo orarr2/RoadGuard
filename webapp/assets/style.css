@@ -1553,6 +1553,7 @@ a.verdict-cite:hover {
 .social-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .social-icon { flex: none; }
 .gsi-hidden { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+#google-signin-button { display: flex; justify-content: center; min-height: 44px; margin: 0 0 4px; }
 
 .signin-divider {
   display: flex; align-items: center; gap: 10px;

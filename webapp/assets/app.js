@@ -741,16 +741,17 @@ function wireSignIn() {
   _wirePasswordToggle("signin-pw-toggle", "signin-password");
   _wirePasswordToggle("signup-pw-toggle", "signup-password");
 
-  // Our styled Google button triggers the hidden GSI widget
+  // The styled Google button is a stand-in until Google's widget renders;
+  // its click explains what is missing when the widget never comes.
   const googleBtn = document.getElementById("btn-google");
   if (googleBtn) googleBtn.addEventListener("click", _triggerGoogleSignIn);
 
   backdrop.addEventListener("click", () => closeSignIn());
 
-  // Mount the real GSI widget off-screen so our styled button can delegate
-  // to it. _gsiReady is true only when the widget was actually mounted
-  // (client id configured); otherwise the button explains what is missing
-  // instead of calling an uninitialised Google API and doing nothing.
+  // Mount Google's widget; once rendered it replaces the stand-in (the
+  // callback below). _gsiReady is true only when the widget was actually
+  // mounted (client id configured); otherwise the stand-in explains what
+  // is missing instead of calling an uninitialised Google API.
   _gsiReady = mountGoogleSignIn("google-signin-button", async (credential) => {
     err.hidden = true;
     try {
@@ -764,6 +765,13 @@ function wireSignIn() {
       err.hidden = false;
       err.textContent = _friendlyAuthError(e);
     }
+  }, (container) => {
+    // Google's own button is the one that opens the consent popup; the
+    // widget ignores a synthetic click from the styled stand-in (31.10.2026:
+    // "Continue with Google" did nothing). Show the widget, retire the
+    // stand-in.
+    container.classList.remove("gsi-hidden");
+    if (googleBtn) googleBtn.hidden = true;
   });
 }
 

@@ -48,6 +48,16 @@ decision:
   standard:
     fallback_for: ["anything not covered by urgent/human_review/needs_more_evidence"]
 
+known_image:
+  # A catalogue hit is sealed as known_image (priority 0) only when the bytes
+  # are identical, the recorded detector score and the live detector name the
+  # same class, that class is among the catalogue labels, the recorded score
+  # is at least min_stored_confidence and the frame is not severe. Anything
+  # else runs through the rule tree with the catalogue cited as context; two
+  # detector readings that agree with each other but not with the labels go
+  # to a human (31.10.2026 review, pic_id=13786).
+  min_stored_confidence: 0.4
+
 grounding:
   # cited_sources must be a subset of research.tool_result_ids, unless
   # action is in `allow_empty_citations`.

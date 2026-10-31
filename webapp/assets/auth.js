@@ -197,10 +197,13 @@ export async function loginWithGoogleIdToken(idToken) {
   return data;
 }
 
-export function mountGoogleSignIn(containerId, onCredential) {
+export function mountGoogleSignIn(containerId, onCredential, onRendered) {
   // Returns true when the widget will be mounted, false when the client id
   // is not configured on this build (the caller then shows a clear message
-  // instead of a button that does nothing).
+  // instead of a button that does nothing). onRendered(container) runs once
+  // Google's button is in the DOM, so the caller can show it in place of a
+  // styled stand-in: the widget ignores synthetic clicks, so only its own
+  // button opens the consent popup (31.10.2026).
   if (!CONFIG.GOOGLE_CLIENT_ID) return false;
   const el = document.getElementById(containerId);
   if (!el) return false;
@@ -217,10 +220,12 @@ export function mountGoogleSignIn(containerId, onCredential) {
     window.google.accounts.id.renderButton(el, {
       theme: "outline",
       size: "large",
-      text: "signin_with",
+      text: "continue_with",
       shape: "rectangular",
       logo_alignment: "left",
+      width: 400,
     });
+    if (typeof onRendered === "function") onRendered(el);
   };
   tryMount();
   return true;

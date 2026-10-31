@@ -93,6 +93,7 @@ def test_signal_numbers_without_the_tool_are_recomputed_by_regex(monkeypatch):
     assert parsed["reporter_signals"]["size_cm"] is None
     assert "required_not_called:extract_measurements" in autonomy["violations"]
     assert "unverified_number_dropped:size_cm" in autonomy["violations"]
+    assert autonomy["auto_ran"] == ["extract_measurements"]
 
 
 def _refine(monkeypatch, raw, tools_run):
@@ -112,16 +113,35 @@ def _refine(monkeypatch, raw, tools_run):
     return refined, seen
 
 
-def test_profile_agent_without_quality_tool_falls_back_to_rule_profile(monkeypatch):
+def test_profile_agent_without_quality_tool_gets_it_run_by_the_code(monkeypatch):
     raw = {"severity_signal": "severe", "severity_rationale": "x", "confidence": "high",
            "needs_more_evidence": False, "missing_fields": [], "tools_used": []}
     refined, seen = _refine(monkeypatch, raw, {})
     assert "rule_based_hint" not in seen["user_payload"]
     assert seen["user_payload"]["metadata"]["location"] == "Allenby 42"
     assert "recall_agent_notes" in seen["tool_registry"]
-    assert refined["severity_signal"] == "moderate"
-    assert refined["fallback_reason"] == "autonomy_required_tool_not_called"
+    # The agent's reading stands (iq={} reads as a usable frame); the
+    # skipped tool was run by the code and the violation is on record.
+    assert refined["severity_signal"] == "severe" and refined["confidence"] == "high"
+    assert "fallback_reason" not in refined
+    assert refined["autonomy"]["auto_ran"] == ["inspect_image_quality"]
+    assert refined["autonomy"]["quality_verdict"] == "high"
     assert "required_not_called:inspect_image_quality" in refined["autonomy"]["violations"]
+
+
+def test_profile_agent_confidence_is_capped_by_a_low_quality_verdict(monkeypatch):
+    _on(monkeypatch)
+    raw = {"severity_signal": "severe", "severity_rationale": "x", "confidence": "high",
+           "needs_more_evidence": False, "missing_fields": [], "tools_used": []}
+    monkeypatch.setattr(ra, "_llm_react_worker", lambda **_: (raw, 5, 2, {"hops": 0, "tools_run": {}}))
+    base = {"severity_signal": "moderate", "severity_rationale": "r", "is_recurring_location": False}
+    refined, _, _ = ra._llm_refine(
+        base_profile=base, base_confidence="low", base_needs_more=False, base_missing=[],
+        yolo={}, iq={"blur_score": 20, "is_road_scene": False}, md={"location": "x"}, state={},
+    )
+    assert refined["autonomy"]["quality_verdict"] == "low"
+    assert refined["confidence"] == "low"
+    assert "confidence_capped_by_quality_tool" in refined["autonomy"]["violations"]
 
 
 def test_profile_agent_with_quality_tool_is_accepted_and_recurrence_checked(monkeypatch):
@@ -161,6 +181,8 @@ def test_rag_agent_retrieval_feeds_the_handoff(monkeypatch):
     assert upd["tool_result_ids"] == ["p1"] and upd["research_coverage"] == "direct_match"
     c = upd["trace"][0]["content"]
     assert c["autonomy"]["tools_used"] == ["query_repair_standards"]
+    assert c["autonomy"]["source"] == "agent_retrieval"
+    assert "fallback" not in c["autonomy"]
     assert "cited_unknown_ids:1" in c["autonomy"]["violations"]
     assert c["key_findings"] == ["patch within 48h"] and c["llm_used"] is True
 
@@ -182,7 +204,10 @@ def test_rag_agent_that_never_retrieves_falls_back_to_the_tool_query(monkeypatch
     c = upd["trace"][0]["content"]
     assert c["llm_fallback_reason"] == "autonomy_required_tool_not_called"
     assert "required_not_called:query_repair_standards" in c["autonomy"]["violations"]
-    assert "no_passages_retrieved" in c["autonomy"]["violations"]
+    assert "no_passages_retrieved" not in c["autonomy"]["violations"]
+    assert c["autonomy"]["agent_retrieved"] is False
+    assert c["autonomy"]["fallback"].startswith("deterministic_query (")
+    assert c["autonomy"]["auto_ran"] == ["query_repair_standards"]
     assert upd["research_coverage"] == "direct_match"  # the tool's coverage, not the agent's claim
 
 
@@ -262,4 +287,4 @@ def test_trace_and_stats_show_autonomy():
     lines = ra.format_trace_lines("hz1", [entry], metadata={"class": "D40"}, verdict={"action": "standard", "priority": 10}, status="open")
     assert any("autonomy: tools=inspect_image_quality  hops=1  violations=recurrence_claim_contradicts_lookup" in ln for ln in lines)
     agg = api._aggregate_agent_metrics([{"agent_trace_json": json.dumps([entry]), "class": "D40"}])
-    assert agg["autonomy"] == {"profile_builder": {"runs": 1, "tool_calls": 1, "violations": 1, "clean_runs": 0}}
+    assert agg["autonomy"] == {"profile_builder": {"runs": 1, "tool_calls": 1, "violations": 1, "clean_runs": 0, "auto_ran": 0}}

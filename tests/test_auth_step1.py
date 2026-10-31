@@ -257,10 +257,9 @@ def test_user_daily_submit_cap_limits_regular_user(_file_db, monkeypatch, strong
     s = get_settings()
     with Database(s.roadguard_db_path) as db:
         u = db.get_user_by_username("capme")
-        # The API submits as sub="user:<id>" and upserts that row on first
-        # submission; mimic the state after the user already submitted twice.
-        sub_user_id = f"user:{u.id}"
-        db.upsert_user(sub_user_id, u.email, u.display_name)
+        # The API stores hazards under the bare users-table id (the token's
+        # sub is "user:<id>"); mimic the state after two submissions.
+        sub_user_id = u.id
         for i in range(2):
             db.create_hazard(Hazard(
                 id=f"hz_cap{i:04d}", user_id=sub_user_id,
@@ -306,14 +305,8 @@ def test_internal_user_bypasses_cap(_file_db, monkeypatch, strong_password):
             password_hash=u.password_hash,
             google_sub=None, is_admin=False, is_internal=True,
         )
-        # Also upsert the sub-shaped row the API will see at submit time.
-        sub_user_id = f"user:{u.id}"
-        db.create_user_full(
-            user_id=sub_user_id, username=None, email=u.email,
-            display_name=u.display_name,
-            password_hash=None, google_sub=None,
-            is_admin=False, is_internal=True,
-        )
+        # Hazards are stored under the bare users-table id.
+        sub_user_id = u.id
         db.create_hazard(Hazard(
             id="hz_internal0", user_id=sub_user_id,
             reported_at=_t.time(), hazard_class="D40", confidence=0.9,

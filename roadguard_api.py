@@ -2307,13 +2307,15 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
             if isinstance(auto, dict):
                 # Autonomous workers: runs, tool calls made, contract
                 # violations found by verification, and clean runs.
-                a = autonomy.setdefault(speaker or "?", {"runs": 0, "tool_calls": 0, "violations": 0, "clean_runs": 0})
+                a = autonomy.setdefault(speaker or "?", {"runs": 0, "tool_calls": 0, "violations": 0, "clean_runs": 0, "auto_ran": 0})
                 a["runs"] += 1
                 a["tool_calls"] += len(auto.get("tools_used") or [])
                 n_viol = len(auto.get("violations") or [])
                 a["violations"] += n_viol
                 if n_viol == 0:
                     a["clean_runs"] += 1
+                if auto.get("auto_ran"):
+                    a["auto_ran"] += 1
         if had_fallback:
             llm_fallback_runs += 1
     return {
@@ -2685,8 +2687,30 @@ def _submit_dict_from_live(body: Any, reported_at: str) -> dict[str, Any]:
 
 def _user_id_of(user: dict[str, Any]) -> str:
     """The id stored on hazards.user_id and compared on every ownership
-    check. Passphrase users share one sub by design."""
-    return user.get("sub") or user.get("email") or "anonymous"
+    check.
+
+    A registered user's token carries ``sub="user:<id>"``; the users row is
+    the bare ``<id>``. Until 31.10.2026 the prefixed form was upserted as a
+    second row on the first upload, with no admin flag, and /auth/me then
+    resolved to that shadow row: the operator links vanished and the
+    upload count moved. Passphrase users share one sub by design.
+    """
+    sub = str(user.get("sub") or "")
+    if sub.startswith("user:") and len(sub) > 5:
+        return sub[5:]
+    return sub or user.get("email") or "anonymous"
+
+
+def merge_prefixed_user_rows(db_path: str) -> int:
+    """Startup migration (31.10.2026): fold ``user:<id>`` shadow rows into
+    the real users rows; see Database.merge_prefixed_users."""
+    from roadguard_agent import Database
+
+    with Database(db_path) as db:
+        n = db.merge_prefixed_users()
+    if n:
+        LOGGER.info("merged_prefixed_user_rows count=%d", n)
+    return n
 
 
 def _check_user_daily_submit_cap(
@@ -2913,8 +2937,13 @@ async def _lifespan(app: FastAPI):
         os.environ.get("ROADGUARD_RETENTION_SWEEP", "1") != "0"
         and settings.roadguard_db_path != ":memory:"
     ):
-        # Rows a dead background task left in queued/processing go to a
-        # human before anything else runs (queues: startup recovery).
+        # Shadow users rows left by the pre-31.10 submit path fold into the
+        # real rows, then rows a dead background task left in
+        # queued/processing go to a human before anything else runs.
+        try:
+            merge_prefixed_user_rows(settings.roadguard_db_path)
+        except Exception as exc:
+            LOGGER.warning("merge_prefixed_user_rows_failed: %s", exc)
         try:
             recover_interrupted_runs(settings.roadguard_db_path)
         except Exception as exc:
@@ -3621,8 +3650,22 @@ def create_app() -> FastAPI:
                 client_id=settings.google_oauth_client_id,
                 allowed_emails=settings.allowed_emails_set(),
             )
+            # A Google identity that belongs to a registered user signs in as
+            # that user (matched by the linked Google subject, else by the
+            # verified e-mail), so an admin keeps the operator links whichever
+            # button was used (31.10.2026). An unknown identity keeps the
+            # Google subject and gets its row on the first upload.
+            from roadguard_agent import Database
+
+            sub = payload["sub"]
+            with Database(settings.roadguard_db_path) as db:
+                u = db.get_user_by_google_sub(payload["sub"]) or db.get_user_by_email(payload["email"])
+                if u is not None:
+                    if not u.google_sub:
+                        db.set_google_sub(u.id, payload["sub"])
+                    sub = f"user:{u.id}"
             token = create_jwt(
-                sub=payload["sub"],
+                sub=sub,
                 email=payload["email"],
                 display_name=payload["name"],
                 settings=settings,

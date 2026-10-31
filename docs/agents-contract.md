@@ -13,7 +13,8 @@
 > not used in production. The current per-worker assignment is
 > `AGENT_SIGNAL_LLM=ollama:llama3.2:3b`,
 > `AGENT_PERCEPTION_LLM=ollama:qwen2.5:3b`,
-> `AGENT_RESEARCH_LLM=ollama:granite3.3:2b`,
+> `AGENT_RESEARCH_LLM=ollama:qwen2.5:3b` (since 31.10.2026; granite3.3:2b never
+> emitted a tool call in 17 autonomous runs),
 > `AGENT_LLM_PROVIDER=ollama:qwen2.5:3b` (Decision; swapped from `7b` to `3b`
 > on 24.10.2026, 3-5x latency win measured on this ARM host).
 
@@ -118,15 +119,22 @@ tool hops, and the Decision ReAct loop stops at
 `DECISION_REACT_MAX_HOPS=2` first. `MAX_ITERATIONS` fires only through
 the supervisor visits; Decision always returns `final=True`, so the
 refine loop back to Perception is not reachable. The wall-clock budget
-starts at the supervisor's first check, not at process start; the app
-warms the RAG client and the compiled graph at startup. The cost cap is
+starts when the run enters the graph (`sanitize_node` stamps the clock
+and publishes the deadline), not at process start; the app warms the RAG
+client and the compiled graph at startup. Until 31.10.2026 the clock
+started at the Supervisor's first check, one node later, so the signal
+extractor's calls ran with no deadline at all. The cost cap is
 computed from the `tokens_in` and `tokens_out` accumulated on the state
 (`BudgetTracker.sync_tokens` before every check), which includes the
 panel's threads. Every provider call is bounded by
 `min(AGENT_LLM_TIMEOUT_SECONDS, time remaining to the run's deadline)`
 (default 30) with no SDK-level retries; retries belong to the backoff
 and the fallback chain, and both stop at the deadline
-(`started_at + WALL_CLOCK_CAP_SECONDS`). A 429 that signals quota
+(`started_at + WALL_CLOCK_CAP_SECONDS`). Inside an autonomous worker the
+bound is the tighter of the run deadline and the worker's
+`latency.worker_time_cap_s`; no ReAct round, worker or Decision, starts
+with under 5 s of headroom, and a Decision stopped this way reports
+`fallback_reason=run_deadline`. A 429 that signals quota
 exhaustion (Gemini "Quota exceeded ... limit", Mistral code 1300) is not
 retried: the vendor is remembered as dead for `AGENT_LLM_DEAD_SECONDS`
 (default 300) and skipped.
