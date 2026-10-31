@@ -14,34 +14,30 @@ is enough.
 
 ## What the pipeline reads from the team
 
-The notebook does NOT ship the detector, images or RAG corpus. It expects
-the team's deliverables at these conventional paths next to it:
+The notebook does NOT ship the detector or the sample images. It looks
+for the team's deliverables at these paths next to it (first match wins):
 
-| Dependency | Path | Owner |
-|------------|------|-------|
-| YOLOv8n ONNX detector | `../models/yolov8n-roadguard.onnx` | Shai |
+| Dependency | Paths tried, in order | Owner |
+|------------|-----------------------|-------|
+| YOLOv8n ONNX detector | `../models/`, `../Models/`, `../webapp/assets/models/yolov8n-roadguard.onnx` (the last one is where this repository keeps it) | Shai |
 | Sample road images | `../data/sample/` | Ovad |
-| ChromaDB corpus `charter_grounded_corpus` | `../rag/chroma_db/` | Benny |
+| ChromaDB corpus `charter_grounded_corpus` | `../rag/chroma_db/`, `../RAG/chroma_db/`, `../Rag/chroma_db/`, `../rag_notebook/chroma_db/` | Benny |
 
-The folder layout the notebook assumes relative to this directory:
+The corpus is the one exception to "nothing is downloaded": when none of
+the ChromaDB directories exists, the download cell fetches the corpus
+archive (about 16 MB) from the GitHub release asset named in the notebook
+and extracts it to `../rag/chroma_db/`. The detector and the sample images
+raise a clear `FileNotFoundError` naming the expected path when missing.
 
 ```
 <team-repo-root>/
-  models/
-    yolov8n-roadguard.onnx
-  data/
-    sample/
-      *.jpg | *.png | *.webp
-  rag/
-    chroma_db/
-      ...chromadb persistent directory...
+  webapp/assets/models/yolov8n-roadguard.onnx   (or models/ at the root)
+  data/sample/*.jpg | *.png | *.webp
+  rag/chroma_db/                               (auto-downloaded if absent)
   standalone/
     roadguard_standalone.ipynb
     README.md
 ```
-
-If any dependency is missing the cell that uses it raises a clear
-`FileNotFoundError` naming the expected path.
 
 ## Requirements
 

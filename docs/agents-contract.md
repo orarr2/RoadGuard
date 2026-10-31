@@ -23,7 +23,17 @@ fallbacks, the evidence round trip and the evaluation protocol. Any
 change here is a breaking change for the API, the webapp and the
 evaluation harness. The implementation guide (node by node, with the
 system prompts) is `docs/agents-architecture.md`; the policy values
-themselves live in `src/agent/multiagent/policy.yaml`.
+themselves live in `policy.yaml` at the repository root.
+
+> Autonomy note (31.10.2026): with `AGENT_WORKER_AUTONOMY=1` (on at the
+> Oracle deployment) the intake, perception and research nodes no longer
+> receive pre-computed answers; each must fetch what it needs through its
+> tools (`extract_measurements`, `inspect_image_quality`,
+> `query_repair_standards`), declares `tools_used` in its reply, and the
+> code verifies the declaration against the tools that ran. The rows
+> below describe the single-call contract that still applies with the
+> flag off; `docs/agent-architecture-audit-2026-10-31.md` section 14 has
+> the autonomous contract and its verification rules.
 
 ## 1. Scope and non-goals
 
@@ -249,7 +259,11 @@ isolate themselves with a temporary `ROADGUARD_DB_PATH` and
   verdicts in prose ("this looks ~82% like catalogued D40 pic_id=1024") so
   the operator sees a shade of grey instead of a binary known / new.
 
-### 4.9 `check_system_health` (Decision, read-only)
+### 4.9 `check_system_health` (read-only; no longer offered to Decision)
+
+> Since 31.10.2026 this tool is not in the Decision tool list: in the
+> 27.10 batch the model spent one of its two hops on it in six runs and
+> it never changed a verdict. The function still backs `GET /health/system`.
 
 - Input: `{}`.
 - Output: `{ ollama_running: bool, loaded_models: [{ name, size_gb, parameters }], host_memory_used_pct, stub_mode: bool }`.
@@ -621,51 +635,31 @@ nothing), so this harness exercises the rule tree only: it proves
 topology, routing, sanitiser flags and the API/DB contracts, not LLM
 decision quality.
 
-The live providers are measured by `scripts/benchmark.py`, three arms
-run interleaved per scenario (scenario 1: tree, panel, react; scenario
-2: ...) so quota drift or a slow hour hits every arm alike:
+The live path is measured by two scripts in the repository:
 
-| Arm | Environment | What decides |
-|---|---|---|
-| `tree` | `ROADGUARD_USE_LIVE=0` | rule tree only |
-| `panel` | `ROADGUARD_USE_LIVE=1`, `AGENT_DECISION_REACT` unset | Decision panel vote |
-| `react` | `ROADGUARD_USE_LIVE=1`, `AGENT_DECISION_REACT=1` | Decision ReAct loop |
+- `scripts/agent_eval.py` runs `run_graph` over
+  `tests/labeled_scenarios.json` and `tests/multiagent_eval_scenarios.json`
+  under whatever `ROADGUARD_USE_LIVE` / `AGENT_*` environment is in force
+  (rule tree on a developer machine, the local Ollama models on the VM)
+  and reports accuracy, wall-clock P50 / P95 / max, per-agent LLM calls /
+  failures / fallbacks / fast-path skips, Decision tool calls, floors and
+  the confusion of expected vs. actual actions. It isolates itself in a
+  temporary database and checkpoint file by default (`--db` to point at a
+  copy of a real database; never the production file: there is no
+  dry-run switch, every run writes approval rows, work orders, evidence
+  requests and checkpoints).
+- `scripts/rag_relevance_eval.py` runs the 16 (hazard_class x road_type)
+  pairs through `query_repair_standards` and exits 1 when fewer than 95%
+  return a passage that names the class. On the production corpus
+  (31.10.2026): 16/16, every pair `direct_match`.
 
-`PYTHONPATH=src python scripts/benchmark.py --arms tree,panel,react --repeats 3`
-is the full run; `--smoke` is `--limit 3 --repeats 1`; CI runs
-`--tree-only`. Arms default to `tree`, or to all three when
-`ROADGUARD_USE_LIVE=1` and a key for a provider named by
-`AGENT_LLM_PANEL` or `AGENT_LLM_PROVIDER` is set; a live arm without a
-key runs on the offline stub, its `source` collapses to `rule_based`,
-and the report records `llm_live=false`. Per row (CSV and JSON): `id`,
-`kind`, `label` (the expected action), `arm`, `repeat`, `action`,
-`match`, `source` (`rule_based` / `llm_panel` / `llm_react` from the
-Decision trace entry, `budget_guard` when the guard stopped the run),
-`fallback_reason`, `floor_applied`, `grounded`, `tokens_in`,
-`tokens_out`, `latency_s`, `cost_usd`. `grounded` is true for `urgent`
-/ `standard` with a non-empty `cited_sources` inside `tool_result_ids`,
-true for `human_review` / `needs_more_evidence`, false for anything
-else. The summary per arm gives mean and min/max across repeats of
-accuracy, groundedness, tokens, latency and cost, plus a tally of
-`source`. Cost is priced per vendor in USD per 1M tokens, overridable
-with `AGENT_PRICE_<PROVIDER>_IN` / `AGENT_PRICE_<PROVIDER>_OUT`
-(provider name upper-cased; defaults groq 0.59 / 0.79, gemini 0.10 /
-0.40, mistral 0.10 / 0.30, ollama 0 / 0); until the final state
-carries per-provider token counts the rows fall back to the state's
-single-rate `cost_usd` and the summary says how many did.
-`tests/labeled_scenarios.json` is appended when present (same schema
-and required keys as above) and a present file that does not parse or
-lacks a key stops the run. Accuracy against the synthetic labels is
-agreement with the rule tree that seeded them, not ground truth; only
-the labelled file measures correctness. The LLM-as-judge is off unless
-`--judge`. Every hazard id is unique per run and repeat. There is no dry-run
-switch: a run writes approval rows, work orders, evidence requests and
-checkpoints to whatever `ROADGUARD_DB_PATH` / `ROADGUARD_CHECKPOINT_PATH`
-point at, so point them at a scratch copy, never at the production files.
+Accuracy against the synthetic labels is agreement with the rule tree
+that seeded them, not ground truth; only the labelled file measures
+correctness.
 
 Thresholds (charter): correct-action rate >= 85%, groundedness >= 90%
 of `urgent` / `standard` verdicts citing an id from `tool_result_ids`.
-Current: 70/70 and 100% offline (rule tree).
+Current: 100/100 (73 synthetic + 27 labelled) and 100% offline (rule tree).
 
 ## 9.5 LLM failure handling (25.10.2026)
 
@@ -724,5 +718,6 @@ Decision model's text for the supervisor, section 5), `status`
 (`open`, `waiting_for_evidence` or `evidence_expired`) and `work_order_id`. Supervisor
 decisions live in `approvals` (with the free-text `note`), reporter
 requests in `evidence_requests`. The twice-daily digest and the `rg-*`
-shortcuts read these tables; `GET /hazards/{id}` and
-`GET /hazards/history` are not implemented yet (501).
+shortcuts read these tables, as do `GET /hazards/{id}` and
+`GET /hazards/history` (per user; fleet-wide on the private operator
+hosts, where /trace and /flow replay it).

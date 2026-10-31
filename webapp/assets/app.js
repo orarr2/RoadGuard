@@ -90,16 +90,18 @@ async function loadMyReports() {
   const section = document.getElementById("my-reports");
   const body = document.getElementById("my-reports-body");
   if (!section || !body) return;
+  // The history is per user, so it needs the bearer token. A signed-out
+  // visitor simply has no table; asking the API anyway would 401 and pop
+  // the sign-in modal on every page load. The old call used cookies
+  // (credentials: "include"), which the API's CORS policy does not allow
+  // from GitHub Pages, so the table never loaded on the live site.
+  if (!isSignedIn()) {
+    section.hidden = true;
+    return;
+  }
   try {
-    const origin = await resolveApiOrigin();
-    const r = await fetch(`${origin}/hazards/history`, { credentials: "include" });
-    if (r.status === 401 || r.status === 403) {
-      section.hidden = true;
-      return;
-    }
-    if (!r.ok) throw new Error(`http ${r.status}`);
-    const data = await r.json();
-    const items = data.items || [];
+    const data = await fetchJson("/hazards/history");
+    const items = (data && data.items) || [];
     section.hidden = false;
     if (!items.length) {
       body.innerHTML = '<tr><td colspan="6" class="my-reports-empty">No reports yet. Submit a hazard and it will show up here.</td></tr>';
@@ -656,7 +658,9 @@ function _triggerGoogleSignIn() {
   if (!_gsiReady || !window.google || !window.google.accounts || !window.google.accounts.id) {
     if (err) {
       err.hidden = false;
-      err.textContent = "Google sign-in is not configured on this server yet.";
+      err.textContent = _gsiReady
+        ? "Google sign-in is still loading; try again in a moment."
+        : "Google sign-in is not configured in this build of the webapp (GOOGLE_CLIENT_ID).";
     }
     return;
   }
@@ -743,8 +747,11 @@ function wireSignIn() {
 
   backdrop.addEventListener("click", () => closeSignIn());
 
-  // Mount the real GSI widget off-screen so our styled button can delegate to it
-  mountGoogleSignIn("google-signin-button", async (credential) => {
+  // Mount the real GSI widget off-screen so our styled button can delegate
+  // to it. _gsiReady is true only when the widget was actually mounted
+  // (client id configured); otherwise the button explains what is missing
+  // instead of calling an uninitialised Google API and doing nothing.
+  _gsiReady = mountGoogleSignIn("google-signin-button", async (credential) => {
     err.hidden = true;
     try {
       await loginWithGoogleIdToken(credential);
@@ -758,7 +765,6 @@ function wireSignIn() {
       err.textContent = _friendlyAuthError(e);
     }
   });
-  _gsiReady = true;
 }
 
 function _friendlyAuthError(e) {

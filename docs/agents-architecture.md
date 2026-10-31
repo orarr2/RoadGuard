@@ -7,13 +7,13 @@
 > - `AGENT_PERCEPTION_LLM=ollama:qwen2.5:3b` (profile_builder)
 > - `AGENT_RESEARCH_LLM=ollama:granite3.3:2b` (rag_retriever)
 > - `AGENT_LLM_PROVIDER=ollama:qwen2.5:3b` (Decision; הוחלף מ-`qwen2.5:7b` ל-`3b` ב-24.10.2026 אחרי שה-latency ירד 3-5x על ה-host הזה בלי regression בסבב ה-eval)
-> - `nomic-embed-text` ל-RAG embeddings
+> - RAG embeddings: `all-MiniLM-L6-v2` (ONNX, 384 ממדים, אותו מודל שבו נבנה הקורפוס; `nomic-embed-text` מותקן ב-Ollama אך אינו בשימוש)
 >
 > `OLLAMA_NUM_PARALLEL=4` על ה-container מאפשר לארבעת המודלים לרוץ במקביל. ספקי ה-API החיצוניים (Groq / Gemini / Mistral) נותרים זמינים כ-fallback ב-benchmark, אך לא בשימוש בפרודקשן.
 
 > הערת כלים ל-Decision (24.10.2026): סוכן ה-Decision מחזיק 8 כלים (לא 4 כפי שמתואר בטבלאות הישנות למטה):
 > - **פעולה (write):** `check_hazard_severity`, `request_additional_evidence`, `create_draft_work_order`, `flag_for_urgent_review`
-> - **קריאה בלבד (read):** `lookup_dataset_image` (fast-path ל-`known_image` על hit), `rank_similarity_to_catalog` (top-K near-matches ב-%), `check_system_health` (ollama ps + /proc/meminfo + stub flag), `check_recent_cluster` (same-class same-location, 7 ימים חזרה; `cluster_flag=none|emerging|strong`)
+> - **קריאה בלבד (read):** `lookup_dataset_image` (fast-path ל-`known_image` על hit), `rank_similarity_to_catalog` (top-K near-matches ב-%), `check_recent_cluster` (same-class same-location, 7 ימים חזרה; `cluster_flag=none|emerging|strong`). עדכון 31.10.2026: `check_system_health` הוסר מההצעה ל-Decision (בבאץ' של 27.10 הוא צרך hop אחד מתוך שניים בשש ריצות ולא שינה אף verdict; הפונקציה נשארה ל-`/health/system`), ו-`recall_agent_notes` (לקחים מהכרעות המפקח) מוצע ל-Decision ולעובדים כש-`AGENT_WORKER_AUTONOMY=1`
 >
 > החלטה חשובה (24.10.2026): ה-floors הדטרמיניסטיים של `confidence < 0.5` ו-zero confidence הוסרו. הם ניתבו ~60% מההגשות האמיתיות ל-human_review בלי קשר ליתר האותות. ה-persona החדשה של Decision היא "פקח כבישים עירוני ותיק" שכותב 2-3 משפטים חופשיים ב-`rationale`, שדה `uncertainty` נפרד, ולוקח בעלות על ההחלטה. ה-floors שנשארו: `known_image` על hit ב-catalog, `human_review` על suspicious OCR / sanitize / `jurisdiction_hint != "il"`, ו-`urgent` preconditions ב-policy.
 
@@ -29,7 +29,7 @@
 - **חלק ד' (סעיפים 20-23)** - טבלאות השליטה המרכזיות (למצגת).
 - **חלק ה' (סעיפים 24-27)** - overkill vs core, מצב, הפעלה, מפת קוד.
 
-לקוד שרץ בפועל (תא־אחר־תא): [`../notebooks/agent_walkthrough.ipynb`](../notebooks/agent_walkthrough.ipynb).
+לקוד שרץ בפועל (תא־אחר־תא): [`../standalone/roadguard_standalone.ipynb`](../standalone/roadguard_standalone.ipynb) (המחברת העצמאית; קוד השירות עצמו ב-`roadguard_agent.py`).
 לחוזה הפורמלי של הפעולות והכלים: [`agents-contract.md`](agents-contract.md).
 
 ---
@@ -210,7 +210,7 @@ class ResearchHandoff(TypedDict):
 | נכונות החלטות על 70 תסריטים | ≥85% | 70/70 בעץ הדטרמיניסטי |
 | ציטוטים מבוססים | ≥90% | נאכף runtime ב־`assert_decision_grounded` |
 
-ה־70 תסריטים ב־[`tests/multiagent_eval_scenarios.json`](../tests/multiagent_eval_scenarios.json): 50 baseline + 20 adversarial (OCR injection, location injection, scene לא-כביש, confidence גבולי, וקטורים משולבים). ה-eval harness ב־[`tests/test_eval_scenarios.py`](../tests/test_eval_scenarios.py) מריץ `run_graph` על כל אחד ובודק `final.action == expected_action`. ה-benchmark החי (`scripts/benchmark.py`, סעיף 18 בחלק ב') מודד את הזרועות tree / panel / react ראש-בראש על אותם תרחישים; דיוק מול התוויות הסינתטיות הוא הסכמה עם עץ הכללים שייצר אותן, לא אמת-קרקע.
+ה־73 התסריטים הסינתטיים ב־[`tests/multiagent_eval_scenarios.json`](../tests/multiagent_eval_scenarios.json): 50 baseline + 20 adversarial (OCR injection, location injection, scene לא-כביש, confidence גבולי, וקטורים משולבים) + 3 תרחישי קצה של policy (31.10.2026: סף urgent ב-0.60 בדיוק, 0.59 מתחתיו, ומסלול fast path), ויחד עם 27 התרחישים המתויגים ב-`tests/labeled_scenarios.json` הסט מונה 100. ה-eval harness ב־[`tests/test_eval_scenarios.py`](../tests/test_eval_scenarios.py) מריץ `run_graph` על כל אחד ובודק `final.action == expected_action`. המדידה החיה נעשית ב-`scripts/agent_eval.py` (דיוק, P50/P95, מדדים לכל סוכן) וב-`scripts/rag_relevance_eval.py` (רלוונטיות RAG על 16 צמדי class x road); דיוק מול התוויות הסינתטיות הוא הסכמה עם עץ הכללים שייצר אותן, לא אמת-קרקע.
 
 ---
 
@@ -269,7 +269,7 @@ class ResearchHandoff(TypedDict):
 2. **Corpus אמיתי ל-RAG** - אחריות בני. ChromaDB רץ על 15 פסקאות seed (`data/mini_corpus.jsonl`). המפרט המלא ב־[docs/corpus-handoff.md](corpus-handoff.md): סכמה, שדות חובה, יעדי כמות, פורמט ההעברה, deadlines.
 3. **Mistral בפאנל** - המפתח מחזיר 429 ברמת החשבון (לא בקוד). עד שה-plan החינמי מאושר ב-console.mistral.ai המושב נזכר כמת ל-`AGENT_LLM_DEAD_SECONDS` אחרי ה-429 הראשון ומדולג, הפאנל מצביע עם Groq + Gemini, ו-Mistral אינו בשרשרת ה-fallback.
 4. **Dashboard אנושי לאישורים** - ה־`/approvals/{id}` כעת עמוד HTML בודד; אפשר לחבר ל־dashboard עם רשימת pending ומיון.
-5. **הרחבות לסוכנים** - שמונה דילמות ב-[docs/agents-roadmap.md](agents-roadmap.md), כולן הוכרעו ומומשו (7, 3, 4, 2, 1, 8) או נסגרו בהחלטה (5 אנגלית בלבד, 6 = המנגנון של 2). מה שנשאר: הרצת ה-benchmark החי (ה-harness ב-`scripts/benchmark.py` מוכן; דורש מפתחות), 4(ג) ו-7(ג) אחרי 30+ אישורים אמיתיים.
+5. **הרחבות לסוכנים** - שמונה דילמות (מסמך ה-roadmap המקורי לא נשמר בריפו המאוחד; ההכרעות מתועדות כאן), כולן הוכרעו ומומשו (7, 3, 4, 2, 1, 8) או נסגרו בהחלטה (5 אנגלית בלבד, 6 = המנגנון של 2). המדידה החיה נעשית היום ב-`scripts/agent_eval.py` על המודלים המקומיים; 4(ג) ו-7(ג) ממתינים ל-30+ אישורים אמיתיים (מ-31.10.2026 כל הכרעת מפקח נרשמת גם כלקח ב-`agent_notes`).
 6. **Named tunnel (D1)** - ה-runbook ב-[deploy/cloudflared.md](../deploy/cloudflared.md) מוכן; ה-VM מריץ quick tunnel עד שה-hostname נוצר ב-Cloudflare.
 
 ---
@@ -320,7 +320,7 @@ guard_fired, final, last_speaker, next_hop          # control + supervisor routi
 - על OCR חשוד או טקסט מדווח חשוד - מעלה דגל: Perception יורד ל-`low` ועץ ההחלטה מנתב ל-`human_review` (ומשם ל-approval gate). הדגל הוא גם floor דטרמיניסטי ב-Decision: verdict `standard` מה-LLM אינו גובר עליו (סעיף 5).
 - כותב רשומה ל־`trace` עם `speaker=sanitize`.
 
-מכוסה ב־[`tests/test_multiagent_sanitize.py`](../tests/test_multiagent_sanitize.py).
+מכוסה ב־[`tests/test_stage_a_correctness.py`](../tests/test_stage_a_correctness.py) (ניתוב ה-sanitize) ובתרחישי ה-adversarial (`adv-*`) של [`tests/test_eval_scenarios.py`](../tests/test_eval_scenarios.py).
 
 ---
 
@@ -423,7 +423,7 @@ guard_fired, final, last_speaker, next_hop          # control + supervisor routi
 
 ## 8 - System prompts
 
-כל הפרומפטים נבנים ב־[`src/agent/multiagent/node_prompts.py`](../src/agent/multiagent/node_prompts.py) מאותם רכיבים: persona, תקציר ה-policy מ-`policy.yaml` (כולל מספר הגרסה), בלוק SAFETY משותף, חוזה פלט JSON עם שדה `reasoning` (CoT), ודוגמת few-shot אחת. הטקסטים להלן הם הפלט בפועל של המודול (`PYTHONPATH=src python -c "from agent.multiagent import node_prompts as p; print(p.DECISION_SYSTEM_PROMPT)"`), נכון לגרסת policy `2026.10.22`.
+כל הפרומפטים נבנים ב־`roadguard_agent.py` (הבלוק `# section: agent/multiagent/node_prompts.py`) מאותם רכיבים: persona, תקציר ה-policy מ-`policy.yaml` (כולל מספר הגרסה), בלוק SAFETY משותף, חוזה פלט JSON עם שדה `reasoning` (CoT), ודוגמת few-shot אחת. הטקסטים להלן הם הפלט בפועל של המודול (`python -c "import roadguard_agent as ra; print(ra.DECISION_SYSTEM_PROMPT)"`), נכון לגרסת policy `2026.10.22`; גרסת ה-policy הנוכחית היא `2026.10.31` (נוספו `latency.worker_time_cap_s` ו-`queues.*`, ללא שינוי בכללי ההחלטה). כש-`AGENT_WORKER_AUTONOMY=1` מתווסף לפרומפט של כל עובד בלוק "AUTONOMOUS MODE" שמורה לו אילו כלים לקרוא ולדווח `tools_used`.
 
 ### 8.1 `PROFILE_BUILDER_SYSTEM_PROMPT`
 
@@ -870,7 +870,7 @@ Example output:
 
 `COST_CAP_USD` נאכף דרך `sync_tokens` (סעיף 6): לפני כל בדיקה ה-tracker מסונכרן עם `tokens_in`/`tokens_out` מה-state. ב-`await_evidence` ה-budget החדש נוצר עם offsets של הטוטאלים שכבר נצברו, כך שסבב הראיות נמדד מאפס בלי לאפס את ה-accumulators של ה-state.
 
-`MAX_TOOL_HOPS_PER_AGENT=3` אינו נגיש בפועל: Perception ו-Research אינם מבצעים tool hops, ולולאת ה-ReAct ב-Decision עוצרת ב-`DECISION_REACT_MAX_HOPS=2` לפני שהתקרה של 3 נבדקת. `MAX_ITERATIONS` נורה רק דרך ביקורי ה-Supervisor. שעון ה-`WALL_CLOCK_CAP_SECONDS` מתחיל בבדיקת ה-Supervisor הראשונה, לא בעליית התהליך; ה-app מחמם את ה-`RagClient` ואת הגרף המקומפל ב-startup, כך שה-cold start אינו נספר בתקציב של הריצה הראשונה.
+`MAX_TOOL_HOPS_PER_AGENT=3` אינו נגיש בפועל כשהדגל `AGENT_WORKER_AUTONOMY` כבוי: Perception ו-Research אינם מבצעים tool hops, ולולאת ה-ReAct ב-Decision עוצרת ב-`DECISION_REACT_MAX_HOPS=2` לפני שהתקרה של 3 נבדקת. מ-31.10.2026, עם `AGENT_WORKER_AUTONOMY=1` (דולק באורקל), שלושת העובדים מבצעים tool hops (ברירת מחדל 3, `AGENT_WORKER_REACT_MAX_HOPS`) ותקרת זמן לכל עובד נאכפת ב-`latency.worker_time_cap_s` (45 שניות): בחריגה הלולאה נעצרת ומסלול הכללים עומד. `MAX_ITERATIONS` נורה רק דרך ביקורי ה-Supervisor. שעון ה-`WALL_CLOCK_CAP_SECONDS` מתחיל בבדיקת ה-Supervisor הראשונה, לא בעליית התהליך; ה-app מחמם את ה-`RagClient` ואת הגרף המקומפל ב-startup, כך שה-cold start אינו נספר בתקציב של הריצה הראשונה.
 
 ---
 
@@ -919,7 +919,7 @@ TTL 120 שניות. מפתח: `session_id|track_id|class|road|lane`. ב־client 
 - `stream_graph(...)` - גרסה streaming לאותו flow; מניבה אירועי LangGraph לצומת לצומת (ל־SSE של webapp).
 - `resume_graph(hazard_id, yolo_output, image_quality, metadata)` - ממשיך thread שנעצר לפני `await_evidence`: `update_state` עם הקלט החדש ואז `invoke(None)`. בלי checkpoint (נמחק אחרי 7 ימים, dry-run) - ריצה חדשה עם `evidence_round=1`, כלומר ה-cap כבר מנוצל. `thread_waits_for_evidence(hazard_id)` בודק אם ה-thread באמת ממתין.
 - `_COMPILED_GRAPH` - cache ברמת מודול לשתי מצבי compile (עם/בלי `interrupt_before` על ה-approval_gate).
-- `interrupt_before=['await_evidence']` - **פעיל בפרודקשן** (סעיף 2 ב-[agents-roadmap.md](agents-roadmap.md), סוגר את D5). verdict של `needs_more_evidence` מנותב ל-`await_evidence`, הגרף נעצר לפניו, ה-state נשמר ב-checkpoint תחת `thread_id == hazard_id`, ו-`/hazards/submit` מחזיר `status: waiting_for_evidence` עם הבקשה שהסוכן ניסח. `POST /evidence_requests/{id}/fulfill` עם ההעלאה החדשה ממשיך את אותו thread: `await_evidence` פותח budget חדש עם offsets של הטוקנים שכבר נצברו (המדווח יכול לענות אחרי שעות), מעלה `evidence_round`, והריצה חוזרת דרך sanitize -> intake -> perception -> research -> decision. ב-Decision, `needs_more_evidence` שני הופך ל-`human_review` (cap של בקשה אחת למפגע, `policy.yaml`). ריצות dry-run נעצרות באותה נקודה בלי checkpoint ולכן לא ניתנות להמשך - וזה בסדר, `rg-demo` רק מודד.
+- `interrupt_before=['await_evidence']` - **פעיל בפרודקשן** (סעיף 2 ב-roadmap הסוכנים, סוגר את D5). verdict של `needs_more_evidence` מנותב ל-`await_evidence`, הגרף נעצר לפניו, ה-state נשמר ב-checkpoint תחת `thread_id == hazard_id`, ו-`/hazards/submit` מחזיר `status: waiting_for_evidence` עם הבקשה שהסוכן ניסח. `POST /evidence_requests/{id}/fulfill` עם ההעלאה החדשה ממשיך את אותו thread: `await_evidence` פותח budget חדש עם offsets של הטוקנים שכבר נצברו (המדווח יכול לענות אחרי שעות), מעלה `evidence_round`, והריצה חוזרת דרך sanitize -> intake -> perception -> research -> decision. ב-Decision, `needs_more_evidence` שני הופך ל-`human_review` (cap של בקשה אחת למפגע, `policy.yaml`). אין מצב dry-run: כל ריצה נשמרת ב-checkpoint וניתנת להמשך. בקשת ראיות שלא נענתה תוך `queues.evidence_ttl_hours` (72 שעות) פוקעת והמקרה מנותב ל-human_review עם שורת אישור (31.10.2026).
 - `interrupt_before=['approval_gate']` - נשאר opt-in: `build_graph(interrupt_before_gate=True)`. ה-HITL של המפקח הוא שורת ה-`approvals` עם `status=pending`, שנסגרת ב-`/approvals/{id}/decide`.
 - `SqliteSaver` checkpointing - state נשמר ב-SQLite בכל edge. הדו"ח היומי מוחק threads של מפגעים מעל 7 ימים או בלי שורת hazard ומריץ `VACUUM`, אחרת הקובץ גדל ללא גבול. ריצות dry-run (`rg-demo`) לא כותבות checkpoint בכלל.
 
@@ -957,14 +957,15 @@ accumulator ב־`state.trace` (TypedDict עם `Annotated[list, operator.add]`).
 
 - `tests/multiagent_eval_scenarios.json` - 70 תרחישים: 50 תסריטי baseline (ids `urg-*`, `std-*`, `evi-*`, `hum-*`) + 20 תסריטי adversarial (`adv-*`: OCR injection, prompt-injection בשדה location, scene לא-כביש, confidence גבולי, וקטורים משולבים). שדה `kind`: 20 simple / 30 mid / 20 hard.
 - `tests/test_eval_scenarios.py` - mapper שמריץ `run_graph` על כל 70 התרחישים ומוודא `final.action == expected_action`. אם `tests/labeled_scenarios.json` קיים (תרחישים מתמונות אמיתיות, מסירה של שי), הוא מצורף אוטומטית; קובץ קיים שאינו נטען או אינו תואם לסכמה מפיל את הטסט בקול, לא נבלע. ה-stub לעולם לא מחזיר ציטוטים, ולכן ב-eval הזה Decision נופל תמיד לעץ הכללים: ה-eval מוכיח טופולוגיה, ניתוב, דגלי sanitize וחוזי API/DB, לא איכות החלטה של LLM.
-- `scripts/benchmark.py` - שלוש זרועות ראש-בראש, משולבות לכל תרחיש (תרחיש 1: tree, panel, react; תרחיש 2: ...) כדי שסחף מכסה או שעה איטית יפגעו בכל הזרועות באותה מידה: `tree` (`ROADGUARD_USE_LIVE=0`, עץ הכללים), `panel` (`ROADGUARD_USE_LIVE=1`, הצבעת הפאנל), `react` (`ROADGUARD_USE_LIVE=1`, `AGENT_DECISION_REACT=1`). לכל שורה (CSV ו-JSON): `id`, `kind`, `label` (הפעולה הצפויה), `arm`, `repeat`, `action`, `match`, `source` (`rule_based` / `llm_panel` / `llm_react` מרשומת ה-trace של Decision, `budget_guard` כשה-guard עצר את הריצה), `fallback_reason`, `floor_applied`, `grounded`, `tokens_in`, `tokens_out`, `latency_s`, `cost_usd`. הסיכום לכל זרוע: ממוצע ומינימום/מקסימום בין החזרות של דיוק, grounding, טוקנים, latency ועלות, וספירת `source`. העלות לפי ספק ב-USD למיליון טוקנים, ניתנת לדריסה ב-`AGENT_PRICE_<PROVIDER>_IN` / `AGENT_PRICE_<PROVIDER>_OUT`; עד שה-state יישא ספירת טוקנים לפי ספק השורות נופלות ל-`cost_usd` בתעריף יחיד והסיכום אומר כמה. `tests/labeled_scenarios.json` מצורף כשהוא קיים, וקובץ פגום עוצר את הריצה. דיוק מול התוויות הסינתטיות הוא הסכמה עם עץ הכללים שייצר אותן, לא אמת-קרקע; רק הקובץ המתויג מודד נכונות. ה-judge כבוי אלא אם `--judge`. מזהי hazard ייחודיים לריצה ולחזרה, ו-`ROADGUARD_DRY_RUN=1` אלא אם `--write`. ב-CI רץ `--tree-only`.
+- `scripts/agent_eval.py` - מריץ `run_graph` על התרחישים המתויגים והסינתטיים תחת הסביבה שבתוקף (`ROADGUARD_USE_LIVE`, `AGENT_*`): עץ הכללים במכונת פיתוח, המודלים המקומיים ב-VM. מדווח דיוק, P50/P95/מקסימום של זמן ריצה, לכל סוכן קריאות LLM / כשלים / fallbacks / דילוגי fast path, קריאות הכלים של Decision, floors ומטריצת בלבול. מבודד את עצמו ב-DB וב-checkpoints זמניים (`--db` לעותק של DB אמיתי; לעולם לא קובץ הפרודקשן: אין מצב dry-run). דיוק מול התוויות הסינתטיות הוא הסכמה עם עץ הכללים שייצר אותן, לא אמת-קרקע; רק הקובץ המתויג מודד נכונות.
+- `scripts/rag_relevance_eval.py` - 16 צמדי class x road דרך `query_repair_standards`; נכשל (exit 1) כשפחות מ-95% מהצמדים מחזירים פסקה שמזכירה את הסוג. על קורפוס הפרודקשן (31.10.2026): 16/16, כולם `direct_match`.
 
 ```bash
-# ריצה מלאה (הזרועות החיות דורשות מפתחות ספקים)
-PYTHONPATH=src python scripts/benchmark.py --arms tree,panel,react --repeats 3
+# הערכה לכל סוכן (DB זמני; עם ROADGUARD_USE_LIVE=1 ב-VM מודד את המודלים המקומיים)
+python scripts/agent_eval.py --json agent_eval.json
 
-# בדיקת עשן: 3 תרחישים, חזרה אחת
-PYTHONPATH=src python scripts/benchmark.py --arms tree,panel,react --smoke
+# רלוונטיות RAG על הקורפוס שאליו ROADGUARD_RAG_PATH מצביע
+python scripts/rag_relevance_eval.py --json rag_eval.json
 ```
 
 
@@ -1092,7 +1093,7 @@ PYTHONPATH=src python scripts/benchmark.py --arms tree,panel,react --smoke
 
 | | sanitize_node | Intake | Perception | Research | Decision | Supervisor | approval_gate | await_evidence |
 |---|---|---|---|---|---|---|---|---|
-| **סוג** | פונקציה | סוכן LLM | סוכן LLM | סוכן LLM | סוכן LLM (פאנל, או ReAct) | פונקציה | פונקציה | פונקציה |
+| **סוג** | פונקציה | סוכן LLM (אוטונומי עם כלים כש-`AGENT_WORKER_AUTONOMY=1`) | סוכן LLM (אוטונומי עם כלים כש-`AGENT_WORKER_AUTONOMY=1`) | סוכן LLM (אוטונומי עם כלים כש-`AGENT_WORKER_AUTONOMY=1`) | סוכן LLM (ReAct; פאנל כשה-ReAct כבוי) | פונקציה | פונקציה | פונקציה |
 | **מיקום בגרף** | 1 | 2 | 3 | 4 | 5 | לפני כל worker | אחרי Decision אם `urgent`/`human_review` | אחרי Decision אם `needs_more_evidence` (interrupt_before) |
 | **קלט** | `location`, `ocr_text`, `reporter_text` | `reporter_text`, `yolo_output.top1`, `road_type`, `lane_blocked` | `yolo_output`, `image_quality`, `metadata` | `hazard_profile`, `road_type` | `hazard_profile`, `procedures`, `tool_result_ids`, `reporter_intake`, `reporter_signals`, `evidence_round` | `state`, `BudgetTracker` | `action`, `priority`, `rationale`, `cited_sources`, `assessment` (למייל) | הקלט החדש מ-`update_state` |
 | **פלט** | `sanitized location`, `ocr_sanitized`, `reporter_text_suspicious` | `reporter_intake` (claims, contradictions, `urgency_claimed`), `reporter_signals` | `HazardProfile`, `perception_confidence` | `procedures`, `tool_result_ids`, `coverage` | `action`, `rationale`, `priority`, `cited_sources`, `assessment`, `evidence_request` | pass-through או `graceful_stop_decision` | `apr_<hex>`, שורת `approvals` | budget חדש, `evidence_round += 1`, חזרה ל-sanitize |
@@ -1101,7 +1102,7 @@ PYTHONPATH=src python scripts/benchmark.py --arms tree,panel,react --smoke
 | **Fallback** | אין (חובה שתרוץ) | מילות מפתח | rule-based `_severity_from_signals`; ה-LLM רק מוריד confidence | ה־coverage של הכלי (גם מול `no_match` מה-LLM) | `_decide_rule_based` + floors דטרמיניסטיים מעל ה-LLM | אין (זה ה־fallback) | מייל best-effort; כשל DB מתפשט | ריצה חדשה עם `evidence_round=1` |
 | **אבטחה** | regex scrub על 3 ערוצים | הטקסט הוא עדות; טקסט מסומן לא נשלח ל-LLM | - | dual-LLM על ה־passage הגולמי | assert_decision_grounded; `hazard_id` רק מה-state | 4 budget caps | - | cap של בקשה אחת |
 | **מדד** | - | - | - | - | 70/70 תסריטים offline (עץ הכללים מכריע; ה-stub אינו מצטט) | iterations, hops, cost, wall-clock | שורות ב־`approvals` | שורות `evidence_requests` שהושלמו |
-| **מצב** | פעיל | פעיל | פעיל (כללים; ה-LLM כבוי בדגל) | פעיל (ChromaDB עם seed; ה-LLM כבוי בדגל) | פעיל (פאנל דולק בפרודקשן; ReAct כבוי) | פעיל | פעיל | פעיל |
+| **מצב** | פעיל | פעיל (באורקל: ReAct עם `extract_measurements` / `lookup_prior_reports`, אימות מספרים מול ה-regex) | פעיל (באורקל: `AGENT_PROFILE_BUILDER_LLM=1`, ReAct עם `inspect_image_quality` / `lookup_similar_cases` / `recall_agent_notes`) | פעיל (ChromaDB עם הקורפוס של בני, 2,433 פסקאות; באורקל: `AGENT_RAG_RETRIEVER_LLM=1`, הסוכן מריץ את השליפה בעצמו) | פעיל (באורקל: ReAct דולק, `AGENT_DECISION_REACT=1`, 2 hops, 7 כלים + `recall_agent_notes`) | פעיל | פעיל | פעיל |
 
 ---
 
@@ -1225,7 +1226,7 @@ PYTHONPATH=src python scripts/benchmark.py --arms tree,panel,react --smoke
 
 ### פעיל
 
-- 472 טסטים (`PYTHONPATH=src pytest --collect-only -q`, 23.10), מתוכם 70 תרחישי eval end-to-end; טסטי ה-regression של האודיטים 22-23.10 ב-`tests/test_audit_*.py`.
+- 174 טסטים (`pytest -q`, 31.10.2026) אחרי איחוד הקוד לשני קבצים, מתוכם 100 תרחישי eval end-to-end (73 סינתטיים + 27 מתויגים); טסטי Stage A/B, התורים והאוטונומיה ב-`tests/test_stage_a_correctness.py`, `tests/test_stage_b_latency.py`, `tests/test_queues.py`, `tests/test_worker_autonomy.py`.
 - Intake / Perception / Research / Decision על offline stub (CI, eval).
 - Perception ו-Research על הכללים הדטרמיניסטיים (ה-LLM שלהם opt-in: `AGENT_PROFILE_BUILDER_LLM` / `AGENT_RAG_RETRIEVER_LLM`, כבוי בפרודקשן); Intake, ניסוח בקשת הראיות וסוכן Pattern על Groq (ספק יחיד); Decision על פאנל של שלושה ספקים (פרודקשן).
 - Sanitize על וקטורים 1, 2 ו-4 (markers מורחבים: `user:`, `<|`, `drop table`; `reporter_text` מסומן suspicious).
@@ -1244,7 +1245,7 @@ PYTHONPATH=src python scripts/benchmark.py --arms tree,panel,react --smoke
 - ChromaDB עם ה-seed corpus (`rag_ready=True` ב-`/health` אומר רק שתיקיית האינדקס קיימת).
 - דו"ח יומי פעמיים ביום (מייל קצר + PDF) + ניקוי checkpoints. ב-PDF גם: פסקת "Patterns identified" (קלאסטרים ב-SQL של רחובות שחזרו ב-30 יום, מפורשים בקריאת LLM אחת של סוכן Pattern, עם fallback לסיכום כללי), טבלת "Supervisor denials by category" (SQL בלבד), ו"מקרים דומים שנדחו" עם ה-note של המפקח תחת כל מקרה ממתין.
 - אין ריצות סוכן מתוזמנות: הגרף רץ רק על העלאות (webapp, או ידנית על ידי הצוות) ועל `rg-demo` הידני (dry-run, עולה טוקנים).
-- `scripts/benchmark.py` עם שלוש זרועות (tree / panel / react), חזרות, עלות לפי ספק ו-dry-run: ה-harness מוכן; הריצה החיה ממתינה למפתחות.
+- `scripts/agent_eval.py` ו-`scripts/rag_relevance_eval.py` להערכה לכל סוכן ולרלוונטיות ה-RAG (ה-RAG נמדד על הקורפוס האמיתי ב-31.10.2026: 16/16); ההרצה החיה של agent_eval על המודלים המקומיים עדיין לא בוצעה.
 
 ### לא פעיל / ממתין
 
@@ -1258,7 +1259,7 @@ PYTHONPATH=src python scripts/benchmark.py --arms tree,panel,react --smoke
 
 ### דילמות פתוחות
 
-1. Benchmark חי ל-ReAct מול הפאנל ומול עץ הכללים (הוחלט: כשהדגל דולק ReAct מחליף את הפאנל; המבנה ההיברידי - עץ הכללים עם floors מתחת ל-LLM - נשאר עד שה-benchmark מכריע, IDX 19). ה-harness מוכן (`scripts/benchmark.py --arms tree,panel,react --repeats 3`); דורש מפתחות GROQ / GEMINI / MISTRAL; עד אז `AGENT_DECISION_REACT=0`.
+1. Benchmark חי ל-ReAct מול עץ הכללים על המודלים המקומיים: `scripts/agent_eval.py` במצב live ב-VM (הוחלט: כשהדגל דולק ReAct מחליף את הפאנל; המבנה ההיברידי - עץ הכללים עם floors מתחת ל-LLM - נשאר, IDX 19). באורקל `AGENT_DECISION_REACT=1` מאז 27.10; ההרצה המלאה של agent_eval במצב live טרם בוצעה.
 2. Mistral: אישור ה-plan החינמי ב-console.mistral.ai.
 3. קבלת מודל YOLO מאומן, dataset מתויג ו-corpus ל-RAG מהצוות.
 4. D1: hostname ל-named tunnel ב-Cloudflare; עד אז ה-VM על quick tunnel.
@@ -1275,24 +1276,25 @@ pip install -r requirements.txt
 pip install -r requirements-dev.txt
 
 # הטסטים (offline, deterministic)
-PYTHONPATH=src pytest -q
+pytest -q
 
-# notebook
-jupyter notebook notebooks/agent_walkthrough.ipynb
+# notebook (standalone, ללא השירות)
+jupyter notebook standalone/roadguard_standalone.ipynb
 
 # API
-PYTHONPATH=src uvicorn api.main:app --reload --port 8000
+uvicorn roadguard_api:app --reload --port 8000
 
-# live mode עם Groq
-ROADGUARD_USE_LIVE=1 GROQ_API_KEY=... \
-  PYTHONPATH=src uvicorn api.main:app --reload --port 8000
+# live mode כמו באורקל: Ollama מקומי לכל סוכן, ReAct ב-Decision, עובדים אוטונומיים
+ROADGUARD_USE_LIVE=1 AGENT_LLM_PROVIDER=ollama:qwen2.5:3b \
+  AGENT_SIGNAL_LLM=ollama:llama3.2:3b AGENT_PERCEPTION_LLM=ollama:qwen2.5:3b AGENT_RESEARCH_LLM=ollama:granite3.3:2b \
+  AGENT_PROFILE_BUILDER_LLM=1 AGENT_RAG_RETRIEVER_LLM=1 AGENT_DECISION_REACT=1 AGENT_WORKER_AUTONOMY=1 \
+  uvicorn roadguard_api:app --reload --port 8000
 
-# live mode עם panel מלא (כמו בפרודקשן: ספק אחד לכל מושב)
+# live mode עם panel של ספקי API (היסטורי; הספקים נשארו זמינים אך אינם בשימוש בפרודקשן)
 ROADGUARD_USE_LIVE=1 \
   AGENT_LLM_PANEL="groq:openai/gpt-oss-120b,gemini:gemini-flash-lite-latest,mistral:mistral-small-latest" \
-  AGENT_LLM_FALLBACK="gemini:gemini-flash-lite-latest,groq:openai/gpt-oss-20b,gemini:gemini-3.5-flash" \
   GROQ_API_KEY=... GEMINI_API_KEY=... MISTRAL_API_KEY=... \
-  PYTHONPATH=src uvicorn api.main:app --reload --port 8000
+  uvicorn roadguard_api:app --reload --port 8000
 ```
 
 ---
@@ -1325,10 +1327,10 @@ ROADGUARD_USE_LIVE=1 \
 | דו"ח יומי (digest, Pattern, prune) | [`src/jobs/daily_report.py`](../src/jobs/daily_report.py) |
 | סבב ראיות ב-API | `fulfill_evidence_request` ב-[`src/api/main.py`](../src/api/main.py) |
 | מסך הראיות ב-webapp | [`webapp/assets/app.js`](../webapp/assets/app.js) (`renderEvidenceRequest`) |
-| תוכנית הסוכנים והחלטות ה-IDX | [`agents-roadmap.md`](agents-roadmap.md) |
+| תוכנית הסוכנים והחלטות ה-IDX | ההכרעות מתועדות במסמך זה ובמסמך הביקורת [`agent-architecture-audit-2026-10-31.md`](agent-architecture-audit-2026-10-31.md); מסמך ה-roadmap המקורי לא נשמר בריפו המאוחד |
 | contract פורמלי | [`agents-contract.md`](agents-contract.md) |
-| דיאגרמות אינטראקטיביות | [`agents-diagrams.html`](agents-diagrams.html) |
-| מחברת walkthrough | [`../notebooks/agent_walkthrough.ipynb`](../notebooks/agent_walkthrough.ipynb) |
+| דיאגרמת הצינור החיה | העמוד הפרטי `/flow` (מציג ריצה רק בזמן שהיא רצה) |
+| מחברת standalone | [`../standalone/roadguard_standalone.ipynb`](../standalone/roadguard_standalone.ipynb) |
 
 </div>
 
@@ -1361,7 +1363,10 @@ section 11 for the full narrative.
   `rank_similarity_to_catalog` were listed in the Decision ReAct
   schema but had no dispatcher branch. `check_system_health` is now
   wired to the real probe; the other two return a structured stub so
-  the model stops retrying and the trace records the call.
+  the model stops retrying and the trace records the call. (31.10.2026:
+  `check_system_health` was then removed from the Decision offer, since
+  it consumed hops and never changed a verdict; `recall_agent_notes` is
+  offered instead when `AGENT_WORKER_AUTONOMY=1`.)
 
 ### RAG retriever
 

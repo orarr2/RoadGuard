@@ -2408,6 +2408,37 @@ def _chat_openai_compat(
 # ---------------------------------------------------------------------------
 
 
+def _ollama_messages(messages: list[dict]) -> list[dict]:
+    """Ollama's /api/chat wants assistant tool-call arguments as a JSON
+    object; the internal contract (OpenAI style, see the normalisation
+    below) carries them as a JSON string. Ollama 0.40 rejects the string
+    form with HTTP 400 ("Value looks like object, but can't find closing
+    '}' symbol"), which turned every second ReAct round (Decision and the
+    autonomous workers) into a silent rule-tree fallback on 31.10.2026.
+    The input list is not modified."""
+    out: list[dict] = []
+    for m in messages:
+        calls = m.get("tool_calls") if isinstance(m, dict) else None
+        if not calls:
+            out.append(m)
+            continue
+        fixed_calls = []
+        for c in calls:
+            fn = dict((c or {}).get("function") or {})
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    parsed = json.loads(args)
+                except (TypeError, ValueError):
+                    parsed = {}
+                fn["arguments"] = parsed if isinstance(parsed, dict) else {}
+            elif args is None:
+                fn["arguments"] = {}
+            fixed_calls.append({**(c or {}), "function": fn})
+        out.append({**m, "tool_calls": fixed_calls})
+    return out
+
+
 def _chat_ollama(
     messages: list[dict],
     tools: list | None,
@@ -2422,7 +2453,7 @@ def _chat_ollama(
     base_url = os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434"
     body: dict[str, Any] = {
         "model": model,
-        "messages": messages,
+        "messages": _ollama_messages(messages),
         "stream": False,
         "options": {"temperature": temperature},
     }

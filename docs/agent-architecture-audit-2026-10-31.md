@@ -221,3 +221,30 @@ Operational state first. The Oracle VM was moved from its diverged checkout (449
 Suite after round 4: 174 passed, 0 failed.
 
 Still open after this round: the autonomy and queue behaviour at runtime (needs the re-run batch with AGENT_WORKER_AUTONOMY=1 on the VM); `agent_eval.py` in live mode; the catalogue backfill ingest once `predictions_full.csv` is complete.
+
+## 15. Round 5 (2026-10-31 night): backfill, re-run, what the runtime showed, webapp sign-in, documents
+
+Backfill and ingest: `scripts/predict_catalog_with_shai_model.py` ran on the VM in its own venv (torch CPU, ultralytics 8.4.184, onnxruntime, headless OpenCV) over all 17,099 catalogue images: 17,096 detections, 3 without; `rg-catalog` ingested the CSV, `dataset_images` now carries a stored prediction for 17,096 rows (D20 6,965, D00 4,490, D40 3,888, D10 1,753). The 94-image batch (`/tmp/batch_runner.py`, through the public API as `u_batch_internal`) was then started as a systemd unit.
+
+What the first 20 runs showed, with AGENT_WORKER_AUTONOMY=1 live:
+
+| Observation | Evidence | Consequence |
+|---|---|---|
+| Every second ReAct round against qwen2.5:3b failed with HTTP 400 (`Value looks like object, but can't find closing '}' symbol`), for Decision and for profile_builder | `/stats/agents`: decision `llm_based 0`, `http_4xx 6`; profile_builder `http_4xx 12`; a direct probe of Ollama 0.40.9 on the VM: assistant tool-call `arguments` as a JSON string -> 400, as an object -> 200 | The adapter normalises outbound arguments to objects (`_ollama_messages`, unit test `tests/test_ollama_adapter.py`). Until the fix is deployed, every tool-using run falls back to the rule tree: correct verdicts, no model verdicts |
+| rag_retriever (granite3.3:2b) never called a tool in 17 autonomous runs | `autonomy.rag_retriever.tool_calls 0`, violations `required_not_called:query_repair_standards` on every run | The deterministic query ran instead (by design), so retrieval quality is unchanged; research autonomy needs a model that emits tool calls (qwen2.5:3b or llama3.2:3b) |
+| profile_builder called `lookup_similar_cases` / `recall_agent_notes` but not the required `inspect_image_quality` | violations `required_not_called:inspect_image_quality` on every run that reached a tool | The rule profile stood (by design); the prompt asks for the quality tool first, the model prefers the lookups |
+| Clear-case fast path and KNOWN_IMAGE seal | `fast_path_skips` 2 per worker; one `known_image` verdict on a catalogue image | Both paths fire at runtime |
+| Queue recovery | `recovered_interrupted_runs` logged on each restart | The two 24.10/26.10 rows would have been routed instead of sitting in `processing` |
+
+Webapp sign-in (reproduced in the built-in browser against a local copy of the webapp and a local API, then fixed):
+
+| Symptom reported | Root cause | Fix |
+|---|---|---|
+| "My reports" never loaded on the live site | `loadMyReports` fetched `/hazards/history` with `credentials: "include"`; the API's CORS policy has `allow_credentials=False`, so the browser blocked the response | The table now goes through `fetchJson` with the bearer token and is skipped when signed out (no 401 that pops the modal on page load) |
+| Google button did nothing | `CONFIG.GOOGLE_CLIENT_ID` was empty in `webapp/assets/config.js` while the server reported Google enabled; the widget never mounted and the click called an uninitialised Google API | The public client id (the same one the server verifies) is in config.js; `mountGoogleSignIn` reports whether it mounted and the button explains when it did not |
+| No register button | `/auth/config` says `signup_enabled: false` because `ROADGUARD_SIGNUP_ENABLED` is unset on the VM; the UI hides the flip link by design | Server toggle, enabled at this deploy (cap 10 users, password rules enforced) |
+| Logout "did nothing" | a stale token made `/auth/logout` return 401, which `fetchJson` treated as a rejected session and reopened the sign-in modal | `/auth/logout`, `/auth/login/password` and `/auth/register` are excluded from the 401 handler; the token is always cleared locally |
+
+Verified locally in the browser: fresh visitor -> no modal on load; Sign in -> modal with Google widget rendered and the Sign up link; Sign up -> signed in, header shows the username and Log out, "My reports" table loads; Log out -> header back to Sign in, token cleared, no modal; Upload while signed out -> modal (gate); wrong password -> "Wrong username or password."; correct password -> signed in. The live API answered the same flows over curl (CORS preflight for the Pages origin OK, wrong password 401, login -> /auth/me 200, logout 200).
+
+Documents: README, CHARTER, standalone/README, docs/agents-contract.md and docs/agents-architecture.md were cross-checked against the code (paths, env names, scripts, counts) and corrected: the corpus embedder (all-MiniLM-L6-v2, 384 dimensions, verified on the collection; not nomic-embed-text), the scenario count (100), the test count (174), the removed `scripts/benchmark.py` and `PYTHONPATH=src` commands, the implemented `/hazards/history`, the retired `check_system_health`, the Decision tool list, the autonomy flag, missing files (roadmap, diagrams, walkthrough notebook) pointed at what exists. The standalone notebook's markdown (9 passages), the team deck (8 passages: 7b vs 3b, duplicated tool line, retired tool, embedder, autonomy update) and the hand-off sheet (3 cells: catalogue path, embedder, tool list) were corrected in place.

@@ -185,7 +185,9 @@ another team member.
 
 The 26.10 batch of 94 citizen hazard images was replayed on the
 production VM after wiring in Benny's `charter_grounded_corpus`
-(2,433 passages, ChromaDB 1.5.9, nomic-embed-text embedder). The
+(2,433 passages, ChromaDB 1.5.9, all-MiniLM-L6-v2 embeddings, 384
+dimensions; queries are embedded with the same model through the ONNX
+runtime). The
 batch surfaced four classes of defect that have since been fixed:
 
 1. **KNOWN_IMAGE floor** on catalogued photos was closing severe

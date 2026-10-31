@@ -3,9 +3,10 @@
 **Live site: https://orarr2.github.io/RoadGuard/**
 
 Status: delivered end-to-end on the Agent track. Last agent-layer
-update 2026-10-27 (KNOWN_IMAGE floor fix, tool registry fix, RAG
-trace enrichment, safety-non-road filter, supervisor dedup). See
-`PLAN.md` section 11 for the 26-27.10 batch audit fix log.
+update 2026-10-31 (worker autonomy behind `AGENT_WORKER_AUTONOMY`,
+agent_notes memory, queue management, evidence-based RAG grading,
+KNOWN_IMAGE gate, policy-driven thresholds). The audit log with the
+status of every item is `docs/agent-architecture-audit-2026-10-31.md`.
 
 Road-damage triage for a smart city. A citizen photographs road damage with a
 phone; YOLOv8n detects the four RDD2022 classes (D00 longitudinal cracks, D10
@@ -33,8 +34,9 @@ data/mini_corpus.jsonl   15 seed passages for the RAG index (replaced by the rea
 webapp/              the citizen webapp served by GitHub Pages (detection in the
                      browser with onnxruntime-web, upload or live drive, async
                      submit and poll, evidence round trip, history)
-tests/               conftest.py, test_eval_scenarios.py and the 70-scenario eval
-                     set; tests/labeled_scenarios.json is picked up when present
+tests/               conftest.py, test_eval_scenarios.py, the 73-scenario synthetic
+                     eval set plus tests/labeled_scenarios.json (27 labelled cases,
+                     100 in all), and the unit tests for the agents, queues and API
 deploy/              setup.sh, roadguard.service and README for a Linux VM (gitignored,
                      reveals the Oracle A1.Flex layout - see your local checkout)
 scripts/export_yolo.py       .pt -> .onnx for the webapp detector
@@ -43,7 +45,12 @@ scripts/rag_truth_test.py    canary insert / query / delete / query to prove the
 scripts/rg-digest            twice-daily digest + PDF generator; installed at /usr/local/bin on
                              the VM, fires at 05:00 and 17:00 UTC under the roadguard cron
 scripts/catalog_dataset.py   builds the SQLite dataset catalogue used by lookup_dataset_image
+scripts/predict_catalog_with_shai_model.py   scores every catalogue image with the team's ONNX
+                             model through the notebook's own predict_paths (feeds --predictions)
+scripts/agent_eval.py        per-agent evaluation over the labelled + synthetic scenarios
+scripts/rag_relevance_eval.py   16-pair (class x road) RAG relevance check, 95% target
 docs/                agents-architecture.md (authoritative), agents-contract.md,
+                     agent-architecture-audit-2026-10-31.md (item-by-item status),
                      team-meeting/ (meeting handout, requirements sheet, deck)
 .github/workflows/pages.yml   webapp -> GitHub Pages
 ```
@@ -81,24 +88,34 @@ the reporter for one more piece of evidence.
 | Node | What it does | LLM | Tools (least privilege) | May write |
 |---|---|---|---|---|
 | sanitize | regex boundary defence on the location, OCR text and reporter text | no | - | - |
-| signal_extractor | reporter free text -> structured signals | yes, JSON with a regex fallback | - | - |
+| signal_extractor | reporter free text -> structured signals | yes, JSON with a regex fallback | extract_measurements, lookup_prior_reports (read) | - |
 | supervisor | Python router; four budget caps (iterations, tool hops, cost, wall clock) | no | - | - |
-| profile_builder | YOLO + image quality + metadata -> hazard profile | yes, may only lower confidence | lookup_similar_cases (read) | - |
-| rag_retriever | ChromaDB lookup of repair standards; passages neutralised first | yes, labels coverage | query_repair_standards (read) | - |
-| decision | ReAct loop (max 2 tool hops): action, priority, inspector-prose rationale, citations | yes, inspector persona | 8 read-only + action tools (see below) | evidence request, DRAFT work order, approval row |
+| profile_builder | YOLO + image quality + metadata -> hazard profile | yes, may only lower confidence | lookup_similar_cases, inspect_image_quality, recall_agent_notes (read) | - |
+| rag_retriever | ChromaDB lookup of repair standards; passages neutralised first | yes, labels coverage | query_repair_standards, broaden_rag_query, recall_agent_notes (read) | - |
+| decision | ReAct loop (max 2 tool hops): action, priority, inspector-prose rationale, citations | yes, inspector persona | 7 tools: 4 action + 3 read-only, plus recall_agent_notes (see below) | evidence request, DRAFT work order, approval row |
 | approval_gate | pending approval row + signed link | no | - | approvals |
 | await_evidence | pauses on a checkpoint until the reporter answers | no | - | - |
 
-Only Decision is an agent in the strict sense (the model chooses its next step);
-the other LLM-backed nodes are workers whose next step the code fixes.
+With `AGENT_WORKER_AUTONOMY=0` (the default) only Decision is an agent in the
+strict sense (the model chooses its next step); the other LLM-backed nodes are
+workers whose next step the code fixes. With the flag on (the Oracle deployment
+since 2026-10-31) the three workers get an information gap instead of
+pre-computed answers, must fetch what they need through their tools, declare
+`tools_used` in their reply, and are verified against the tools' own results
+(declared vs. run, regex-confirmed numbers, quality tool required, research
+handoff built from the agent's own retrieval); hops default to 3 and
+`latency.worker_time_cap_s` bounds each worker. Supervisor decisions are stored
+as lessons (`agent_notes`) that perception, research and Decision can recall.
+Section 14 of `docs/agent-architecture-audit-2026-10-31.md` has the contract.
 
 **Decision tools** (what the LLM can call mid-ReAct):
 
 - `check_hazard_severity`, `request_additional_evidence`, `create_draft_work_order`, `flag_for_urgent_review` - the original action tools.
 - `lookup_dataset_image` - exact phash hit in the RDD2022 catalogue; known_image fast path.
 - `rank_similarity_to_catalog` - top-K near matches with a similarity % (distance 0 = 100%, distance 24 = 62%). Lets the agent say "looks ~82% like catalogued D40 pic_id=1024" instead of a binary known / new.
-- `check_system_health` - ollama ps + /proc/meminfo + stub-mode flag, so the agent can tell when the pipeline is degraded and reflect that in the assessment.
 - `check_recent_cluster` - count of same-class reports at the same free-text location in the window; returns `cluster_flag` = none / emerging / strong, so recurring issues get flagged instead of triaged as one-offs.
+- `recall_agent_notes` (only with `AGENT_WORKER_AUTONOMY=1`) - lessons from past supervisor decisions on the same class and road type; hints, never rules.
+- `check_system_health` (ollama ps + /proc/meminfo) backs `GET /health/system` and is no longer offered to the model: in the 27.10 batch it cost a tool hop in six runs and never changed a verdict.
 
 **Guardrails** (what the LLM does NOT decide):
 
@@ -125,8 +142,13 @@ lines), `GET /approvals/{id}`, `POST /approvals/{id}/decide`,
 
 Operator pages, served only on the hosts listed in `ROADGUARD_PRIVATE_HOSTS`
 (loopback by default): `/trace` (a terminal that follows the newest hazard and
-prints each node's decision as it happens), `/supervisor`, `GET /status` (host
-load, models, RAG, database, images, tunnel, shortcuts, open items),
+prints each node's decision as it happens), `/flow` (the pipeline diagram,
+lit only while a run is in progress), `/supervisor` (pending approvals by
+priority then age, overdue badge past `queues.approval_sla_hours`),
+`GET /status` (host load, models, RAG, database with overdue approvals,
+images, tunnel, shortcuts, open items), `GET /stats/agents` (per-agent
+counters, LLM fallback causes, fast-path skips, autonomy tool calls and
+contract violations), `POST /sql` (SELECT-only console),
 `/digest/latest` (two-tab console: Cases with KPI strip + red-bordered Clusters
 panel + split image/detail view; Timeline accordion), `/digest/{YYYY-MM-DD}`
 (archived snapshot from the twice-daily cron), `/health/system` (ollama RAM,
