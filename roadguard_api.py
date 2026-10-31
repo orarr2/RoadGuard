@@ -118,9 +118,13 @@ function apiPath(path) {
 }
 
 function classOf(line) {
-  if (line.startsWith("[DECISION") || line.startsWith("[DONE")) return "dec";
-  if (line.startsWith("[")) return "lbl";
-  if (/^[=-]{10,}$/.test(line) || line.startsWith("AGENT RUN")) return "hdr";
+  // Strip optional leading timestamp so lines carrying a clock classify
+  // the same as bare lines. Handles the new "YYYY-MM-DD HH:MM:SS " prefix
+  // and keeps the old "HH:MM:SS " shape working for already-cached traces.
+  const body = line.replace(/^(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2}:\d{2} /, "");
+  if (body.startsWith("[DECISION") || body.startsWith("[DONE")) return "dec";
+  if (body.startsWith("[")) return "lbl";
+  if (/^[=-]{10,}$/.test(body) || body.startsWith("AGENT RUN")) return "hdr";
   return "";
 }
 

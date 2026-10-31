@@ -3016,7 +3016,7 @@ def _live_journal_line(entry: dict) -> str:
     kind = entry.get("kind", "?")
     tag = _LIVE_TAG.get(kind, "LIVE     ")
     sp = entry.get("speaker", kind)
-    ts = time.strftime("%H:%M:%S", time.localtime(entry.get("ts", time.time())))
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry.get("ts", time.time())))
     content = entry.get("content") or {}
     if not isinstance(content, dict):
         content = {"value": str(content)[:120]}
@@ -9199,13 +9199,17 @@ def _lbl(speaker: str) -> str:
 
 
 def _clock(ts: Any) -> str:
-    """HH:MM:SS of an epoch timestamp in ROADGUARD_DISPLAY_TZ (or local time)."""
+    """YYYY-MM-DD HH:MM:SS of an epoch timestamp in ROADGUARD_DISPLAY_TZ (or local time).
+
+    Date is included so operators can tell apart runs that cross midnight
+    or days in the replayed trace (e.g. 11:14 on day 1 vs 00:46 on day 2).
+    """
     tz = os.environ.get("ROADGUARD_DISPLAY_TZ")
     try:
         dt = datetime.fromtimestamp(float(ts), ZoneInfo(tz)) if tz else datetime.fromtimestamp(float(ts))
     except Exception:
         dt = datetime.fromtimestamp(float(ts))
-    return dt.strftime("%H:%M:%S")
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _llm_line(llm: dict) -> str:
@@ -9559,7 +9563,9 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
     ts = entry.get("ts")
     if ts and out:
         out[0] = f"{_clock(ts)} {out[0]}"
-        out[1:] = [f"{' ' * 9}{ln}" for ln in out[1:]]
+        # Continuation lines indent to the same column as the first line's
+        # content: _clock() is now "YYYY-MM-DD HH:MM:SS" (19) + 1 space = 20.
+        out[1:] = [f"{' ' * 20}{ln}" for ln in out[1:]]
     return out
 
 
@@ -9625,7 +9631,7 @@ def emit_trace(
     source: 'api_batch' / 'api_live' / 'api_async' / 'simulator' etc.
     elapsed_s: wall-clock seconds for the whole run (None = unknown).
     """
-    now = time.strftime("%H:%M:%S", time.localtime())
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     md = final_state.get("metadata") or {}
     lines = format_trace_lines(
         hazard_id,
