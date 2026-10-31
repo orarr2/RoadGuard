@@ -3643,10 +3643,19 @@ def _react_worker_rounds(
                 try:
                     code = getattr(fn, "__code__", None)
                     varnames = tuple(code.co_varnames[: code.co_argcount]) if code else ()
+                    call_args = parsed_args
+                    if (
+                        len(parsed_args) == 1
+                        and isinstance(next(iter(parsed_args.values())), dict)
+                        and next(iter(parsed_args)) not in varnames
+                    ):
+                        # {"payload": {a: .., b: ..}} from a small model: the
+                        # object is the argument list
+                        call_args = {k: v for k, v in next(iter(parsed_args.values())).items() if k in varnames}
                     if "state" in varnames:
-                        raw_result = fn(state=state, **parsed_args)
+                        raw_result = fn(state=state, **call_args)
                     else:
-                        raw_result = fn(**parsed_args)
+                        raw_result = fn(**call_args)
                     result = raw_result if isinstance(raw_result, dict) else {"ok": True, "value": raw_result}
                     hops += 1
                     tools_run[name] = result
@@ -3705,7 +3714,8 @@ _AUTONOMY_ADDENDA = {
     ),
     "profile_builder": (
         "\n\nAUTONOMOUS MODE. No rule-based hint is given. Call "
-        "inspect_image_quality with the image_quality values and base "
+        "inspect_image_quality(blur_score, is_road_scene, brightness_mean, "
+        "ocr_suspicious) with the image_quality fields and base "
         "`confidence` on its concerns; call lookup_similar_cases(location, "
         "hazard_class) to learn whether the place is recurring; you may call "
         "recall_agent_notes(hazard_class, road_type) for lessons from past "
@@ -6854,8 +6864,31 @@ SIGNAL_WORKER_TOOLS: dict = {
 
 
 def _tool_inspect_image_quality(blur_score: float = 0, is_road_scene: bool = True,
-                                 brightness_mean: float = 0.5, ocr_suspicious: bool = False) -> dict:
-    """Structured quality breakdown with named concerns."""
+                                 brightness_mean: float = 0.5, ocr_suspicious: bool = False,
+                                 image_quality: dict | None = None, **_extra) -> dict:
+    """Structured quality breakdown with named concerns.
+
+    ``image_quality`` takes the whole object as the perception payload
+    carries it: the 3b models pass it nested instead of as four fields
+    (31.10.2026 re-run: every call failed with a TypeError until then).
+    """
+    if isinstance(image_quality, dict):
+        blur_score = image_quality.get("blur_score", blur_score)
+        is_road_scene = image_quality.get("is_road_scene", is_road_scene)
+        brightness_mean = image_quality.get("brightness_mean", brightness_mean)
+        ocr = image_quality.get("ocr_suspicious")
+        if ocr is None:
+            ocr = (image_quality.get("ocr_sanitized") or {}).get("is_suspicious_pattern")
+        ocr_suspicious = bool(ocr) if ocr is not None else ocr_suspicious
+    try:
+        blur_score = float(blur_score if blur_score is not None else 0)
+    except (TypeError, ValueError):
+        blur_score = 0.0
+    try:
+        brightness_mean = float(brightness_mean if brightness_mean is not None else 0.5)
+    except (TypeError, ValueError):
+        brightness_mean = 0.5
+    is_road_scene = bool(is_road_scene) if is_road_scene is not None else True
     concerns = []
     if blur_score < 50:
         concerns.append("severe_blur")

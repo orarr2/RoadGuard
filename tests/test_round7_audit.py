@@ -68,3 +68,34 @@ def test_supervisor_note_is_checked_against_the_fields():
     assert ra._verify_supervisor_note(payload, "")[1] == "replaced:empty"
     blocked = dict(payload, lane_blocked="partial")
     assert ra._verify_supervisor_note(blocked, "D40 pothole, main lane is blocked")[1] == "ok"
+
+
+def test_quality_tool_accepts_the_nested_object_small_models_send():
+    nested = ra._tool_inspect_image_quality(image_quality={"blur_score": 20, "is_road_scene": False, "brightness_mean": 0.5})
+    assert nested["ok"] is True and nested["quality_verdict"] == "low"
+    assert set(nested["concerns"]) == {"severe_blur", "not_road_scene"}
+    flat = ra._tool_inspect_image_quality(blur_score=150, is_road_scene=True, brightness_mean=0.5)
+    assert flat["quality_verdict"] == "high"
+    # unknown extras never raise
+    assert ra._tool_inspect_image_quality(blur_score=150, extra_field=1)["ok"] is True
+
+
+def test_react_executor_unpacks_a_single_object_argument(monkeypatch):
+    import json as _json
+
+    def tool(a: int = 0, b: int = 0) -> dict:
+        return {"ok": True, "sum": a + b}
+
+    replies = iter([
+        ra.ChatMessage(finish_reason="tool_calls", content=None, tool_calls=[
+            {"id": "c1", "function": {"name": "add", "arguments": _json.dumps({"payload": {"a": 2, "b": 3, "noise": 1}})}}]),
+        ra.ChatMessage(finish_reason="stop", content='{"done": true}', tool_calls=[]),
+    ])
+    monkeypatch.setattr(ra, "chat", lambda *a, **k: (next(replies), 1, 1))
+    parsed, _, _, info = ra._llm_react_worker(
+        agent_name="profile_builder", system_prompt="s", user_payload={}, state={},
+        tool_registry={"add": (tool, {"type": "function", "function": {"name": "add", "parameters": {"type": "object", "properties": {}}}})},
+        provider_override="ollama:fake", max_hops=2,
+    )
+    assert parsed == {"done": True}
+    assert info["tools_run"]["add"] == {"ok": True, "sum": 5}
