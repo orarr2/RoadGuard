@@ -1237,24 +1237,50 @@ function updatePanel(hazard) {
 // ---------------------------------------------------------------------------
 let timer = null, paused = false, latestNodeState = null;
 
+// Only a run that is in progress right now is drawn: status "processing"
+// and a trace entry (or the submission itself) within LIVE_WINDOW_S
+// seconds. A finished run, a queued one still waiting for a slot and a
+// row left in "processing" by a crash all fall back to the idle view.
+const LIVE_WINDOW_S = 300;
+
+function lastTraceTs(trace) {
+  let last = 0;
+  for (const e of (Array.isArray(trace) ? trace : [])) {
+    const t = Number(e && e.ts);
+    if (t > last) last = t;
+  }
+  return last;
+}
+
+async function liveHazard() {
+  const history = await apiGet("/hazards/history?limit=200");
+  const running = (history.items || []).filter(h => h.status === "processing");
+  const now = Date.now() / 1000;
+  for (const item of running) {
+    const hazard = await apiGet("/report/" + encodeURIComponent(item.hazard_id));
+    const submitted = Date.parse(item.reported_at) / 1000;
+    const recent = Math.max(lastTraceTs(hazard.trace), isNaN(submitted) ? 0 : submitted);
+    if (now - recent <= LIVE_WINDOW_S) return hazard;
+  }
+  return null;
+}
+
+function showIdle() {
+  updatePanel(null);
+  el("empty-state").style.display = "block";
+  el("flow").style.display = "none";
+  latestNodeState = interpretTrace([], null);
+  applyNodeStates(latestNodeState);
+  requestAnimationFrame(drawArrows);
+}
+
 async function tick() {
   if (paused) return;
   try {
-    const history = await apiGet("/hazards/history?limit=1");
-    const items = history.items || [];
-    const targetId = items[0] ? items[0].hazard_id : null;
-    if (!targetId) {
-      updatePanel(null);
-      el("empty-state").style.display = "block";
-      el("flow").style.display = "none";
-      latestNodeState = interpretTrace([], null);
-      applyNodeStates(latestNodeState);
-      requestAnimationFrame(drawArrows);
-      return;
-    }
+    const hazard = await liveHazard();
+    if (!hazard) { showIdle(); return; }
     el("empty-state").style.display = "none";
     el("flow").style.display = "grid";
-    const hazard = await apiGet("/report/" + encodeURIComponent(targetId));
     latestNodeState = interpretTrace(hazard.trace, hazard);
     applyNodeStates(latestNodeState);
     updatePanel(hazard);
