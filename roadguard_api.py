@@ -234,15 +234,29 @@ async function replayHistory() {
     const items = (h.items || []).slice().reverse();  // oldest first
     if (!items.length) return;
     print("--- replaying " + items.length + " recent hazard(s) ---", "hdr");
+    // Count the ones we actually render vs the ones with empty / failing
+    // traces so the header never claims more than the operator sees.
+    let rendered = 0, emptyTrace = 0, failed = 0;
     for (const item of items) {
       try {
         const rep = await get("/report/" + encodeURIComponent(item.hazard_id));
         const lines = rep.trace_lines || [];
+        if (!lines.length) { emptyTrace++; continue; }
         for (const line of lines) print(line, classOf(line));
         print("");
-      } catch (e) { /* skip the broken ones */ }
+        rendered++;
+      } catch (e) { failed++; }
     }
-    print("--- end of replay; following live ---", "hdr");
+    const skipped = emptyTrace + failed;
+    if (skipped > 0) {
+      print(
+        "--- end of replay; rendered " + rendered + "/" + items.length +
+        " (skipped " + skipped + ": " + emptyTrace + " empty, " + failed + " errored); following live ---",
+        "hdr"
+      );
+    } else {
+      print("--- end of replay; following live ---", "hdr");
+    }
     // Mark the newest as "already seen" so the live tick does not
     // reprint it. tick() uses `current` + `printed` to resume.
     const newest = items[items.length - 1];
@@ -2042,6 +2056,110 @@ def _stamp_trace(
     return out
 
 
+def _aggregate_agent_metrics(rows) -> dict[str, Any]:
+    """Per-agent quality counters from a batch of hazard rows.
+
+    Each row must carry an ``agent_trace_json`` column; non-JSON content
+    is skipped silently so one broken row cannot kill the aggregate. The
+    counters are raw run counts (not percentages); the operator divides
+    by ``total_hazards`` to get a rate - except for the RAG counters,
+    which divide by ``rag_retriever.runs`` because not every hazard
+    reaches the RAG stage. ``llm_fallback_runs`` is per hazard (any
+    speaker whose LLM calls all failed in that run)."""
+    counters: dict[str, dict[str, int]] = {
+        "sanitize": {"location_scrubbed": 0, "ocr_suspicious": 0,
+                     "reporter_text_suspicious": 0},
+        "signal_extractor": {"has_text": 0, "llm_used": 0},
+        "supervisor": {"concern_none": 0, "concern_input_ambiguous": 0,
+                       "concern_budget_tight": 0, "concern_other": 0},
+        "profile_builder": {"llm_used": 0, "catalog_hit": 0,
+                            "class_matches_detector": 0},
+        "rag_retriever": {"runs": 0, "coverage_direct_match": 0,
+                          "llm_used": 0, "total_passages_returned": 0},
+        "decision": {"rule_based": 0, "llm_based": 0,
+                     "grounding_failed": 0, "contradiction_floor": 0,
+                     "action_standard": 0, "action_known_image": 0,
+                     "action_human_review": 0, "action_needs_more_evidence": 0,
+                     "action_urgent": 0},
+    }
+    llm_fallback_runs = 0
+    for row in rows or []:
+        try:
+            trace = json.loads((row["agent_trace_json"] if hasattr(row, "__getitem__") else getattr(row, "agent_trace_json", None)) or "[]")
+        except (TypeError, ValueError):
+            continue
+        detector_class = str(
+            (row["class"] if hasattr(row, "__getitem__") else getattr(row, "class", None)) or ""
+        ).upper()
+        had_fallback = False
+        for entry in trace:
+            if not isinstance(entry, dict):
+                continue
+            speaker = str(entry.get("speaker") or "")
+            c = entry.get("content")
+            if not isinstance(c, dict):
+                continue
+            if speaker == "sanitize":
+                if c.get("location_scrubbed"):
+                    counters["sanitize"]["location_scrubbed"] += 1
+                if c.get("ocr_suspicious"):
+                    counters["sanitize"]["ocr_suspicious"] += 1
+                if c.get("reporter_text_suspicious"):
+                    counters["sanitize"]["reporter_text_suspicious"] += 1
+            elif speaker == "signal_extractor":
+                if c.get("has_text"):
+                    counters["signal_extractor"]["has_text"] += 1
+                if c.get("llm_used"):
+                    counters["signal_extractor"]["llm_used"] += 1
+            elif speaker == "supervisor" and c.get("pipeline_concern"):
+                concern = c["pipeline_concern"]
+                key = (f"concern_{concern}"
+                       if concern in ("none", "input_ambiguous", "budget_tight")
+                       else "concern_other")
+                counters["supervisor"][key] = counters["supervisor"].get(key, 0) + 1
+            elif speaker == "profile_builder":
+                if c.get("llm_used"):
+                    counters["profile_builder"]["llm_used"] += 1
+                dl = c.get("dataset_lookup") or {}
+                if isinstance(dl, dict) and dl.get("found"):
+                    counters["profile_builder"]["catalog_hit"] += 1
+                pc = str(c.get("primary_class") or "").upper()
+                if detector_class and pc and pc == detector_class:
+                    counters["profile_builder"]["class_matches_detector"] += 1
+            elif speaker == "rag_retriever":
+                counters["rag_retriever"]["runs"] += 1
+                if c.get("coverage") == "direct_match":
+                    counters["rag_retriever"]["coverage_direct_match"] += 1
+                if c.get("llm_used"):
+                    counters["rag_retriever"]["llm_used"] += 1
+                try:
+                    counters["rag_retriever"]["total_passages_returned"] += int(c.get("n_procedures") or 0)
+                except (TypeError, ValueError):
+                    pass
+            elif speaker == "decision" and entry.get("kind") == "final":
+                if c.get("source") == "rule_based":
+                    counters["decision"]["rule_based"] += 1
+                else:
+                    counters["decision"]["llm_based"] += 1
+                action = str(c.get("action") or "").lower()
+                key = f"action_{action}"
+                counters["decision"][key] = counters["decision"].get(key, 0) + 1
+                rationale = str(c.get("rationale") or "").lower()
+                if "grounding failed" in rationale:
+                    counters["decision"]["grounding_failed"] += 1
+                if c.get("floor_applied"):
+                    counters["decision"]["contradiction_floor"] += 1
+            llm_s = c.get("llm") or {}
+            if isinstance(llm_s, dict) and llm_s.get("failed_calls", 0) > 0:
+                had_fallback = True
+        if had_fallback:
+            llm_fallback_runs += 1
+    return {
+        "per_agent": counters,
+        "llm_fallback_runs": llm_fallback_runs,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Operator status banner (/status): host, service, models, RAG, DB, images
 # ---------------------------------------------------------------------------
@@ -3192,6 +3310,50 @@ def create_app() -> FastAPI:
             }
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"stats_failed: {exc}")
+
+    @app.get("/stats/agents")
+    def stats_agents(request: Request, window_hours: int = 24) -> dict:
+        """Per-agent quality aggregates over the last ``window_hours`` of
+        hazards. Private: gated to Tailscale / loopback like /digest.
+
+        Each counter is a raw run count. The review called out that
+        latency + tokens alone miss whether an agent actually produced a
+        useful signal, so this returns counts of the quality signals
+        the trace already records: dataset catalogue hits for
+        profile_builder, coverage=direct_match for rag_retriever,
+        rule_based vs llm_based for decision, grounding failures and
+        catalog-vs-detector contradiction floor fires, and the global
+        llm_fallback rate (any node whose LLM calls all failed).
+
+        Clients compute percentages client-side by dividing by
+        total_hazards (or rag_retriever.runs for RAG counters).
+        """
+        if not _is_private_host(request):
+            raise HTTPException(status_code=404, detail="not found")
+        try:
+            hrs = max(1, min(720, int(window_hours)))
+        except (TypeError, ValueError):
+            hrs = 24
+        settings = get_settings()
+        import sqlite3 as _sqlite3
+        con = _sqlite3.connect(settings.roadguard_db_path)
+        con.row_factory = _sqlite3.Row
+        now = time.time()
+        try:
+            rows = con.execute(
+                "SELECT id, class, agent_decision, agent_trace_json "
+                "FROM hazards WHERE reported_at >= ?",
+                (now - hrs * 3600,),
+            ).fetchall()
+        finally:
+            con.close()
+        aggregates = _aggregate_agent_metrics(rows)
+        return {
+            "window_hours": hrs,
+            "total_hazards": len(rows),
+            "as_of": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            **aggregates,
+        }
 
     @app.get("/digest/latest", response_class=HTMLResponse)
     def digest_latest(request: Request) -> HTMLResponse:

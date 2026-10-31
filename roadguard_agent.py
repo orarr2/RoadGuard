@@ -3097,6 +3097,8 @@ def llm_summary(calls: list[dict]) -> dict:
     failed_calls = sum(1 for c in calls if not c.get("ok"))
     errors = [c["error_type"] for c in calls
               if not c.get("ok") and c.get("error_type")]
+    error_messages = [c["error_message"] for c in calls
+                      if not c.get("ok") and c.get("error_message")]
     summary = {
         "model": calls[0]["model"] if calls else None,
         "calls": len(calls),
@@ -3109,6 +3111,11 @@ def llm_summary(calls: list[dict]) -> dict:
     }
     if errors:
         summary["errors"] = errors
+    # First concrete error message carries the actual diagnostic ("read
+    # timeout", schema error, provider HTTP body) - types alone collapse
+    # distinct failures into the same ``RuntimeError`` cell in the trace.
+    if error_messages:
+        summary["error_sample"] = error_messages[0]
     return summary
 
 
@@ -3119,6 +3126,7 @@ def _record_call(
     tokens_out: int,
     ok: bool,
     error_type: str | None = None,
+    error_message: str | None = None,
 ) -> None:
     """Record a chat() call for the node summary + emit a per-LLM-call live trace event.
 
@@ -3127,6 +3135,9 @@ def _record_call(
     per the delivery scope decision. ``error_type`` is the exception's
     class name when a call failed, so the supervisor can distinguish a
     provider rate-limit (``RateLimitError``) from a slow success.
+    ``error_message`` is the exception's ``str()`` truncated to 200 chars -
+    enough to tell a timeout from a schema error from a provider HTTP
+    body without leaking prompt content.
     """
     entry = {
         "model": model,
@@ -3137,6 +3148,8 @@ def _record_call(
     }
     if not ok and error_type:
         entry["error_type"] = error_type
+    if not ok and error_message:
+        entry["error_message"] = error_message
     calls = getattr(_LLM_LOG, "calls", None)
     if calls is not None:
         calls.append(entry)
@@ -3176,6 +3189,7 @@ def chat(
             0, 0,
             ok=False,
             error_type=type(exc).__name__,
+            error_message=str(exc)[:200] if str(exc) else None,
         )
         raise
     _record_call(model_label, time.time() - t0, in_tok, out_tok, ok=True)
@@ -9222,6 +9236,24 @@ def _llm_line(llm: dict) -> str:
     return line
 
 
+def _match_descriptor(match_type: Any, distance: Any) -> str:
+    """Short, honest description of how a catalogue match was found.
+
+    sha256 at distance 0 means the submission's bytes are identical to the
+    catalogued image, so a stored score IS this submission's score. phash
+    with distance > 0 means visually similar but a different file, so the
+    live MODEL line is the authoritative score and the catalogue entry is
+    context only. Spelling this out in the trace avoids reading a phash
+    match as proof that the stored score belongs to the current upload.
+    """
+    mt = str(match_type or "?")
+    if mt == "sha256":
+        return "sha256: identical bytes to submission"
+    if mt == "phash":
+        return f"phash distance={distance}: visually similar, not same file"
+    return f"{mt}: distance={distance}"
+
+
 def _short(v: Any, limit: int = 160) -> str:
     s = str(v)
     return s if len(s) <= limit else s[: limit - 3] + "..."
@@ -9297,8 +9329,8 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
                 out.append(
                     f"{_INDENT}dataset: KNOWN IMAGE pic_id={dl.get('pic_id')} "
                     f"{dl.get('split')}/{dl.get('file_name')}  labels={dl.get('classes') or 'none'}  "
-                    f"prediction={dl.get('model_prediction') or 'none'}  (match by {dl.get('match')}, "
-                    f"distance {dl.get('distance')})"
+                    f"stored_prediction={dl.get('model_prediction') or 'none'}  "
+                    f"({_match_descriptor(dl.get('match'), dl.get('distance'))})"
                 )
             else:
                 out.append(f"{_INDENT}dataset: new photo ({dl.get('reason')})")
@@ -9377,7 +9409,8 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             out.append(
                 f"{_INDENT}catalogued: pic_id={dm.get('pic_id')}  {dm.get('split')}/{dm.get('file_name')}  "
                 f"labels={dm.get('classes') or 'none'} ({dm.get('n_labels')} boxes)  "
-                f"prediction={dm.get('model_prediction') or 'none'}  match={dm.get('match')}"
+                f"stored_prediction={dm.get('model_prediction') or 'none'}  "
+                f"({_match_descriptor(dm.get('match'), dm.get('distance'))})"
             )
         for call in (c.get("react") or {}).get("calls") or []:
             if call.get("ok"):
@@ -9479,10 +9512,17 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
         llm_s = c.get("llm") or {}
         if llm_s.get("failed_calls", 0) > 0:
             errs = ", ".join((llm_s.get("errors") or [])[:3])
+            model_label = llm_s.get("model") or "?"
             out.append(
                 f"{_INDENT}llm_fallback: {llm_s.get('failed_calls')}/{llm_s.get('ok_calls', 0) + llm_s.get('failed_calls', 0)} calls failed "
-                f"[{_short(errs, 240)}]"
+                f"on {model_label}  [{_short(errs, 240)}]"
             )
+            # Attach the first concrete exception message so the operator
+            # can tell a timeout from a schema error from a 401 at a
+            # glance - type alone collapses them into "RuntimeError".
+            sample = llm_s.get("error_sample")
+            if sample:
+                out.append(f"{_INDENT}  first_error: {_short(sample, 300)}")
         # 27.10.2026 trace enrichment: budget state so the operator sees
         # how close the run was to the wall-clock / token cap when the
         # verdict was issued, not only after the fact.
@@ -9585,6 +9625,18 @@ def format_trace_lines(
     sees the run grow node by node and then end with the DONE line.
     """
     lines = _header(hazard_id, metadata, header_extra)
+    # Live model grounding: the trained-model (YOLO) class and confidence
+    # for THIS submission, pulled from metadata so every hazard trace -
+    # new photo or catalogue match, with or without a stored prediction -
+    # opens with an explicit "trained model said" line that cannot be
+    # confused with the catalogue's historical labels or stored score.
+    md = metadata or {}
+    if md.get("class") and md.get("confidence") is not None:
+        lines.append(
+            f"{_lbl('model')} class={md['class']}  "
+            f"confidence={float(md['confidence']):.2f}  "
+            f"source=yolo_live"
+        )
     tool_ids: list[str] = []
     for entry in trace or []:
         lines.extend(_entry_lines(entry, tool_ids))
