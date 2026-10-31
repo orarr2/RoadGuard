@@ -9,7 +9,7 @@
 # is included in the Decision prompt and in each trace entry so a
 # reviewer can tell which policy produced a given verdict.
 
-version: "2026.10.22"
+version: "2026.10.31"
 charter_grounding_target_pct: 90
 
 severity:
@@ -69,3 +69,17 @@ latency:
   fast_path:
     min_detector_confidence: 0.8
     min_blur_score: 100
+  # Autonomous workers (AGENT_WORKER_AUTONOMY=1): a worker's ReAct loop
+  # stops once it has spent this many seconds and the rule path stands, so
+  # three workers with three hops each cannot eat the run's wall clock.
+  worker_time_cap_s: 45
+
+queues:
+  # Operator queues. An approval pending longer than approval_sla_hours is
+  # marked overdue in /status and in the supervisor inbox (which lists by
+  # priority, then age). An evidence request the reporter has not answered
+  # within evidence_ttl_hours expires and the case goes to a human instead
+  # of hanging in waiting_for_evidence. Rows left in queued/processing by a
+  # restart are routed to a human when the service starts.
+  approval_sla_hours: 24
+  evidence_ttl_hours: 72

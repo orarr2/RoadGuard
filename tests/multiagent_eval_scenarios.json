@@ -3380,5 +3380,149 @@
       "reported_at": "2026-10-20T12:00:00Z"
     },
     "expected_action": "human_review"
+  },
+  {
+    "id": "pol-01",
+    "kind": "mid",
+    "description": "Policy edge: D40 on main road, lane partial, confidence exactly at decision.urgent.min_confidence (0.60) -> urgent",
+    "yolo_output": {
+      "top1_class": "D40",
+      "top1_confidence": 0.6,
+      "top1_margin": 0.21,
+      "detections": [
+        {
+          "class": "D40",
+          "confidence": 0.6,
+          "bbox": [
+            220,
+            400,
+            400,
+            580
+          ],
+          "area_ratio": 0.06
+        }
+      ],
+      "n_detections_by_class": {
+        "D40": 1,
+        "D20": 0,
+        "D00": 0,
+        "D10": 0
+      },
+      "image_dims": [
+        1280,
+        720
+      ]
+    },
+    "image_quality": {
+      "blur_score": 150,
+      "brightness_mean": 0.55,
+      "is_road_scene": true,
+      "road_scene_confidence": 0.93,
+      "occlusion_estimate": "low",
+      "ocr_text_detected": ""
+    },
+    "metadata": {
+      "road_type": "main",
+      "lane_blocked": "partial",
+      "location": "Rothschild 12",
+      "reported_at": "2026-10-31T09:10:00Z"
+    },
+    "expected_action": "urgent"
+  },
+  {
+    "id": "pol-02",
+    "kind": "mid",
+    "description": "Policy edge: same frame one hundredth below the urgent threshold (0.59), no recurrence -> needs_more_evidence band",
+    "yolo_output": {
+      "top1_class": "D40",
+      "top1_confidence": 0.59,
+      "top1_margin": 0.2,
+      "detections": [
+        {
+          "class": "D40",
+          "confidence": 0.59,
+          "bbox": [
+            220,
+            400,
+            400,
+            580
+          ],
+          "area_ratio": 0.06
+        }
+      ],
+      "n_detections_by_class": {
+        "D40": 1,
+        "D20": 0,
+        "D00": 0,
+        "D10": 0
+      },
+      "image_dims": [
+        1280,
+        720
+      ]
+    },
+    "image_quality": {
+      "blur_score": 150,
+      "brightness_mean": 0.55,
+      "is_road_scene": true,
+      "road_scene_confidence": 0.93,
+      "occlusion_estimate": "low",
+      "ocr_text_detected": ""
+    },
+    "metadata": {
+      "road_type": "main",
+      "lane_blocked": "partial",
+      "location": "Rothschild 14",
+      "reported_at": "2026-10-31T09:12:00Z"
+    },
+    "expected_action": "needs_more_evidence"
+  },
+  {
+    "id": "pol-03",
+    "kind": "simple",
+    "description": "Clear-case fast path: confident D10 (0.92), sharp usable frame, no reporter text; profile and rag LLM passes are skipped and the rule tree stands",
+    "yolo_output": {
+      "top1_class": "D10",
+      "top1_confidence": 0.92,
+      "top1_margin": 0.61,
+      "detections": [
+        {
+          "class": "D10",
+          "confidence": 0.92,
+          "bbox": [
+            220,
+            400,
+            400,
+            580
+          ],
+          "area_ratio": 0.02
+        }
+      ],
+      "n_detections_by_class": {
+        "D40": 0,
+        "D20": 0,
+        "D00": 0,
+        "D10": 1
+      },
+      "image_dims": [
+        1280,
+        720
+      ]
+    },
+    "image_quality": {
+      "blur_score": 160,
+      "brightness_mean": 0.55,
+      "is_road_scene": true,
+      "road_scene_confidence": 0.93,
+      "occlusion_estimate": "low",
+      "ocr_text_detected": ""
+    },
+    "metadata": {
+      "road_type": "secondary",
+      "lane_blocked": "none",
+      "location": "Herzl 3",
+      "reported_at": "2026-10-31T09:15:00Z"
+    },
+    "expected_action": "standard"
   }
 ]

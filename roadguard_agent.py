@@ -454,6 +454,27 @@ CREATE TABLE IF NOT EXISTS evidence_requests (
 CREATE INDEX IF NOT EXISTS idx_evidence_requests_status
     ON evidence_requests(status, created_at DESC);
 
+-- Lessons from human decisions (31.10.2026). Written when a supervisor
+-- approves or denies an approval; read through the recall_agent_notes
+-- tool by the autonomous workers and by Decision as hints for similar
+-- cases. Hints, never rules: a note cannot change a verdict by itself.
+CREATE TABLE IF NOT EXISTS agent_notes (
+    id            TEXT PRIMARY KEY,
+    created_at    REAL NOT NULL,
+    hazard_id     TEXT NOT NULL,
+    approval_id   TEXT NOT NULL,
+    decision      TEXT NOT NULL,                 -- approved | denied
+    agent_action  TEXT NOT NULL,                 -- the verdict the human judged
+    hazard_class  TEXT NOT NULL DEFAULT '',
+    road_type     TEXT NOT NULL DEFAULT '',
+    lane_blocked  TEXT NOT NULL DEFAULT '',
+    note          TEXT NOT NULL DEFAULT '',      -- the supervisor's free text
+    lesson        TEXT NOT NULL DEFAULT ''       -- one sentence the agents read
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_notes_case
+    ON agent_notes(hazard_class, road_type, created_at DESC);
+
 -- Persistent DecisionCache (live-drive flow). Each row is a (key -> verdict)
 -- entry with an expiry wall-clock. The server reads unexpired rows into
 -- an in-memory LRU on startup and writes-through on every put, so the
@@ -878,6 +899,18 @@ class Database:
         ).fetchall()
         return [self._row_to_hazard(r) for r in rows]
 
+    def list_hazards_by_status(self, statuses: tuple[str, ...], limit: int = 500) -> list[Hazard]:
+        """Fleet-wide rows in any of `statuses`, oldest first. Used by the
+        queue sweeps (interrupted runs, expired evidence)."""
+        if not statuses:
+            return []
+        marks = ",".join("?" for _ in statuses)
+        rows = self._conn.execute(
+            f"SELECT * FROM hazards WHERE status IN ({marks}) ORDER BY reported_at ASC LIMIT ?",
+            (*statuses, limit),
+        ).fetchall()
+        return [self._row_to_hazard(r) for r in rows]
+
     def set_hazard_status(self, hazard_id: str, status: str) -> None:
         self._conn.execute(
             "UPDATE hazards SET status = ? WHERE id = ?",
@@ -1163,12 +1196,79 @@ class Database:
         return cur.rowcount > 0
 
     def list_pending_approvals(self, limit: int = 50) -> list[Approval]:
+        """The supervisor's queue: highest priority first, oldest first
+        within a priority, so an urgent case never waits behind newer
+        routine ones and nothing starves."""
         rows = self._conn.execute(
             "SELECT * FROM approvals WHERE status = 'pending' "
-            "ORDER BY created_at DESC LIMIT ?",
+            "ORDER BY priority DESC, created_at ASC LIMIT ?",
             (limit,),
         ).fetchall()
         return [self._row_to_approval(r) for r in rows]
+
+    # ----- Agent notes (lessons from human decisions) ----------------------
+
+    def get_hazard_any(self, hazard_id: str) -> Hazard | None:
+        """Operator-side lookup without the owner check."""
+        row = self._conn.execute(
+            "SELECT * FROM hazards WHERE id = ?", (hazard_id,)
+        ).fetchone()
+        return self._row_to_hazard(row) if row else None
+
+    def add_agent_note(
+        self,
+        *,
+        hazard_id: str,
+        approval_id: str,
+        decision: str,
+        agent_action: str,
+        hazard_class: str = "",
+        road_type: str = "",
+        lane_blocked: str = "",
+        note: str = "",
+    ) -> str:
+        """Record what a human decided about an agent verdict, as one
+        sentence the agents can recall for similar cases."""
+        verdict = "confirmed" if decision == "approved" else "overturned"
+        where = f"{hazard_class or 'unknown class'} on {road_type or 'unknown road'}"
+        if lane_blocked:
+            where += f" (lane {lane_blocked})"
+        lesson = f"a human {verdict} the agent's {agent_action} verdict for {where}"
+        clean_note = " ".join((note or "").split())[:300]
+        if clean_note:
+            lesson += f"; note: {clean_note}"
+        note_id = f"note_{uuid.uuid4().hex[:12]}"
+        self._conn.execute(
+            """
+            INSERT INTO agent_notes (
+                id, created_at, hazard_id, approval_id, decision, agent_action,
+                hazard_class, road_type, lane_blocked, note, lesson
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                note_id, time.time(), hazard_id, approval_id, decision, agent_action,
+                hazard_class or "", road_type or "", lane_blocked or "", clean_note, lesson,
+            ),
+        )
+        return note_id
+
+    def recall_agent_notes(
+        self, hazard_class: str, road_type: str = "", k: int = 5
+    ) -> list[dict[str, Any]]:
+        """Newest lessons for this class, same road type first."""
+        k = max(1, min(int(k), 20))
+        rows = self._conn.execute(
+            """
+            SELECT id, created_at, hazard_id, decision, agent_action, hazard_class,
+                   road_type, lane_blocked, lesson
+              FROM agent_notes
+             WHERE hazard_class = ?
+             ORDER BY (road_type = ?) DESC, created_at DESC
+             LIMIT ?
+            """,
+            (hazard_class, road_type or "", k),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ----- Evidence requests ----------------------------------------------
 
@@ -3237,13 +3337,26 @@ def worker_provider(agent: str) -> str | None:
     return value or None
 
 
+def worker_autonomy_enabled() -> bool:
+    """AGENT_WORKER_AUTONOMY=1: the three workers get an information gap
+    instead of pre-computed answers, must fetch what they need through
+    their tools, declare the tools they used, and are verified against the
+    tools' own results. Implies AGENT_WORKER_REACT. Off by default."""
+    return os.environ.get("AGENT_WORKER_AUTONOMY", "0") == "1"
+
+
 def worker_react_enabled() -> bool:
-    return os.environ.get("AGENT_WORKER_REACT", "0") == "1"
+    return os.environ.get("AGENT_WORKER_REACT", "0") == "1" or worker_autonomy_enabled()
 
 
 def worker_react_max_hops() -> int:
+    """AGENT_WORKER_REACT_MAX_HOPS when set; otherwise 3 under autonomy
+    (one lookup, one follow-up, one spare) and 1 as before."""
+    raw = (os.environ.get("AGENT_WORKER_REACT_MAX_HOPS") or "").strip()
+    if not raw:
+        return 3 if worker_autonomy_enabled() else 1
     try:
-        return max(0, int(os.environ.get("AGENT_WORKER_REACT_MAX_HOPS", "1")))
+        return max(0, int(raw))
     except (TypeError, ValueError):
         return 1
 
@@ -3276,6 +3389,7 @@ def _llm_react_worker(
     state: dict,
     provider_override: str | None = None,
     max_hops: int | None = None,
+    time_cap_s: float | None = None,
 ) -> tuple[dict | None, int, int, dict]:
     """Generic ReAct loop for a worker agent.
 
@@ -3286,8 +3400,9 @@ def _llm_react_worker(
 
     Returns ``(parsed_json or None, tokens_in, tokens_out, info)``. info
     carries ``hops``, ``steps`` (per-hop trace entries), ``tools_run`` and
-    the ``provider`` used. None return means the LLM failed or the final
-    reply did not parse to a JSON object.
+    the ``provider`` used. None return means the LLM failed, the final
+    reply did not parse to a JSON object, or ``time_cap_s`` seconds passed
+    before a final reply (``info["timed_out"]``).
     """
     if max_hops is None:
         max_hops = worker_react_max_hops()
@@ -3297,6 +3412,7 @@ def _llm_react_worker(
     steps: list[dict] = []
     hops = 0
     total_in = total_out = 0
+    started = time.monotonic()
     info = {
         "tools_run": tools_run,
         "hops": 0,
@@ -3304,6 +3420,8 @@ def _llm_react_worker(
         "steps": steps,
         "provider": provider_override,
         "max_hops": max_hops,
+        "time_cap_s": time_cap_s,
+        "timed_out": False,
     }
     messages = [
         {"role": "system", "content": system_prompt},
@@ -3312,6 +3430,11 @@ def _llm_react_worker(
 
     msg = None
     for _round in range(max_hops + 1):
+        if time_cap_s is not None and time.monotonic() - started > time_cap_s:
+            LOGGER.info("%s_react_time_cap: %.0fs spent, rule path stands", agent_name, time_cap_s)
+            info["hops"] = hops
+            info["timed_out"] = True
+            return None, total_in, total_out, info
         offer = schemas if (hops < max_hops and schemas) else None
         try:
             msg, in_tok, out_tok = chat(
@@ -3413,6 +3536,102 @@ def _llm_react_worker(
 
     info["hops"] = hops
     return None, total_in, total_out, info
+
+
+# ---------------------------------------------------------------------------
+# Worker autonomy (AGENT_WORKER_AUTONOMY=1)
+# ---------------------------------------------------------------------------
+# Three things turn a worker from "one call with unused tools" into an
+# agent: an information gap (the payload no longer carries the answers its
+# tools can fetch), a declared contract (the reply names the tools it
+# used), and verification (declared tools are checked against the tools
+# that actually ran, numeric claims against the tools' own results). All
+# of it is deterministic; the LLM calls stay where they were.
+
+_AUTONOMY_ADDENDA = {
+    "signal_extractor": (
+        "\n\nAUTONOMOUS MODE. The detector class and the form values are not "
+        "given to you; only the reporter's text and the location are. Before "
+        "filling reporter_signals, call extract_measurements with the raw text "
+        "and copy its numbers; never estimate centimetres yourself. If the text "
+        "or the location names a place, call lookup_prior_reports(location, "
+        "hazard_class) and mention the result in summary. Add to your JSON: "
+        '"tools_used": [names of the tools you called].'
+    ),
+    "profile_builder": (
+        "\n\nAUTONOMOUS MODE. No rule-based hint is given. Call "
+        "inspect_image_quality with the image_quality values and base "
+        "`confidence` on its concerns; call lookup_similar_cases(location, "
+        "hazard_class) to learn whether the place is recurring; you may call "
+        "recall_agent_notes(hazard_class, road_type) for lessons from past "
+        "human decisions on similar cases (hints, not rules). Add to your JSON: "
+        '"is_recurring_location": true | false and "tools_used": [names of the '
+        "tools you called]."
+    ),
+    "rag_retriever": (
+        "\n\nAUTONOMOUS MODE. No passages are given to you. Call "
+        "query_repair_standards(hazard_class, road_type) yourself; when its "
+        "coverage is partial_match or no_match, call broaden_rag_query. You may "
+        "call recall_agent_notes(hazard_class, road_type) for lessons from past "
+        "human decisions. Judge coverage over the passages the tools returned, "
+        'nothing else. Add to your JSON: "cited_ids": [article ids you relied '
+        'on] and "tools_used": [names of the tools you called].'
+    ),
+}
+
+
+def _autonomy_prompt(agent: str, base: str) -> str:
+    return base + _AUTONOMY_ADDENDA.get(agent, "") if worker_autonomy_enabled() else base
+
+
+def _autonomy_record(parsed: dict | None, info: dict, required: tuple[str, ...]) -> dict:
+    """Compare the tools the reply claims against the tools that ran, and
+    note required tools that never ran. Goes on the worker's trace entry."""
+    info = info or {}
+    ran = sorted(info.get("tools_run") or {})
+    declared = parsed.get("tools_used") if isinstance(parsed, dict) else None
+    declared = [str(t) for t in declared] if isinstance(declared, list) else []
+    violations = [f"declared_not_run:{t}" for t in declared if t not in ran]
+    violations += [f"required_not_called:{t}" for t in required if t not in ran]
+    if info.get("timed_out"):
+        violations.append("time_cap")
+    return {
+        "mode": "autonomous",
+        "tools_used": ran,
+        "declared_tools": declared,
+        "hops": int(info.get("hops") or 0),
+        "violations": violations,
+    }
+
+
+def _worker_tools(agent: str, base: dict) -> dict:
+    """The worker's registry; under autonomy perception and research also
+    get the shared lessons tool (recall_agent_notes)."""
+    if not worker_autonomy_enabled() or agent not in ("profile_builder", "rag_retriever"):
+        return base
+    registry = dict(base)
+    registry["recall_agent_notes"] = (recall_agent_notes, NOTES_SCHEMA)
+    return registry
+
+
+def _verified_signals(text: str, claimed: Any, info: dict, record: dict) -> dict:
+    """Numbers the intake agent states must come from extract_measurements.
+    Use the tool's own result when it ran; run the regex when it did not.
+    A number the regex cannot find is dropped, never trusted."""
+    tool = ((info or {}).get("tools_run") or {}).get("extract_measurements")
+    if not isinstance(tool, dict) or not tool.get("ok"):
+        tool = _tool_extract_measurements(text)
+    verified = _coerce_signals(claimed)
+    for key in ("size_cm", "depth_cm", "vehicles_swerving", "standing_water"):
+        tool_value = tool.get(key)
+        if tool_value not in (None, False):
+            if verified.get(key) != tool_value:
+                record["violations"].append(f"signal_overridden:{key}")
+            verified[key] = tool_value
+        elif key in ("size_cm", "depth_cm") and verified.get(key) is not None:
+            record["violations"].append(f"unverified_number_dropped:{key}")
+            verified[key] = None
+    return verified
 
 
 # ---------------------------------------------------------------------------
@@ -3553,21 +3772,24 @@ def _policy_decision_thresholds() -> dict[str, Any]:
 
 
 def _policy_latency() -> dict[str, Any]:
-    """latency.fast_path thresholds from policy.yaml with safe defaults."""
+    """latency.* thresholds from policy.yaml with safe defaults: the
+    clear-case fast path and the autonomous workers' time cap."""
     try:
-        fp = ((load_policy() or {}).get("latency") or {}).get("fast_path") or {}
+        lat = (load_policy() or {}).get("latency") or {}
     except Exception:
-        fp = {}
+        lat = {}
+    fp = lat.get("fast_path") or {}
 
-    def _f(key: str, default: float) -> float:
+    def _f(src: dict, key: str, default: float) -> float:
         try:
-            return float(fp.get(key, default))
+            return float(src.get(key, default))
         except (TypeError, ValueError):
             return default
 
     return {
-        "min_detector_confidence": _f("min_detector_confidence", 0.8),
-        "min_blur_score": _f("min_blur_score", 100.0),
+        "min_detector_confidence": _f(fp, "min_detector_confidence", 0.8),
+        "min_blur_score": _f(fp, "min_blur_score", 100.0),
+        "worker_time_cap_s": _f(lat, "worker_time_cap_s", 45.0),
     }
 
 
@@ -3592,6 +3814,25 @@ def _clear_case_fast_path(yolo: dict, iq: dict, md: dict) -> str | None:
     ):
         return f"clear_case_fast_path (conf>={lim['min_detector_confidence']}, no reporter text, usable image)"
     return None
+
+
+def _policy_queues() -> dict[str, float]:
+    """queues.* operator thresholds from policy.yaml with safe defaults."""
+    try:
+        q = (load_policy() or {}).get("queues") or {}
+    except Exception:
+        q = {}
+
+    def _f(key: str, default: float) -> float:
+        try:
+            return float(q.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "approval_sla_hours": _f("approval_sla_hours", 24.0),
+        "evidence_ttl_hours": _f("evidence_ttl_hours", 72.0),
+    }
 
 
 def _policy_summary_for_prompt() -> str:
@@ -6064,6 +6305,7 @@ _READ_ONLY_DECISION_TOOLS = (
     "lookup_dataset_image",
     "rank_similarity_to_catalog",
     "check_recent_cluster",
+    "recall_agent_notes",
 )
 
 
@@ -6321,6 +6563,54 @@ def _tool_lookup_prior_reports(location: str, hazard_class: str = "D40", k: int 
     }
 
 
+def recall_agent_notes(hazard_class: str, road_type: str = "", k: int = 5) -> dict:
+    """Lessons from past human decisions on similar cases (agent_notes).
+    Read-only hints for the agents, never a rule. Never raises."""
+    if not hazard_class:
+        return {"ok": False, "error": "hazard_class is required"}
+    try:
+        with Database(get_settings().roadguard_db_path) as db:
+            notes = db.recall_agent_notes(str(hazard_class), str(road_type or ""), int(k))
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return {
+        "ok": True,
+        "n": len(notes),
+        "lessons": [
+            {
+                "when": time.strftime("%Y-%m-%d", time.gmtime(float(n.get("created_at") or 0))),
+                "decision": n.get("decision"),
+                "agent_action": n.get("agent_action"),
+                "road_type": n.get("road_type"),
+                "lesson": n.get("lesson"),
+            }
+            for n in notes
+        ],
+    }
+
+
+NOTES_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "recall_agent_notes",
+        "description": (
+            "Lessons from past human (supervisor) decisions on similar cases: which "
+            "agent verdicts were confirmed or overturned for this hazard class and "
+            "road type. Hints, not rules."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "hazard_class": {"type": "string"},
+                "road_type": {"type": "string"},
+                "k": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            "required": ["hazard_class"],
+        },
+    },
+}
+
+
 SIGNAL_WORKER_TOOLS: dict = {
     "extract_measurements": (
         _tool_extract_measurements,
@@ -6453,6 +6743,9 @@ def _tool_broaden_rag_query(hazard_class: str, road_type: str = "main") -> dict:
             "coverage": res.get("coverage"),
             "n_results": len(res.get("procedures") or []),
             "tool_result_ids": res.get("tool_result_ids") or [],
+            # The autonomous research agent builds its handoff from what
+            # its tools returned, so the passages travel with the ids.
+            "procedures": res.get("procedures") or [],
         }
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -7073,33 +7366,52 @@ def _parse_intake_json(text: str) -> dict | None:
     }
 
 
-def _extract_by_llm(text: str, md: dict, yolo: dict, state: dict | None = None) -> tuple[dict | None, int, int]:
+def _extract_by_llm(
+    text: str, md: dict, yolo: dict, state: dict | None = None
+) -> tuple[dict | None, int, int, dict | None]:
+    """Returns (intake or None, tokens_in, tokens_out, autonomy record or None)."""
     # #12: wrap the reporter's text in explicit USER_SUPPLIED markers so
     # the LLM sees it as evidence to read, not as instructions to follow.
     # Belt and braces with the system prompt line that says the same.
-    payload = {
-        "reporter_text": wrap_user_supplied(text),
-        "form": {"road_type": md.get("road_type"), "lane_blocked": md.get("lane_blocked")},
-        "detector": {
+    autonomous = worker_autonomy_enabled()
+    payload: dict[str, Any] = {"reporter_text": wrap_user_supplied(text)}
+    if autonomous:
+        # Information gap: the agent reads the text and may look up the
+        # place; the detector and the form are compared by the code later.
+        payload["location"] = md.get("location") or ""
+    else:
+        payload["form"] = {"road_type": md.get("road_type"), "lane_blocked": md.get("lane_blocked")}
+        payload["detector"] = {
             "top1_class": yolo.get("top1_class"),
             "top1_confidence": yolo.get("top1_confidence"),
-        },
-    }
+        }
     provider = worker_provider("signal")
     # ReAct path: when enabled AND a per-worker LLM is set, the Intake agent
     # may call extract_measurements / lookup_prior_reports before replying.
     if worker_react_enabled() and provider:
-        parsed, in_tok, out_tok, _info = _llm_react_worker(
+        raw, in_tok, out_tok, info = _llm_react_worker(
             agent_name="signal_extractor",
-            system_prompt=SIGNAL_EXTRACTOR_SYSTEM_PROMPT,
+            system_prompt=_autonomy_prompt("signal_extractor", SIGNAL_EXTRACTOR_SYSTEM_PROMPT),
             user_payload=payload,
             tool_registry=SIGNAL_WORKER_TOOLS,
             state=state or {},
             provider_override=provider,
+            time_cap_s=_policy_latency()["worker_time_cap_s"] if autonomous else None,
         )
+        # The ReAct reply is the same contract as the single call: normalise
+        # it the same way (mentioned.*, coerced signals) instead of merging
+        # the raw object into the intake.
+        parsed = _parse_intake_json(json.dumps(raw)) if isinstance(raw, dict) else None
+        autonomy = None
+        if autonomous:
+            autonomy = _autonomy_record(raw, info, required=("extract_measurements",))
+            if parsed is not None:
+                parsed["reporter_signals"] = _verified_signals(
+                    text, parsed.get("reporter_signals"), info, autonomy
+                )
         # No second single-call round on a ReAct miss: it re-asks the same
         # model the same question and was the third call in the 27.10 log.
-        return parsed, in_tok, out_tok
+        return parsed, in_tok, out_tok, autonomy
     try:
         msg, in_tok, out_tok = chat(
             [
@@ -7112,8 +7424,8 @@ def _extract_by_llm(text: str, md: dict, yolo: dict, state: dict | None = None) 
         )
     except Exception as exc:
         LOGGER.warning("intake_llm_failed: %s", exc)
-        return None, 0, 0
-    return _parse_intake_json(msg.content or ""), in_tok, out_tok
+        return None, 0, 0, None
+    return _parse_intake_json(msg.content or ""), in_tok, out_tok, None
 
 
 def _contradictions(mentioned: dict, yolo: dict, md: dict) -> list[dict]:
@@ -7165,12 +7477,13 @@ def signal_extractor_node(state: RoadGuardState) -> dict:
     }
     signals = _empty_signals()
     in_tok = out_tok = 0
+    autonomy: dict | None = None
     if text:
         extracted = None
         if not suspicious:
             # Flagged text is already headed for human_review; the LLM
             # call would be spent on input the sanitizer distrusts.
-            extracted, in_tok, out_tok = _extract_by_llm(text, md, yolo, state=state)
+            extracted, in_tok, out_tok, autonomy = _extract_by_llm(text, md, yolo, state=state)
         if extracted is None:
             extracted = _extract_by_keywords(text)
             intake["source"] = "rules"
@@ -7195,6 +7508,8 @@ def signal_extractor_node(state: RoadGuardState) -> dict:
             "llm_used": in_tok > 0,
         },
     }
+    if autonomy is not None:
+        trace_entry["content"]["autonomy"] = autonomy
     _llm_calls = end_llm_log()
     if _llm_calls:
         trace_entry["content"]["llm"] = llm_summary(_llm_calls)
@@ -7358,6 +7673,14 @@ def _llm_refine(
             "is_recurring_location": base_profile.get("is_recurring_location"),
         },
     }
+    autonomous = worker_autonomy_enabled()
+    autonomy: dict | None = None
+    fallback_reason: str | None = None
+    if autonomous:
+        # Information gap: no rule-based hint; the place is given so the
+        # agent can look up recurrence itself.
+        user_payload.pop("rule_based_hint", None)
+        user_payload["metadata"]["location"] = md.get("location") or ""
     provider = worker_provider("perception")
     rule_defaults = {
         "severity_signal": base_profile.get("severity_signal"),
@@ -7373,16 +7696,30 @@ def _llm_refine(
     # ReAct path first when the perception LLM has its own model + flag on
     if worker_react_enabled() and provider:
         react_attempted = True
-        parsed, in_tok, out_tok, _info = _llm_react_worker(
+        raw, in_tok, out_tok, info = _llm_react_worker(
             agent_name="profile_builder",
-            system_prompt=PROFILE_BUILDER_SYSTEM_PROMPT,
+            system_prompt=_autonomy_prompt("profile_builder", PROFILE_BUILDER_SYSTEM_PROMPT),
             user_payload=user_payload,
-            tool_registry=PERCEPTION_WORKER_TOOLS,
+            tool_registry=_worker_tools("profile_builder", PERCEPTION_WORKER_TOOLS),
             state=state or {},
             provider_override=provider,
+            time_cap_s=_policy_latency()["worker_time_cap_s"] if autonomous else None,
         )
-        if parsed is not None:
-            parsed = _parse_perception_json(json.dumps(parsed))
+        if raw is not None:
+            parsed = _parse_perception_json(json.dumps(raw))
+        if autonomous:
+            autonomy = _autonomy_record(raw, info, required=("inspect_image_quality",))
+            if parsed is not None:
+                claimed = raw.get("is_recurring_location") if isinstance(raw, dict) else None
+                if isinstance(claimed, bool) and claimed != bool(base_profile.get("is_recurring_location")):
+                    autonomy["violations"].append("recurrence_claim_contradicts_lookup")
+                if any(v.startswith("required_not_called") for v in autonomy["violations"]):
+                    # Judged the image without looking at it: the rule
+                    # profile stands and the trace says why.
+                    parsed = None
+                    fallback_reason = "autonomy_required_tool_not_called"
+            elif (info or {}).get("timed_out"):
+                fallback_reason = "autonomy_time_cap"
 
     # A ReAct miss falls back to the rule profile directly; a second
     # single-call round was the third LLM call per run in the 27.10 log.
@@ -7400,36 +7737,34 @@ def _llm_refine(
             return rule_defaults, 0, 0
         parsed = _parse_perception_json(msg.content or "")
     if parsed is None:
-        return (
-            {
-                "severity_signal": base_profile.get("severity_signal"),
-                "severity_rationale": base_profile.get("severity_rationale"),
-                "confidence": base_confidence,
-                "needs_more_evidence": base_needs_more,
-                "missing_fields": base_missing,
-                "fallback_reason": (
-                    "react_reply_off_contract" if react_attempted else "reply_off_contract"
-                ),
-            },
-            in_tok,
-            out_tok,
-        )
+        fallback = {
+            "severity_signal": base_profile.get("severity_signal"),
+            "severity_rationale": base_profile.get("severity_rationale"),
+            "confidence": base_confidence,
+            "needs_more_evidence": base_needs_more,
+            "missing_fields": base_missing,
+            "fallback_reason": fallback_reason or (
+                "react_reply_off_contract" if react_attempted else "reply_off_contract"
+            ),
+        }
+        if autonomy is not None:
+            fallback["autonomy"] = autonomy
+        return fallback, in_tok, out_tok
 
     missing = parsed.get("missing_fields") or []
     if not isinstance(missing, list):
         missing = base_missing
 
-    return (
-        {
-            "severity_signal": parsed["severity_signal"],
-            "severity_rationale": str(parsed.get("severity_rationale") or "")[:200],
-            "confidence": parsed["confidence"],
-            "needs_more_evidence": bool(parsed.get("needs_more_evidence", base_needs_more)),
-            "missing_fields": [str(m) for m in missing][:5],
-        },
-        in_tok,
-        out_tok,
-    )
+    refined = {
+        "severity_signal": parsed["severity_signal"],
+        "severity_rationale": str(parsed.get("severity_rationale") or "")[:200],
+        "confidence": parsed["confidence"],
+        "needs_more_evidence": bool(parsed.get("needs_more_evidence", base_needs_more)),
+        "missing_fields": [str(m) for m in missing][:5],
+    }
+    if autonomy is not None:
+        refined["autonomy"] = autonomy
+    return refined, in_tok, out_tok
 
 
 def profile_builder_node(state: RoadGuardState) -> dict:
@@ -7631,6 +7966,8 @@ def profile_builder_node(state: RoadGuardState) -> dict:
         # The model answered off-contract and the rule profile stands;
         # say so instead of letting llm_used=True imply a model verdict.
         trace_entry["content"].setdefault("llm_fallback_reason", refined["fallback_reason"])
+    if refined.get("autonomy"):
+        trace_entry["content"]["autonomy"] = refined["autonomy"]
     trace_entry["content"]["dataset_lookup"] = _dataset_lookup_summary(dataset_hit)
 
     update: dict = {
@@ -7805,6 +8142,72 @@ def _llm_label(
     )
 
 
+def _autonomous_retrieval(
+    hazard_class: str, road_type: str, profile: dict, md: dict, state: dict | None
+) -> tuple[dict | None, dict | None, int, int, dict]:
+    """Research under autonomy: the agent runs the retrieval tools itself
+    and the code assembles the handoff from what the tools returned.
+
+    Returns (label or None, merged tool result or None, tokens_in,
+    tokens_out, autonomy record). The label is the agent's coverage /
+    confidence / key_findings reply; the result has the passages the
+    agent actually retrieved (query_repair_standards, then
+    broaden_rag_query), deduplicated, with coverage recomputed by the
+    code. None result means the agent never retrieved anything and the
+    caller runs the deterministic query instead."""
+    payload = {
+        "hazard_class": hazard_class,
+        "road_type": road_type,
+        "severity_signal": profile.get("severity_signal"),
+        "lane_blocked": md.get("lane_blocked"),
+    }
+    raw, in_tok, out_tok, info = _llm_react_worker(
+        agent_name="rag_retriever",
+        system_prompt=_autonomy_prompt("rag_retriever", RAG_RETRIEVER_SYSTEM_PROMPT),
+        user_payload=payload,
+        tool_registry=_worker_tools("rag_retriever", RESEARCH_WORKER_TOOLS),
+        state=state or {},
+        provider_override=worker_provider("research"),
+        time_cap_s=_policy_latency()["worker_time_cap_s"],
+    )
+    record = _autonomy_record(raw, info, required=("query_repair_standards",))
+    tools_run = (info or {}).get("tools_run") or {}
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for name in ("query_repair_standards", "broaden_rag_query"):
+        res = tools_run.get(name)
+        if not isinstance(res, dict) or not res.get("ok"):
+            continue
+        for p in res.get("procedures") or []:
+            ids = [str(a) for a in (p.get("article_ids") or [])]
+            if ids and ids[0] in seen:
+                continue
+            seen.update(ids)
+            merged.append(p)
+    result: dict | None = None
+    if merged:
+        result = {
+            "procedures": merged,
+            "tool_result_ids": [aid for p in merged for aid in (p.get("article_ids") or [])],
+            "coverage": _coverage(merged, hazard_class, road_type),
+        }
+    else:
+        record["violations"].append("no_passages_retrieved")
+    # A coverage judgement without any retrieval is not a judgement.
+    label = (
+        _parse_research_json(json.dumps(raw))
+        if isinstance(raw, dict) and result is not None
+        else None
+    )
+    if label is not None and result is not None:
+        cited = raw.get("cited_ids") if isinstance(raw.get("cited_ids"), list) else []
+        known = set(result["tool_result_ids"])
+        unknown = [str(c) for c in cited if str(c) not in known]
+        if unknown:
+            record["violations"].append(f"cited_unknown_ids:{len(unknown)}")
+    return label, result, in_tok, out_tok, record
+
+
 def rag_retriever_node(state: RoadGuardState) -> dict:
     """Call the RAG tool, optionally LLM-label coverage, build the handoff."""
     begin_llm_log()
@@ -7814,9 +8217,26 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
     hazard_class = profile.get("primary_class", "D40")
     road_type = md.get("road_type", "main")
 
-    result = RESEARCH_TOOLS["query_repair_standards"][0](
-        hazard_class=hazard_class, road_type=road_type, k=3
+    fast_path = _clear_case_fast_path(
+        state.get("yolo_output") or {}, state.get("image_quality") or {}, md
     )
+    llm_enabled = _rag_llm_enabled() and fast_path is None
+    autonomous = llm_enabled and worker_autonomy_enabled()
+    auto_label: dict | None = None
+    autonomy: dict | None = None
+    in_tok = out_tok = 0
+    result: dict | None = None
+    if autonomous:
+        # The research agent runs the retrieval tools itself; the code
+        # verifies the reply and assembles the handoff from what the tools
+        # returned. No retrieval by the agent -> deterministic query below.
+        auto_label, result, in_tok, out_tok, autonomy = _autonomous_retrieval(
+            hazard_class, road_type, profile, md, state
+        )
+    if result is None:
+        result = RESEARCH_TOOLS["query_repair_standards"][0](
+            hazard_class=hazard_class, road_type=road_type, k=3
+        )
 
     # 27.10.2026 relevance filter: non-road passages (safety-non-road-* in
     # mini_corpus) were being returned for every D40/D20 road query, and
@@ -7890,12 +8310,22 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
     base_coverage = result["coverage"]
     base_confidence = "high" if base_coverage == "direct_match" else "medium"
 
-    fast_path = _clear_case_fast_path(
-        state.get("yolo_output") or {}, state.get("image_quality") or {}, md
-    )
-    llm_enabled = _rag_llm_enabled() and fast_path is None
     fb_reason: str | None = None
-    if llm_enabled:
+    if autonomous:
+        if auto_label is not None:
+            coverage, confidence = auto_label["coverage"], auto_label["confidence"]
+            raw_findings = auto_label.get("key_findings") or []
+            findings = [str(f)[:200] for f in raw_findings][:5] if isinstance(raw_findings, list) else []
+        else:
+            coverage, confidence, findings = base_coverage, base_confidence, []
+            violations = (autonomy or {}).get("violations") or []
+            if any(v.startswith("required_not_called") for v in violations):
+                fb_reason = "autonomy_required_tool_not_called"
+            elif "time_cap" in violations:
+                fb_reason = "autonomy_time_cap"
+            else:
+                fb_reason = "autonomy_reply_off_contract"
+    elif llm_enabled:
         coverage, confidence, findings, in_tok, out_tok, fb_reason = _llm_label(
             hazard_class=hazard_class,
             road_type=road_type,
@@ -7907,7 +8337,6 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
         )
     else:
         coverage, confidence, findings = base_coverage, base_confidence, []
-        in_tok = out_tok = 0
 
     # Grounding guard: if the LLM says direct_match but the tool returned
     # no procedures, trust the tool - it saw the retrieval.
@@ -7960,6 +8389,8 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
         trace_entry["content"]["llm_skipped_reason"] = fast_path or "AGENT_RAG_RETRIEVER_LLM=0"
     elif fb_reason:
         trace_entry["content"].setdefault("llm_fallback_reason", fb_reason)
+    if autonomy is not None:
+        trace_entry["content"]["autonomy"] = autonomy
 
     update: dict = {
         "procedures": procedures_safe,
@@ -8404,8 +8835,18 @@ def _llm_decide(
 # ---------------------------------------------------------------------------
 
 
+def _decision_tools() -> dict:
+    """DECISION_TOOLS, plus the shared lessons tool when the workers run
+    autonomously (one memory for every agent)."""
+    if not worker_autonomy_enabled():
+        return DECISION_TOOLS
+    tools = dict(DECISION_TOOLS)
+    tools["recall_agent_notes"] = (recall_agent_notes, NOTES_SCHEMA)
+    return tools
+
+
 def _decision_tool_schemas() -> list[dict]:
-    return [schema for (_fn, schema) in DECISION_TOOLS.values()]
+    return [schema for (_fn, schema) in _decision_tools().values()]
 
 
 def _run_decision_tool(name: str, args: dict, state: RoadGuardState, tools_run: dict) -> dict:
@@ -8421,9 +8862,9 @@ def _run_decision_tool(name: str, args: dict, state: RoadGuardState, tools_run: 
       - request_additional_evidence respects the cap of one per hazard.
     """
     hazard_id = state["hazard_id"]
-    if name not in DECISION_TOOLS:
+    if name not in _decision_tools():
         return {"ok": False, "error": f"unknown tool {name!r}"}
-    fn = DECISION_TOOLS[name][0]
+    fn = _decision_tools()[name][0]
     try:
         if name == "lookup_dataset_image":
             md = state.get("metadata") or {}
@@ -9922,6 +10363,13 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
     llm = c.get("llm")
     if isinstance(llm, dict) and llm.get("calls"):
         out.insert(1, _llm_line(llm))
+    auto = c.get("autonomy")
+    if isinstance(auto, dict):
+        tools = ",".join(auto.get("tools_used") or []) or "none"
+        violations = ",".join(auto.get("violations") or []) or "none"
+        out.append(
+            f"{_INDENT}autonomy: tools={tools}  hops={auto.get('hops', 0)}  violations={violations}"
+        )
     ts = entry.get("ts")
     if ts and out:
         out[0] = f"{_clock(ts)} {out[0]}"

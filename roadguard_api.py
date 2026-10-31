@@ -340,6 +340,7 @@ button.primary { background: var(--info); color: #061020; font-weight: 700;
 .row .top .act.urgent  { background: rgba(239,68,68,.18); color: var(--bad); }
 .row .top .act.standard { background: rgba(56,189,248,.18); color: var(--info); }
 .row .top .act.human_review { background: rgba(138,149,179,.18); color: var(--dim); }
+.row .top .act.overdue { background: rgba(245,158,11,.22); color: #b45309; }
 .row .meta { color: var(--dim); font-size: 12px; margin-top: 4px; }
 .row .buttons { grid-column: 2; grid-row: 1 / span 2; display: flex;
   gap: 8px; align-items: center; }
@@ -415,9 +416,10 @@ function row(a) {
   div.innerHTML =
     '<div class="top">' + a.hazard_id +
       ' <span class="act ' + kind + '">' + kind.replace(/_/g, " ") + '</span>' +
+      (a.overdue ? ' <span class="act overdue">overdue ' + a.age_hours + 'h</span>' : '') +
       '</div>' +
     '<div class="meta">approval ' + a.approval_id + ' - priority ' + prio +
-      ' - created ' + a.created_at + '</div>' +
+      ' - created ' + a.created_at + (a.age_hours != null ? ' - waiting ' + a.age_hours + 'h' : '') + '</div>' +
     '<div class="buttons">' +
       '<button class="primary" onclick="viewTrace(\'' + a.hazard_id + '\')">View trace</button>' +
     '</div>';
@@ -1866,9 +1868,115 @@ def prune_checkpoints(checkpoint_path: str, keep_thread_ids: list[str]) -> int:
         conn.close()
 
 
+def _trace_with_event(trace_json: str, kind: str, reason: str) -> str:
+    """Append a pipeline event to a stored trace so the /trace page shows
+    why a verdict changed outside a graph run."""
+    try:
+        trace = json.loads(trace_json or "[]")
+    except Exception:
+        trace = []
+    if not isinstance(trace, list):
+        trace = []
+    trace.append({
+        "iter": len(trace),
+        "speaker": "pipeline",
+        "kind": kind,
+        "content": {"reason": reason},
+        "ts": time.time(),
+    })
+    return json.dumps(trace)
+
+
+def _route_to_human(db: Database, hazard: Any, kind: str, reason: str) -> None:
+    """Charter route for a run that cannot finish on its own: the row
+    becomes a human_review verdict (priority floor 50, like a crashed run)
+    with an approvals row, so a person is notified."""
+    priority = max(int(hazard.priority or 0), 50)
+    db.update_hazard_verdict(
+        hazard_id=hazard.id,
+        priority=priority,
+        agent_decision="human_review",
+        agent_rationale=reason,
+        agent_trace_json=_trace_with_event(hazard.agent_trace_json, kind, reason),
+        cited_sources_json="[]",
+        status="open",
+        work_order_id=None,
+        agent_assessment="",
+    )
+    db.create_approval(
+        hazard_id=hazard.id,
+        action="human_review",
+        priority=priority,
+        rationale=reason,
+        cited_sources_json="[]",
+    )
+
+
+def recover_interrupted_runs(db_path: str) -> int:
+    """Startup only. A row still 'queued' or 'processing' when the service
+    starts belonged to a background task that died with the old process;
+    nothing will ever finish it. Route it to a human instead of leaving it
+    to look live forever. Returns the number of rows recovered."""
+    reason = "service restarted while the run was in progress; routed to a human"
+    n = 0
+    with Database(db_path) as db:
+        for h in db.list_hazards_by_status(("queued", "processing")):
+            _route_to_human(db, h, "graph_interrupted", reason)
+            n += 1
+    if n:
+        LOGGER.warning("recovered_interrupted_runs: %d row(s) routed to human_review", n)
+    return n
+
+
+def route_expired_evidence(db: Database, ttl_hours: float) -> int:
+    """Hazards whose evidence request expired (expire_evidence_requests set
+    their status to 'evidence_expired') become human_review with an
+    approvals row, so a case the reporter abandoned reaches a person.
+    Idempotent: the routed row leaves 'evidence_expired'."""
+    reason = (
+        f"reporter did not answer the evidence request within {ttl_hours:g}h; routed to a human"
+    )
+    n = 0
+    for h in db.list_hazards_by_status(("evidence_expired",)):
+        _route_to_human(db, h, "evidence_expired", reason)
+        n += 1
+    return n
+
+
+def record_decision_lesson(db: Database, approval_id: str, decision: str, note: str) -> str | None:
+    """Write the agent_notes row for a decided approval: which agent verdict
+    a human confirmed or overturned, for which class / road / lane, plus
+    the supervisor's note. Returns the note id, or None when the approval
+    is unknown."""
+    approval = db.get_approval(approval_id)
+    if approval is None:
+        return None
+    hazard = db.get_hazard_any(approval.hazard_id)
+    return db.add_agent_note(
+        hazard_id=approval.hazard_id,
+        approval_id=approval_id,
+        decision=decision,
+        agent_action=approval.action,
+        hazard_class=getattr(hazard, "hazard_class", "") or "",
+        road_type=getattr(hazard, "road_type", "") or "",
+        lane_blocked=getattr(hazard, "lane_blocked", "") or "",
+        note=note or "",
+    )
+
+
+def approvals_overdue(pending: list[Any], sla_hours: float, now: float | None = None) -> int:
+    """How many pending approvals have waited longer than the SLA."""
+    at = time.time() if now is None else now
+    return sum(1 for a in pending if at - float(a.created_at) > sla_hours * 3600)
+
+
 def retention_sweep(db_path: str, checkpoint_path: str) -> dict[str, int]:
-    """Expire stale evidence requests and prune checkpoint threads older
+    """Expire evidence requests older than queues.evidence_ttl_hours and
+    route their hazards to a human, then prune checkpoint threads older
     than CHECKPOINT_RETENTION_DAYS. Returns the counts for the log."""
+    from roadguard_agent import _policy_queues
+
+    ttl_hours = _policy_queues()["evidence_ttl_hours"]
     cutoff = time.time() - CHECKPOINT_RETENTION_DAYS * 86400
     with Database(db_path) as db:
         keep = [
@@ -1877,13 +1985,14 @@ def retention_sweep(db_path: str, checkpoint_path: str) -> dict[str, int]:
                 "SELECT id FROM hazards WHERE reported_at >= ?", (cutoff,)
             )
         ]
-        expired = db.expire_evidence_requests(cutoff)
+        expired = db.expire_evidence_requests(time.time() - ttl_hours * 3600)
+        routed = route_expired_evidence(db, ttl_hours)
     removed = prune_checkpoints(checkpoint_path, keep)
     LOGGER.info(
-        "retention_sweep: expired_requests=%d checkpoints_removed=%d kept_threads=%d",
-        expired, removed, len(keep),
+        "retention_sweep: expired_requests=%d routed_to_human=%d checkpoints_removed=%d kept_threads=%d",
+        expired, routed, removed, len(keep),
     )
-    return {"expired": int(expired), "removed": removed, "kept": len(keep)}
+    return {"expired": int(expired), "routed": routed, "removed": removed, "kept": len(keep)}
 
 
 def start_retention_thread(
@@ -2112,6 +2221,7 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
     fallback_by_cause: dict[str, int] = {}
     fallback_by_agent: dict[str, dict[str, int]] = {}
     fast_path_skips: dict[str, int] = {}
+    autonomy: dict[str, dict[str, int]] = {}
     for row in rows or []:
         try:
             trace = json.loads((row["agent_trace_json"] if hasattr(row, "__getitem__") else getattr(row, "agent_trace_json", None)) or "[]")
@@ -2193,6 +2303,17 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
                 by_speaker[key] = by_speaker.get(key, 0) + 1
             if c.get("llm_skipped_reason", "").startswith("clear_case_fast_path"):
                 fast_path_skips[speaker or "?"] = fast_path_skips.get(speaker or "?", 0) + 1
+            auto = c.get("autonomy")
+            if isinstance(auto, dict):
+                # Autonomous workers: runs, tool calls made, contract
+                # violations found by verification, and clean runs.
+                a = autonomy.setdefault(speaker or "?", {"runs": 0, "tool_calls": 0, "violations": 0, "clean_runs": 0})
+                a["runs"] += 1
+                a["tool_calls"] += len(auto.get("tools_used") or [])
+                n_viol = len(auto.get("violations") or [])
+                a["violations"] += n_viol
+                if n_viol == 0:
+                    a["clean_runs"] += 1
         if had_fallback:
             llm_fallback_runs += 1
     return {
@@ -2201,6 +2322,7 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
         "llm_fallback_by_cause": fallback_by_cause,
         "llm_fallback_by_agent": fallback_by_agent,
         "fast_path_skips": fast_path_skips,
+        "autonomy": autonomy,
     }
 
 
@@ -2360,19 +2482,25 @@ def _collect_status(settings: Settings) -> dict[str, Any]:
         rag["passages"] = RagClient.shared().count()
     except Exception as exc:
         rag["error"] = type(exc).__name__
-    database: dict[str, Any] = {"total": 0, "by_action": {}, "pending_approvals": 0, "open_evidence": 0}
+    database: dict[str, Any] = {
+        "total": 0, "by_action": {}, "pending_approvals": 0, "overdue_approvals": 0, "open_evidence": 0,
+    }
     try:
-        from roadguard_agent import Database
+        from roadguard_agent import Database, _policy_queues
 
         with Database(settings.roadguard_db_path) as db:
             by_action: dict[str, int] = {}
             for key, n in db.count_hazards_since(0.0).items():
                 action = key.split(":", 1)[1] if ":" in key else key
                 by_action[action or "queued"] = by_action.get(action or "queued", 0) + n
+            pending = db.list_pending_approvals(limit=500)
+            sla_hours = _policy_queues()["approval_sla_hours"]
             database = {
                 "total": sum(by_action.values()),
                 "by_action": by_action,
-                "pending_approvals": len(db.list_pending_approvals(limit=500)),
+                "pending_approvals": len(pending),
+                "overdue_approvals": approvals_overdue(pending, sla_hours),
+                "approval_sla_hours": sla_hours,
                 "open_evidence": len(db.list_pending_evidence_requests(limit=500)),
             }
     except Exception as exc:
@@ -2446,7 +2574,8 @@ def _status_lines(d: dict[str, Any]) -> list[str]:
         f"wall clock {s['wall_clock_cap_s']}s  parallel runs {s['async_concurrency']}",
         f"  models    {len(m['installed'])} installed: {installed}   (* active)   loaded now: {loaded}",
         f"  rag       chromadb {rag.get('passages') if rag.get('passages') is not None else 'unavailable'} passages",
-        f"  database  {db['total']} hazards: {actions}   approvals pending {db['pending_approvals']}   "
+        f"  database  {db['total']} hazards: {actions}   approvals pending {db['pending_approvals']} "
+        f"(overdue {db.get('overdue_approvals', 0)}, sla {db.get('approval_sla_hours', 24):g}h)   "
         f"evidence open {db['open_evidence']}",
         f"  dataset   {im['count']:,} / {im['target']:,} ({pct}%) catalogued; "
         f"{im.get('with_predictions', 0):,} with model predictions; split {im.get('by_split', {})}",
@@ -2784,7 +2913,12 @@ async def _lifespan(app: FastAPI):
         os.environ.get("ROADGUARD_RETENTION_SWEEP", "1") != "0"
         and settings.roadguard_db_path != ":memory:"
     ):
-
+        # Rows a dead background task left in queued/processing go to a
+        # human before anything else runs (queues: startup recovery).
+        try:
+            recover_interrupted_runs(settings.roadguard_db_path)
+        except Exception as exc:
+            LOGGER.warning("recover_interrupted_runs_failed: %s", exc)
         start_retention_thread(
             settings.roadguard_db_path,
             os.environ.get("ROADGUARD_CHECKPOINT_PATH", "./roadguard-checkpoints.sqlite"),
@@ -4225,11 +4359,17 @@ def create_app() -> FastAPI:
             by_class[r.hazard_class] = by_class.get(r.hazard_class, 0) + 1
         pending = db.list_pending_approvals(limit=20)
         waiting_evidence = db.list_pending_evidence_requests(limit=20)
+        from roadguard_agent import _policy_queues
+
+        sla_hours = _policy_queues()["approval_sla_hours"]
+        now = time.time()
         return {
-            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
             "total_hazards": len(rows),
             "by_action": by_action,
             "by_class": by_class,
+            "approval_sla_hours": sla_hours,
+            "overdue_approvals": approvals_overdue(pending, sla_hours, now),
             "pending_approvals": [
                 {
                     "approval_id": a.id,
@@ -4238,6 +4378,8 @@ def create_app() -> FastAPI:
                     "priority": a.priority,
                     "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                time.gmtime(a.created_at)),
+                    "age_hours": round((now - a.created_at) / 3600, 1),
+                    "overdue": (now - a.created_at) > sla_hours * 3600,
                 }
                 for a in pending
             ],
@@ -4326,6 +4468,12 @@ def create_app() -> FastAPI:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="approval_not_pending_or_missing",
             )
+        # The human's verdict becomes a lesson the agents can recall
+        # (agent_notes). Best-effort: a failed note never fails the decision.
+        try:
+            record_decision_lesson(db, approval_id, decision, note)
+        except Exception as exc:
+            LOGGER.warning("agent_note_write_failed approval_id=%s: %s", approval_id, exc)
         return RedirectResponse(
             url=f"/approvals/{approval_id}?t={t.strip()}",
             status_code=status.HTTP_303_SEE_OTHER,

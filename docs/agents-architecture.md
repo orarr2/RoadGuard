@@ -1129,7 +1129,7 @@ PYTHONPATH=src python scripts/benchmark.py --arms tree,panel,react --smoke
 | `create_draft_work_order` | Decision | `(hazard_id, priority, suggested_action, cited_sources) -> dict` | `draft_id`, `awaiting_human_approval`, `written_to_db` | [`tools/create_draft_work_order.py`](../src/agent/multiagent/tools/create_draft_work_order.py) |
 | `flag_for_urgent_review` | Decision | `(hazard_id, reason, urgency) -> dict` | `flag_id`, `approval_id`, `emailed` | [`tools/flag_for_urgent_review.py`](../src/agent/multiagent/tools/flag_for_urgent_review.py) |
 
-כל הכלים, כולל `flag_for_urgent_review`, מכבדים `ROADGUARD_DRY_RUN=1` (`rg-demo`): אין כתיבה ל-DB ואין מייל.
+אין מצב dry-run: כל הכלים, כולל `flag_for_urgent_review`, כותבים ל-DB ושולחים מייל בכל הרצה. הערכות מבודדות את עצמן על ידי הפניית `ROADGUARD_DB_PATH` ו-`ROADGUARD_CHECKPOINT_PATH` לתיקייה זמנית (`scripts/agent_eval.py` עושה זאת כברירת מחדל).
 
 ---
 

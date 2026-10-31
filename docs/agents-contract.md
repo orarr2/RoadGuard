@@ -157,8 +157,10 @@ the severity cues the reporter's text states (IDX 21). Rules:
 ## 4. Tools
 
 Each tool declares a JSON schema for function calling and a plain
-Python callable. All of them, `flag_for_urgent_review` included, honour
-`ROADGUARD_DRY_RUN=1` (no DB writes, no email).
+Python callable. There is no dry-run switch: every tool writes its rows
+(and `flag_for_urgent_review` sends mail) whenever it runs. Evaluations
+isolate themselves with a temporary `ROADGUARD_DB_PATH` and
+`ROADGUARD_CHECKPOINT_PATH` (`scripts/agent_eval.py` does this by default).
 
 ### 4.1 `check_hazard_severity` (Decision, pure)
 
@@ -656,9 +658,10 @@ and required keys as above) and a present file that does not parse or
 lacks a key stops the run. Accuracy against the synthetic labels is
 agreement with the rule tree that seeded them, not ground truth; only
 the labelled file measures correctness. The LLM-as-judge is off unless
-`--judge`. Every hazard id is unique per run and repeat, and runs are
-dry (`ROADGUARD_DRY_RUN=1`: no approval rows, work orders, evidence
-requests or checkpoints) unless `--write`.
+`--judge`. Every hazard id is unique per run and repeat. There is no dry-run
+switch: a run writes approval rows, work orders, evidence requests and
+checkpoints to whatever `ROADGUARD_DB_PATH` / `ROADGUARD_CHECKPOINT_PATH`
+point at, so point them at a scratch copy, never at the production files.
 
 Thresholds (charter): correct-action rate >= 85%, groundedness >= 90%
 of `urgent` / `standard` verdicts citing an id from `tool_result_ids`.
