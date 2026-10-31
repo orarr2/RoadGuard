@@ -64,7 +64,12 @@ scripts/rag_relevance_eval.py   16-pair (class x road) RAG relevance check, 95% 
 docs/                agents-architecture.md (authoritative), agents-contract.md,
                      agent-architecture-audit-2026-10-31.md (item-by-item status),
                      team-meeting/ (meeting handout, requirements sheet, deck)
-.github/workflows/pages.yml   webapp -> GitHub Pages
+index.html, assets/, tunnel-url.json, .nojekyll   root mirror of webapp/: GitHub Pages
+                     builds the site from the main branch root, so the two copies must
+                     stay identical (the sign-in fixes of 31.10 only reached the site once
+                     the mirror was synced)
+.github/workflows/pages.yml   webapp -> GitHub Pages artifact deploy (the branch build above
+                     is what the live site currently serves)
 ```
 
 ## Run it

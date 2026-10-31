@@ -6,9 +6,11 @@ export const CONFIG = Object.freeze({
   // Point at a local uvicorn during development.
   API_ORIGIN: "http://127.0.0.1:8000",
 
-  // Set this to the OAuth 2.0 Client ID published in the Google Cloud
-  // console. The webapp mounts the Google button only when it is set.
-  GOOGLE_CLIENT_ID: "",
+  // The OAuth 2.0 Client ID published in the Google Cloud console (a public
+  // identifier, not a secret). It must equal GOOGLE_OAUTH_CLIENT_ID on the
+  // server, which verifies the id token's audience; the webapp mounts the
+  // Google button only when it is set.
+  GOOGLE_CLIENT_ID: "957537394284-b1nq2ap7sh2qlnimeme5g8q0igsvlm0n.apps.googleusercontent.com",
 
   // Local URL for the YOLO ONNX weights. The committed file is the
   // team-trained yolov8n (dataset owner: Shai), 4-class. Replace it at

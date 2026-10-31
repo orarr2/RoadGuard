@@ -109,9 +109,10 @@ export async function fetchJson(path, options = {}) {
     err.status = resp.status;
     err.payload = payload;
     // A rejected bearer token stays rejected: drop it so the next call
-    // starts signed out. A wrong passphrase is a 401 too, hence the
-    // login exclusion.
-    if (resp.status === 401 && !/^\/?auth\/login$/.test(path)) {
+    // starts signed out. A wrong passphrase / password is a 401 too, hence
+    // the login exclusions; a stale token on logout must not reopen the
+    // sign-in modal the user just left.
+    if (resp.status === 401 && !/^\/?auth\/(login(\/password)?|register|logout)$/.test(path)) {
       clearToken();
       if (unauthorizedHandler) unauthorizedHandler(err);
     }
@@ -173,10 +174,13 @@ export async function fetchAuthConfig() {
 // Step 2 (25.10.2026): server-side logout. Stateless on the server
 // (just returns {ok:true}); the client drops the token locally too.
 export async function logoutCall() {
+  // Tell the server first (it only acknowledges), then drop the token
+  // locally whatever the server said: logout must always leave the client
+  // signed out, even when the tunnel is down or the token already expired.
   try {
-    await fetchJson("/auth/logout", { method: "POST" });
+    if (getToken()) await fetchJson("/auth/logout", { method: "POST" });
   } catch {
-    // Even if the server call fails, continue - the client clears locally.
+    // The client clears locally regardless.
   }
   clearToken();
 }
@@ -194,9 +198,12 @@ export async function loginWithGoogleIdToken(idToken) {
 }
 
 export function mountGoogleSignIn(containerId, onCredential) {
-  if (!CONFIG.GOOGLE_CLIENT_ID) return;
+  // Returns true when the widget will be mounted, false when the client id
+  // is not configured on this build (the caller then shows a clear message
+  // instead of a button that does nothing).
+  if (!CONFIG.GOOGLE_CLIENT_ID) return false;
   const el = document.getElementById(containerId);
-  if (!el) return;
+  if (!el) return false;
   // Wait for Google's script to load (it defers).
   const tryMount = () => {
     if (!window.google || !window.google.accounts || !window.google.accounts.id) {
@@ -216,6 +223,7 @@ export function mountGoogleSignIn(containerId, onCredential) {
     });
   };
   tryMount();
+  return true;
 }
 
 export async function fetchMe() {
