@@ -6422,8 +6422,14 @@ def _known_image_decision(match: dict, state: dict | None = None) -> dict | None
     catalog_cite = [f"catalog:pic_id={summary.get('pic_id')}"]
     catalog_classes = _catalog_classes_set(summary.get("classes") or "")
     detector_class, detector_confidence = _detector_prediction_from_state(state)
+    # Only identical bytes (sha256) can contradict the catalogue: a phash hit
+    # is a similar photo, not this one, and its labels say nothing about this
+    # frame. 31.10.2026 night: 9 of 19 human_review verdicts in a 94-image
+    # batch, and 3 of the first 5 in the re-run, were phash neighbours with
+    # other labels sent to a human for nothing.
     contradicted = (
-        bool(catalog_classes)
+        str(summary.get("match") or "") == "sha256"
+        and bool(catalog_classes)
         and detector_class is not None
         and detector_class not in catalog_classes
         and detector_confidence >= _KNOWN_IMAGE_CONTRADICTION_CONF
@@ -6448,6 +6454,7 @@ def _known_image_decision(match: dict, state: dict | None = None) -> dict | None
                 f"catalog_classes={sorted(catalog_classes)} vs "
                 f"detector_class={detector_class} at conf={detector_confidence:.2f}"
             ),
+            "image_match_status": _image_match_status(match, detector_class, None, detector_confidence),
         }
     severity = ""
     if state:
@@ -7097,6 +7104,48 @@ SUPERVISOR_WORKER_TOOLS: dict = {
 }
 
 
+_NOTE_CLASS_RE = re.compile(r"\bD(?:00|10|20|40)\b")
+_NOTE_BLOCKED_OK_RE = re.compile(
+    r"\b(?:not|no|none|un)\W{0,3}blocked\b|lane_blocked\W{0,3}(?:is\W{0,3})?none|blocked\W{0,3}(?:is\W{0,3}|=\W{0,3})?none"
+)
+_NOTE_TEXT_PRESENT_RE = re.compile(
+    r"reporter[_ ]text (?:is )?(?:present|provided|available|exists|given)|has reporter[_ ]text|with reporter[_ ]text"
+)
+
+
+def _deterministic_supervisor_note(payload: dict) -> str:
+    cls = payload.get("hazard_class_detected") or "?"
+    conf = payload.get("detector_confidence")
+    conf_s = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "?"
+    lane = payload.get("lane_blocked") or "none"
+    text = "reporter text present" if payload.get("has_reporter_text") else "no reporter text"
+    return f"{cls} at {conf_s} on a {payload.get('road_type') or '?'} road, lane blocked: {lane}, {text}"
+
+
+def _verify_supervisor_note(payload: dict, note) -> tuple[str, str]:
+    """Check the supervisor model's free-text note against the fields it
+    was given and return (note, check). 31.10.2026: granite3.3:2b wrote
+    "main lane is blocked" for 54 of 97 runs whose lane_blocked was none.
+    A note that contradicts a field is replaced by the deterministic
+    summary, and the check result goes on the trace entry."""
+    if not isinstance(note, str) or not note.strip():
+        return _deterministic_supervisor_note(payload), "replaced:empty"
+    low = note.lower()
+    problems: list[str] = []
+    lane = str(payload.get("lane_blocked") or "none").lower()
+    if lane == "none" and re.search(r"\bblocked\b", low) and not _NOTE_BLOCKED_OK_RE.search(low):
+        problems.append("lane_blocked")
+    if not payload.get("has_reporter_text") and _NOTE_TEXT_PRESENT_RE.search(low):
+        problems.append("reporter_text")
+    cls = str(payload.get("hazard_class_detected") or "").upper()
+    named = set(_NOTE_CLASS_RE.findall(note.upper()))
+    if cls and named and cls not in named:
+        problems.append("hazard_class")
+    if problems:
+        return _deterministic_supervisor_note(payload), "replaced:" + ",".join(problems)
+    return note, "ok"
+
+
 def _maybe_run_supervisor_agent(state: dict) -> dict:
     """Call the supervisor LLM once per hazard. Returns {} if disabled or
     already planned. Routing is NEVER changed - only observations are added.
@@ -7144,6 +7193,8 @@ def _maybe_run_supervisor_agent(state: dict) -> dict:
                                                      "note": "supervisor LLM reply off-contract",
                                                      "expected_difficulty": "mid",
                                                      "force_action": None}
+    plan = dict(plan)
+    plan["note"], plan["note_check"] = _verify_supervisor_note(payload, plan.get("note"))
     trace_entry = {
         "iter": state.get("iterations", 0) + 1,
         "speaker": "supervisor",
@@ -10259,6 +10310,37 @@ def _header(hazard_id: str, metadata: dict | None, extra: str) -> list[str]:
     return lines
 
 
+def _react_step_lines(lbl: str, c: dict) -> list[str]:
+    """One ReAct hop (tool attempted, payload, status, duration, result);
+    the same rendering for Decision and for the autonomous workers."""
+    out: list[str] = []
+    thought = c.get("thought") or "(no reasoning text)"
+    out.append(f"{lbl} step {c.get('hop')}: {_short(thought, 500)}")
+    tool_name = c.get("tool") or "?"
+    tool_args = c.get("args")
+    tool_result = c.get("result")
+    duration = c.get("duration_s")
+    status = "ok" if c.get("ok") else "failed"
+    out.append(f"{_INDENT}tool attempted: {tool_name}")
+    try:
+        args_json = json.dumps(tool_args, ensure_ascii=False, default=str)
+    except Exception:
+        args_json = str(tool_args)
+    out.append(f"{_INDENT}  payload: {_short(args_json, 320)}")
+    out.append(f"{_INDENT}  status: {status}")
+    if duration is not None:
+        try:
+            out.append(f"{_INDENT}  duration: {float(duration):.2f}s")
+        except (TypeError, ValueError):
+            pass
+    if status == "ok":
+        out.append(f"{_INDENT}  result: {_short(tool_result, 320)}")
+    else:
+        err = c.get("error") or tool_result or "(no error text)"
+        out.append(f"{_INDENT}  error: {_short(err, 320)}")
+    return out
+
+
 def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
     speaker = str(entry.get("speaker") or "?")
     kind = str(entry.get("kind") or "?")
@@ -10266,6 +10348,17 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
     c: dict = raw if isinstance(raw, dict) else {"content": raw}
     lbl = _lbl(speaker)
     out: list[str] = []
+
+    if kind == "react_step" and speaker != "decision":
+        # 31.10.2026: these were falling through to the speaker's handoff
+        # template and printed "class=None severity=None ... handoff ->"
+        # once per hop (the "profile None / doubled handoff" lines).
+        return _react_step_lines(lbl, c)
+    if kind == "tool_call" and not isinstance(raw, dict):
+        # a bare tool note (Decision's relaxed catalogue lookup) has its
+        # fields on the entry itself, not under content
+        note = entry.get("note") or f"{entry.get('tool')} ok={entry.get('ok')}"
+        return [f"{lbl} tool: {note}"]
 
     if speaker == "sanitize":
         out.append(
@@ -10358,30 +10451,7 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             out.append(f"{_INDENT}llm skipped: {c['llm_skipped_reason']}")
         out.append(f"{_INDENT}handoff -> {c.get('to') or 'decision'}")
     elif speaker == "decision" and kind == "react_step":
-        thought = c.get("thought") or "(no reasoning text)"
-        out.append(f"{lbl} step {c.get('hop')}: {_short(thought, 500)}")
-        tool_name = c.get("tool") or "?"
-        tool_args = c.get("args")
-        tool_result = c.get("result")
-        duration = c.get("duration_s")
-        status = "ok" if c.get("ok") else "failed"
-        out.append(f"{_INDENT}tool attempted: {tool_name}")
-        try:
-            args_json = json.dumps(tool_args, ensure_ascii=False, default=str)
-        except Exception:
-            args_json = str(tool_args)
-        out.append(f"{_INDENT}  payload: {_short(args_json, 320)}")
-        out.append(f"{_INDENT}  status: {status}")
-        if duration is not None:
-            try:
-                out.append(f"{_INDENT}  duration: {float(duration):.2f}s")
-            except (TypeError, ValueError):
-                pass
-        if status == "ok":
-            out.append(f"{_INDENT}  result: {_short(tool_result, 320)}")
-        else:
-            err = c.get("error") or tool_result or "(no error text)"
-            out.append(f"{_INDENT}  error: {_short(err, 320)}")
+        out.extend(_react_step_lines(lbl, c))
     elif speaker == "decision":
         action = str(c.get("action") or "?")
         out.append(
@@ -10588,6 +10658,9 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
         note = c.get("note") or ""
         if note:
             out.append(f"{_INDENT}note: {_short(note, 300)}")
+        check = c.get("note_check")
+        if check and check != "ok":
+            out.append(f"{_INDENT}note check: {check} (the model's note contradicted the input; deterministic summary shown)")
     else:
         kv = "  ".join(f"{k}={_short(v, 60)}" for k, v in c.items())
         out.append(f"{lbl} {kind}  {kv}".rstrip())

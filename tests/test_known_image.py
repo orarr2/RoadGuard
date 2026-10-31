@@ -396,3 +396,34 @@ def test_known_image_needs_stored_confidence_above_policy_floor(seeded_db, monke
     assert _image_match_status(match, "D20", "minor", 0.6)["short_circuit_ok"] is True
     monkeypatch.setattr(ra, "load_policy", lambda: {"known_image": {"min_stored_confidence": "bad"}})
     assert _policy_known_image()["min_stored_confidence"] == 0.4
+
+
+def test_phash_neighbour_with_other_labels_is_not_a_contradiction(seeded_db):
+    """31.10 night re-run: a test photo that merely looks like a catalogued
+    image (phash, distance 12) was sent to a human because the look-alike
+    carries other labels. Only identical bytes can contradict the catalogue;
+    a phash hit is context, and the regular tree decides."""
+    from roadguard_agent import _decide_rule_based
+
+    state = {
+        "hazard_profile": {"primary_class": "D40", "primary_confidence": 0.65},
+        "metadata": {"road_type": "main", "lane_blocked": "partial"},
+        "tool_result_ids": ["p1"], "research_coverage": "direct_match", "perception_confidence": "high",
+        "procedures": [{"article_ids": ["p1"], "passage": "pothole patching"}],
+        "dataset_match": {
+            "found": True, "match": "phash", "distance": 12, "pic_id": 1,
+            "file_name": "firc_10001.jpg", "split": "train", "classes": "D20", "n_labels": 2,
+            "model_prediction": {"top1_class": "D20", "top1_confidence": 0.73},
+        },
+    }
+    out = _decide_rule_based(state)
+    assert out.get("floor_reason") != "known_image_catalog_detector_contradiction", out
+    assert out["action"] != "known_image"
+    assert "catalog:pic_id=1" in out["cited_sources"]
+    assert out["image_match_status"]["reason"] == "phash_similar_not_same_file"
+    # identical bytes with the same disagreement still reach a human
+    state["dataset_match"] = dict(state["dataset_match"], match="sha256", distance=0)
+    out2 = _decide_rule_based(state)
+    assert out2["floor_reason"] == "known_image_catalog_detector_contradiction"
+    assert out2["image_match_status"]["match"] == "sha256"
+

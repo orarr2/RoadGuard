@@ -279,3 +279,19 @@ Two webapp findings reported by the owner the same night, both verified live in 
 
 Deploy of 20:29 UTC (commit 722fd5d): database backed up to `backups/roadguard.db.pre-round6-*`, `AGENT_RESEARCH_LLM=ollama:qwen2.5:3b`, granite unloaded, 8 GB swap file active and in fstab, service up in 4 s; memory after the restart 13 GB used of 24 GB. Suite: 186 tests pass.
 
+## 17. Round 7 (31.10.2026, late night): live audit of the re-run from zero
+
+The owner had all 97 cases deleted (backup `backups/roadguard.db.pre-wipe2-*`) and the 94 images run again from zero while he watched `/trace`. After six cases he asked for a live audit of what the trace showed. Findings, each checked against the database, and what was done:
+
+| Finding | Evidence | Cause | Fix |
+|---|---|---|---|
+| 3 of the first 5 verdicts were `human_review` by `known_image_catalog_detector_contradiction`, all on **phash** matches (a similar photo, distance up to 15 of 64 bits, not the same file) | rationale "match by phash"; in the previous batch 9 of 19 human_review verdicts had the same floor | `_known_image_decision` compared the catalogue labels with the detector whatever the match kind | The contradiction floor requires `match == sha256`; a phash hit stays context for the rule tree; the floor's trace entry now carries `image_match_status` (match kind, distance) |
+| The supervisor's note said "main lane is blocked" on open roads: 3 of the first 4 runs, 54 of 97 in the previous batch | `supervisor_plan.note` vs `lane_blocked=none` | The note is free text from the supervisor model (granite3.3:2b, `AGENT_SUPERVISOR_LLM`); routing never depends on it | `_verify_supervisor_note` checks the note against the fields it was given (lane, reporter text, class) and replaces a contradicting note with a deterministic summary; `note_check` on the trace entry and in the trace line. Model moved to qwen2.5:3b (owner's choice; granite leaves memory) |
+| `/report` showed `token_usage 0/0` and `llm_calls` with `model: null` while the trace showed 4 calls and 7,118 / 426 tokens | report of hz_4e2a969b0052 | The report read `tokens_in` / `model` off the node entries, where they no longer live | `_report_trace_summary`: tokens and models from the `llm_call` entries chat() emits, attributed to the node whose entry follows; legacy fallback kept |
+| "[PROFILE] class=None severity=None ... handoff" once per hop, "[RAG] 0 passages coverage=None", "[DECISION] action=? priority=None" | the live page | The workers' `react_step` entries fell through to the speaker's handoff template; Decision's relaxed catalogue lookup is a bare `tool_call` entry without content | `_entry_lines` renders any `react_step` as a step (shared `_react_step_lines`) and a bare tool call as one note line. This corrects section 16: the lines were in the stored trace, not an artifact of the pasted log |
+| Verdict, rationale, grounded sources, approval rows and the digest list agree with the trace and the database for every finished case; `needs_more_evidence` lands in `waiting_for_evidence` (72 h expiry); the first run after the restart hit the 240 s cap on cold model loads and ended cleanly | checked case by case | - | none |
+
+The run was stopped after 9 cases at the owner's request, the cases deleted again, and the 94 images started from zero on this build.
+
+Tests: `tests/test_round7_audit.py` (5) and one more in `tests/test_known_image.py`.
+

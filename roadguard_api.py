@@ -2685,6 +2685,77 @@ def _submit_dict_from_live(body: Any, reported_at: str) -> dict[str, Any]:
     }
 
 
+def _report_trace_summary(
+    trace: list,
+) -> tuple[list[dict[str, Any]], int, int, list[str], list[dict[str, Any]]]:
+    """Timeline, token totals, cited sources and the LLM call list of one
+    case, for /report.
+
+    Tokens and models come from the ``llm_call`` entries chat() emits (one
+    per provider call), attributed to the node whose entry follows them;
+    a worker's ``llm`` summary dict and the legacy top-level fields are
+    the fallback for traces written before that. Until 31.10.2026 the
+    report read ``tokens_in`` / ``model`` off the node entries, where they
+    no longer live, and showed 0 tokens and model null for every case.
+    """
+    entries = [e for e in trace if isinstance(e, dict)]
+    speaker_after: list[str | None] = [None] * len(entries)
+    nxt: str | None = None
+    for i in range(len(entries) - 1, -1, -1):
+        e = entries[i]
+        if e.get("kind") != "llm_call" and e.get("speaker"):
+            nxt = str(e["speaker"])
+        speaker_after[i] = nxt
+    has_call_entries = any(e.get("kind") == "llm_call" for e in entries)
+    timeline: list[dict[str, Any]] = []
+    cited: list[str] = []
+    llm_calls: list[dict[str, Any]] = []
+    tokens_in = tokens_out = 0
+    for i, entry in enumerate(entries):
+        raw = entry.get("content")
+        content: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        kind = entry.get("kind")
+        llm = content.get("llm") if isinstance(content.get("llm"), dict) else None
+        llm_used = content.get("llm_used")
+        if llm_used is None and llm is not None:
+            llm_used = bool(llm.get("calls"))
+        timeline.append({
+            "iter": entry.get("iter"),
+            "speaker": entry.get("speaker"),
+            "kind": kind,
+            "llm_used": llm_used,
+            "source": content.get("source"),
+        })
+        for src in content.get("cited_sources") or []:
+            if src not in cited:
+                cited.append(src)
+        if kind == "llm_call":
+            tin = int(content.get("tokens_in") or 0)
+            tout = int(content.get("tokens_out") or 0)
+            tokens_in += tin
+            tokens_out += tout
+            llm_calls.append({
+                "speaker": entry.get("speaker") or speaker_after[i],
+                "model": content.get("model"),
+                "tokens_in": tin,
+                "tokens_out": tout,
+                "latency_s": content.get("latency_s"),
+                "ok": content.get("ok"),
+            })
+        elif not has_call_entries and llm_used:
+            tin = int(((llm or {}).get("tokens_in") if llm else content.get("tokens_in")) or 0)
+            tout = int(((llm or {}).get("tokens_out") if llm else content.get("tokens_out")) or 0)
+            tokens_in += tin
+            tokens_out += tout
+            llm_calls.append({
+                "speaker": entry.get("speaker"),
+                "model": (llm or {}).get("model") or content.get("model"),
+                "tokens_in": tin or None,
+                "tokens_out": tout or None,
+            })
+    return timeline, tokens_in, tokens_out, cited, llm_calls
+
+
 def _user_id_of(user: dict[str, Any]) -> str:
     """The id stored on hazards.user_id and compared on every ownership
     check.
@@ -4310,32 +4381,7 @@ def create_app() -> FastAPI:
                 detail="hazard_not_found",
             )
         trace = json.loads(r.agent_trace_json or "[]")
-        timeline = []
-        tokens_in = tokens_out = 0
-        cited: list[str] = []
-        llm_calls: list[dict[str, Any]] = []
-        for entry in trace:
-            content = entry.get("content") or {}
-            timeline.append({
-                "iter": entry.get("iter"),
-                "speaker": entry.get("speaker"),
-                "kind": entry.get("kind"),
-                "llm_used": content.get("llm_used") if isinstance(content, dict) else None,
-                "source": content.get("source") if isinstance(content, dict) else None,
-            })
-            if isinstance(content, dict):
-                tokens_in += int(content.get("tokens_in", 0) or 0)
-                tokens_out += int(content.get("tokens_out", 0) or 0)
-                for src in content.get("cited_sources") or []:
-                    if src not in cited:
-                        cited.append(src)
-                if content.get("llm_used"):
-                    llm_calls.append({
-                        "speaker": entry.get("speaker"),
-                        "model": content.get("model"),
-                        "tokens_in": content.get("tokens_in"),
-                        "tokens_out": content.get("tokens_out"),
-                    })
+        timeline, tokens_in, tokens_out, cited, llm_calls = _report_trace_summary(trace)
         evidence_request = None
         if r.status == "waiting_for_evidence":
             pending = db.list_pending_evidence_requests(hazard_id=hazard_id, limit=1)
