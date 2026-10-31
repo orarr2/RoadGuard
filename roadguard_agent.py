@@ -3257,6 +3257,7 @@ def emit_live_trace(entry: dict) -> None:
 def begin_llm_log() -> None:
     """Start recording the chat() calls of the current node (per thread)."""
     _LLM_LOG.calls = []
+    _LLM_LOG.steps = []
 
 
 def end_llm_log() -> list[dict]:
@@ -3264,6 +3265,26 @@ def end_llm_log() -> list[dict]:
     calls = list(getattr(_LLM_LOG, "calls", None) or [])
     _LLM_LOG.calls = None
     return calls
+
+
+def record_worker_step(step: dict) -> None:
+    """Keep a worker's ReAct step for the node's trace update. Until
+    31.10.2026 the steps reached the live page through the sink but not
+    the stored trace, which only the node's handoff entry entered, so a
+    finished case showed Decision's steps and none of the workers'."""
+    steps = getattr(_LLM_LOG, "steps", None)
+    if steps is None:
+        steps = []
+        _LLM_LOG.steps = steps
+    steps.append(step)
+
+
+def drain_worker_steps() -> list[dict]:
+    """The worker steps recorded since begin_llm_log(), in order; the
+    buffer is emptied so the next node starts clean."""
+    steps = list(getattr(_LLM_LOG, "steps", None) or [])
+    _LLM_LOG.steps = []
+    return steps
 
 
 def active_model(use_panel: bool = False) -> str:
@@ -3681,6 +3702,7 @@ def _react_worker_rounds(
             }
             steps.append(step)
             emit_live_trace(step)
+            record_worker_step(step)
             messages.append({
                 "role": "tool",
                 "tool_call_id": call_id,
@@ -4917,7 +4939,7 @@ class RagClient:
                 query_vec = [float(x) for x in embedded[0]]
             query_kwargs: dict[str, Any] = {
                 "query_embeddings": [query_vec],
-                "n_results": max(1, min(k, 5)),
+                "n_results": max(1, min(k, 12)),
             }
             # `where=None` means "no metadata filter" - a pure semantic
             # search. Needed for corpora (like Benny's charter_grounded_corpus)
@@ -5613,6 +5635,65 @@ def _semantic_rag_query(hazard_class: str, road_type: str) -> str:
     )
 
 
+# A second, shorter query per class: the templated sentence above lands
+# at distance 0.72-0.77 for potholes (31.10.2026 review), a plain repair
+# phrase sits closer to the manuals' own wording. Both run; the hits are
+# merged and reranked.
+_HAZARD_REPAIR_QUERY = {
+    "D40": "pothole repair: patching procedure, materials and response time",
+    "D20": "alligator cracking repair: severity levels, patching and base repair",
+    "D10": "transverse crack repair: crack sealing and filling",
+    "D00": "longitudinal crack repair: crack sealing and filling",
+}
+
+_SENTENCE_END_RE = re.compile(r"[.!?][\s\"')\]]")
+
+
+def _clean_passage_text(text: str) -> str:
+    """Trim a chunk that was cut mid-word at either end to whole sentences
+    where a boundary is near; the chunker split the manuals on characters
+    ("ety and pavement rideability. Pothole repair ...")."""
+    t = re.sub(r"\s+", " ", text or "").strip()
+    if not t:
+        return t
+    if t[0].islower() or t[0] in ",;:)":
+        m = _SENTENCE_END_RE.search(t[:160])
+        if m:
+            t = t[m.end():].lstrip()
+        else:
+            t = t.split(" ", 1)[1].lstrip() if " " in t else t
+    if t and t[-1] not in ".!?\"')":
+        cut = max(t.rfind(". "), t.rfind("! "), t.rfind("? "))
+        if cut >= len(t) - 160 and cut > 40:
+            t = t[: cut + 1]
+        elif " " in t:
+            t = t.rsplit(" ", 1)[0].rstrip(",;:")
+    return t
+
+
+def _rank_semantic_hits(graded: list[dict], k: int) -> list[dict]:
+    """Order merged semantic hits by evidence first (class term, then a
+    repair term), then by distance; one passage per chunk id."""
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for g in graded:
+        gid = str((g.get("article_ids") or [""])[0])
+        if gid in seen:
+            continue
+        seen.add(gid)
+        unique.append(g)
+
+    def key(g: dict):
+        rel = g.get("relevance") or {}
+        return (
+            0 if rel.get("class_keyword_hit") else 1,
+            0 if rel.get("repair_term_hit") else 1,
+            float(g.get("distance") if g.get("distance") is not None else 9.0),
+        )
+
+    return sorted(unique, key=key)[:k]
+
+
 # A nearest-neighbour hit is a ranking, not evidence: the 27.10 batch
 # cited NTIS distribution boilerplate as the D40 standard because every
 # semantic hit was stamped as a class match. A passage may ground a
@@ -5737,10 +5818,14 @@ def query_repair_standards(
             # boilerplate is dropped and only class-naming chunks count as
             # a class match, so coverage reflects evidence, not ranking.
             if not passages and hasattr(client, "query_semantic"):
-                query_text = _semantic_rag_query(hazard_class, road_type)
-                raw = client.query_semantic(query_text, k=max(k * 2, 6))
-                graded = (_grade_passage(p, hazard_class, tagged=False) for p in raw)
-                passages = [g for g in graded if g is not None][:k]
+                raw = list(client.query_semantic(_semantic_rag_query(hazard_class, road_type), k=max(k * 2, 8)))
+                second = _HAZARD_REPAIR_QUERY.get(hazard_class)
+                if second:
+                    raw += list(client.query_semantic(second, k=max(k * 2, 8)))
+                graded = [g for g in (_grade_passage(p, hazard_class, tagged=False) for p in raw) if g is not None]
+                passages = _rank_semantic_hits(graded, k)
+                for g in passages:
+                    g["passage"] = _clean_passage_text(g.get("passage") or "")
         except Exception:
             passages = []
 
@@ -7236,7 +7321,7 @@ def _maybe_run_supervisor_agent(state: dict) -> dict:
     }
     update: dict = {
         "supervisor_plan": plan,
-        "trace": [trace_entry],
+        "trace": [*drain_worker_steps(), trace_entry],
     }
     if in_tok or out_tok:
         update["tokens_in"] = in_tok
@@ -7803,7 +7888,7 @@ def signal_extractor_node(state: RoadGuardState) -> dict:
     update: dict = {
         "reporter_intake": intake,
         "reporter_signals": signals,
-        "trace": [trace_entry],
+        "trace": [*drain_worker_steps(), trace_entry],
         "last_speaker": "signal_extractor",
         "next_hop": "profile_builder",
     }
@@ -8274,7 +8359,7 @@ def profile_builder_node(state: RoadGuardState) -> dict:
         "perception_confidence": pc,
         "similar_cases": sim_result.get("cases", []),
         "dataset_match": dataset_hit if dataset_hit.get("found") else None,
-        "trace": [trace_entry],
+        "trace": [*drain_worker_steps(), trace_entry],
         "iterations": 1,
         "last_speaker": "profile_builder",
         "next_hop": "rag_retriever",
@@ -8704,7 +8789,7 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
         "procedures": procedures_safe,
         "tool_result_ids": result["tool_result_ids"],
         "research_coverage": coverage,
-        "trace": [trace_entry],
+        "trace": [*drain_worker_steps(), trace_entry],
         "iterations": 1,
         "last_speaker": "rag_retriever",
         "next_hop": "decision",

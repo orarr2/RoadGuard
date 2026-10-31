@@ -295,3 +295,13 @@ The run was stopped after 9 cases at the owner's request, the cases deleted agai
 
 Tests: `tests/test_round7_audit.py` (5) and one more in `tests/test_known_image.py`.
 
+## 18. Round 8 (1.11.2026, after midnight): the three improvements the live audit named
+
+| Improvement | Before | After | Test |
+|---|---|---|---|
+| Worker ReAct steps in the stored trace | The steps reached the live page through the sink, but the node's trace update held only the handoff entry, so every snapshot dropped them; a finished case showed Decision's steps and none of the workers' | `record_worker_step` buffers each step the worker loop emits (per thread, next to the LLM log) and `drain_worker_steps` puts them into the node's `trace` update before the handoff entry (signal_extractor, profile_builder, rag_retriever, supervisor) | `tests/test_round7_audit.py` (buffer; rag node trace order) |
+| RAG passages for D40 cut mid-word and far (0.72-0.77) | One templated query ("road maintenance repair standards for pothole on arterial main road: safety requirements, response procedures, repair window"); chunks split on characters | A second, plainer query per class (`_HAZARD_REPAIR_QUERY`, e.g. "pothole repair: patching procedure, materials and response time"; measured on the VM corpus: D40 0.42-0.45 instead of 0.72-0.77, D20 0.37-0.56 instead of 0.43-0.66); both queries run, hits merge, `_rank_semantic_hits` orders by class term, repair term, distance; `_clean_passage_text` trims a cut start or end to the nearest sentence and collapses whitespace; the client returns up to 12 hits per query instead of 5 | `tests/test_round7_audit.py` (clean, rank, two-query merge) |
+| `needs_more_evidence` in a batch waits 72 h | The batch runner polled until the status left queued/processing and recorded `waiting_for_evidence` | `scripts/batch_runner.py` (now versioned) answers the agent's one evidence request the way a reporter would, with the same upload, through `/evidence_requests/{id}/fulfill`; the paused graph resumes and the case ends in a verdict (`evidence_answered` in the results row) | runtime (next run) |
+
+Measured query distances come from `scratchpad/rag_query_experiment.py` run against the live corpus (2,433 passages); D10 and D00 stay weaker (0.63-0.75) because the manuals name those cracks less often.
+

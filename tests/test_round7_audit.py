@@ -99,3 +99,103 @@ def test_react_executor_unpacks_a_single_object_argument(monkeypatch):
     )
     assert parsed == {"done": True}
     assert info["tools_run"]["add"] == {"ok": True, "sum": 5}
+
+
+def test_worker_react_steps_reach_the_stored_trace(monkeypatch):
+    import json as _json
+
+    def tool(a: int = 0) -> dict:
+        return {"ok": True, "a": a}
+
+    replies = iter([
+        ra.ChatMessage(finish_reason="tool_calls", content=None, tool_calls=[
+            {"id": "c1", "function": {"name": "probe", "arguments": _json.dumps({"a": 1})}}]),
+        ra.ChatMessage(finish_reason="stop", content='{"done": true}', tool_calls=[]),
+    ])
+    monkeypatch.setattr(ra, "chat", lambda *a, **k: (next(replies), 1, 1))
+    ra.begin_llm_log()
+    parsed, _, _, info = ra._llm_react_worker(
+        agent_name="rag_retriever", system_prompt="s", user_payload={}, state={"iterations": 2},
+        tool_registry={"probe": (tool, {"type": "function", "function": {"name": "probe", "parameters": {"type": "object", "properties": {}}}})},
+        provider_override="ollama:fake", max_hops=1,
+    )
+    steps = ra.drain_worker_steps()
+    assert parsed == {"done": True}
+    assert len(steps) == 1 and steps[0]["speaker"] == "rag_retriever" and steps[0]["kind"] == "react_step"
+    assert steps[0]["content"]["tool"] == "probe" and steps[0]["iter"] == 3
+    assert ra.drain_worker_steps() == []  # drained once
+
+
+def test_rag_node_trace_carries_the_worker_steps_before_the_handoff(monkeypatch):
+    monkeypatch.setenv("AGENT_WORKER_AUTONOMY", "1")
+    monkeypatch.setenv("AGENT_RAG_RETRIEVER_LLM", "1")
+    monkeypatch.setenv("AGENT_RESEARCH_LLM", "ollama:fake")
+    passage = {"passage": "Pothole repair: patch within 48 hours.", "article_ids": ["p1"], "hazard_types": ["D40"],
+               "road_types": ["any"], "relevance": {"class_keyword_hit": True, "repair_term_hit": True}}
+    raw = {"coverage": "direct_match", "confidence": "high", "key_findings": ["patch within 48h"],
+           "cited_ids": ["p1"], "tools_used": ["query_repair_standards"]}
+    step = {"iter": 3, "speaker": "rag_retriever", "kind": "react_step",
+            "content": {"hop": 1, "tool": "query_repair_standards", "ok": True, "result": "..."}}
+
+    def fake_worker(**_):
+        ra.record_worker_step(step)
+        return raw, 9, 4, {"hops": 1, "tools_run": {"query_repair_standards": {
+            "ok": True, "procedures": [passage], "tool_result_ids": ["p1"], "coverage": "direct_match"}}}
+
+    monkeypatch.setattr(ra, "_llm_react_worker", fake_worker)
+    state = {"hazard_profile": {"primary_class": "D40", "primary_confidence": 0.5, "severity_signal": "moderate"},
+             "metadata": {"road_type": "main", "lane_blocked": "none"}, "yolo_output": {"top1_class": "D40", "top1_confidence": 0.5},
+             "image_quality": {"blur_score": 60}, "iterations": 2, "perception_confidence": "medium"}
+    upd = ra.rag_retriever_node(state)
+    kinds = [(e["speaker"], e["kind"]) for e in upd["trace"]]
+    assert kinds == [("rag_retriever", "react_step"), ("rag_retriever", "handoff_out")]
+
+
+def test_clean_passage_text_trims_cut_words_to_sentences():
+    cut = "ety and pavement rideability. Pothole repair operations can usually be divided into two distinct periods. The first period is winter repairs, when temperatu"
+    cleaned = ra._clean_passage_text(cut)
+    assert cleaned.startswith("Pothole repair operations")
+    assert cleaned.endswith("two distinct periods.")
+    assert ra._clean_passage_text("Seal the crack. Fill it.") == "Seal the crack. Fill it."
+    assert ra._clean_passage_text("") == ""
+    # a cut start with no sentence end near by loses only the fragment
+    assert ra._clean_passage_text("tion of the surface layer is required here").startswith("of the surface")
+
+
+def test_rank_semantic_hits_prefers_evidence_over_distance():
+    hits = [
+        {"article_ids": ["a"], "distance": 0.40, "relevance": {"class_keyword_hit": False, "repair_term_hit": True}},
+        {"article_ids": ["b"], "distance": 0.72, "relevance": {"class_keyword_hit": True, "repair_term_hit": True}},
+        {"article_ids": ["b"], "distance": 0.72, "relevance": {"class_keyword_hit": True, "repair_term_hit": True}},
+        {"article_ids": ["c"], "distance": 0.60, "relevance": {"class_keyword_hit": True, "repair_term_hit": False}},
+        {"article_ids": ["d"], "distance": 0.55, "relevance": {"class_keyword_hit": True, "repair_term_hit": True}},
+    ]
+    ranked = ra._rank_semantic_hits(hits, 3)
+    assert [h["article_ids"][0] for h in ranked] == ["d", "b", "c"]
+
+
+def test_query_repair_standards_merges_two_queries_and_cleans_text():
+    class FakeClient:
+        def __init__(self):
+            self.queries = []
+
+        def query(self, hazard_class, road_type, k):
+            return []
+
+        def query_semantic(self, text, k=5):
+            self.queries.append(text)
+            if "repair standards" in text:
+                return [{"passage": "ety and rideability. Pothole patching is done in two periods. The first is winter",
+                         "article_ids": ["seg_1"], "distance": 0.72, "hazard_types": [""], "road_types": ["any"]}]
+            return [{"passage": "Pothole repair materials: cold mix for winter, hot mix otherwise.",
+                     "article_ids": ["seg_2"], "distance": 0.51, "hazard_types": [""], "road_types": ["any"]},
+                    {"passage": "ety and rideability. Pothole patching is done in two periods. The first is winter",
+                     "article_ids": ["seg_1"], "distance": 0.72, "hazard_types": [""], "road_types": ["any"]}]
+
+    client = FakeClient()
+    out = ra.query_repair_standards("D40", "main", k=3, rag_client=client)
+    assert len(client.queries) == 2 and "pothole repair" in client.queries[1].lower()
+    ids = [p["article_ids"][0] for p in out["procedures"]]
+    assert ids == ["seg_2", "seg_1"]  # closer evidence first, duplicate merged
+    assert out["procedures"][1]["passage"].startswith("Pothole patching is done")
+    assert out["coverage"] == "direct_match"
