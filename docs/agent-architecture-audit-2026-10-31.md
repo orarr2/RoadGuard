@@ -269,3 +269,13 @@ Signal extractor stays on llama3.2:3b (owner's choice); the swap file is a safet
 Batch of 31.10 (94 images, after the backfill wrote predictions for all 17,099 catalogue rows): `known_image` 41, `standard` 26, `human_review` 17, `needs_more_evidence` 10. Submit-to-verdict time of the successful runs as measured by the batch runner: p50 81 s, p90 178 s, max 249 s. The 65 images that hit the service restart window were re-run and are in the counts. The wall-clock guard fired in 4 of 83 runs in the last 24 h (`budget_state` lines in the journal: median 76 s, p90 166 s).
 
 Suite after this round: 183 tests pass (176 before, 7 new).
+
+Two webapp findings reported by the owner the same night, both verified live in his Chrome after the deploy:
+
+| Finding | Root cause | Fix | Test |
+|---|---|---|---|
+| The operator links vanished from the admin's profile; the upload count showed 1 | A registered user's token subject is `user:<id>`, and the submit path upserted that subject as a second users row (no admin flag) on the first upload; `/auth/me` then resolved to the shadow row. The batch user had the same shadow row since 27.10 | `_user_id_of` returns the bare id for `user:<id>` subjects; `Database.merge_prefixed_users` folds existing shadow rows into the real rows at startup (`merged_prefixed_user_rows count=2` on the VM: 97 hazards re-pointed, two rows removed) | `tests/test_user_identity.py` |
+| "Continue with Google" did nothing | The styled stand-in forwarded a synthetic click to Google's hidden button, which the widget ignores | Google's own button renders in the modal (text `continue_with`, width 400, English locale) and replaces the stand-in once rendered; a Google identity with the e-mail of a registered account signs in as that account and the Google subject is linked to the row, so the admin keeps the operator links whichever button he used | `tests/test_user_identity.py` (Google sign-in lands on the registered admin) |
+
+Deploy of 20:29 UTC (commit 722fd5d): database backed up to `backups/roadguard.db.pre-round6-*`, `AGENT_RESEARCH_LLM=ollama:qwen2.5:3b`, granite unloaded, 8 GB swap file active and in fstab, service up in 4 s; memory after the restart 13 GB used of 24 GB. Suite: 186 tests pass.
+

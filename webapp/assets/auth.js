@@ -224,6 +224,7 @@ export function mountGoogleSignIn(containerId, onCredential, onRendered) {
       shape: "rectangular",
       logo_alignment: "left",
       width: 400,
+      locale: "en",
     });
     if (typeof onRendered === "function") onRendered(el);
   };
