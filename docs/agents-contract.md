@@ -192,17 +192,29 @@ isolate themselves with a temporary `ROADGUARD_DB_PATH` and
   confidence multiplier (0.5 below 0.5), road bonus (main 25,
   secondary 15, bike_path 10, parking 5), lane bonus (full 20,
   partial 10), recurrence bonus capped at 15, clamped to [0, 100].
+- Arguments the model leaves out are filled from the state the tool is
+  about (`hazard_profile.primary_class`, `primary_confidence`,
+  `metadata.road_type`, `lane_blocked`, `recurrence_count_30d`) and the
+  result names them in `args_from_state` (round 17, 1.11.2026: three
+  calls with `{}` failed validation in r10). A wrong value still fails;
+  a key that is on neither the arguments nor the state still fails, so a
+  verdict JSON sent as arguments scores nothing (round 10b).
 
 ### 4.2 `lookup_similar_cases` (Perception, read-only)
 
 - Input: `{ location, hazard_class, window_days=30, k=5 }`
   (`radius_meters` is accepted for the contract and ignored: there are
   no coordinates).
-- Output: `{ count, cases[], is_recurring_location }`.
+- Output: `{ count, cases[], is_recurring_location, note }`; `note` is
+  one of `prior_cases`, `no_prior_cases`, `lookup_failed`,
+  `location_too_coarse` (round 17: a `count=0` alone did not tell a
+  failed lookup from an empty history).
 - Source: the `hazards` table, same class, free-text location match
   (`db.models.locations_match`: token containment, street-type words
   dropped), last `window_days`, simulator rows and the hazard's own row
-  excluded. A location without a digit or a street word is too coarse
+  excluded on every path (the API stores the row before the graph runs;
+  in r10 the tool returned the case being triaged, `days_ago 0.0`, as a
+  prior case). A location without a digit or a street word is too coarse
   to match (a bare city name never produces recurrence).
   `is_recurring_location` is `count >= 3`.
 
@@ -218,7 +230,14 @@ isolate themselves with a temporary `ROADGUARD_DB_PATH` and
   `sentence_complete` are recorded, the summary the model reads is a
   whole sentence up to 320 characters), `partial_match` when the passages
   match the class only or support it weakly, `no_match` when nothing
-  comes back. ChromaDB is
+  comes back. Coverage is the topic axis; `decision_coverage.sufficiency`
+  (round 17) says whether the passages carry what a decision needs:
+  `sufficient_coverage` when they state a repair window and an urgency
+  or a safety risk, `insufficient_coverage` otherwise. Decision reads
+  both; with `insufficient_coverage` its payload says in words that the
+  standards found state no repair window or urgency, and a rationale that
+  states one anyway fails the fact-check (`repair_window_not_in_sources`).
+  ChromaDB is
   queried for class and road type first, then for the class alone. A
   Chroma query error yields `no_match`, not the in-code stub corpus.
 - Source: ChromaDB (`ROADGUARD_RAG_PATH`), seeded from
@@ -568,6 +587,39 @@ the rule-based confidence, and over the 15 seed passages the Research
 call added nothing to the tool's coverage. The flags go on when real
 YOLO weights and a real corpus arrive.
 
+### 6.9 Fact-check, correction round and enforcement (rounds 11 to 17)
+
+The model's `rationale` and `assessment` are checked against the inputs
+after every LLM verdict (`_verify_decision_rationale`). Problems:
+`reporter_claims_without_text` (a negated mention such as "no reporter
+text" is not a claim), `lane_blockage_not_in_form`,
+`lane_free_claim_but_form_says_<x>`, `known_image_claim_without_sha256_match`,
+`catalogue_claim_without_match`, `class_not_in_inputs:<codes>`,
+`priority_text_<n>_vs_<m>`, and since round 17 `class_name_mismatch:<code>_<name>`
+("D20 pothole"), `class_name_not_in_inputs:<codes>`,
+`severity_text_minor_vs_profile_severe` / `severity_text_severe_vs_profile_minor`,
+`confidence_word_<word>_vs_<conf>_<band>` (the band comes from the policy's
+needs_more_evidence range: low below it, moderate inside it, high above;
+the same band travels to every agent as `detector_confidence_band` /
+`top1_confidence_band`, and the supervisor note is checked the same way),
+and `repair_window_not_in_sources`.
+
+On a failure the Decision gets one correction round (round 17): the
+conversation so far plus the problems in plain sentences, "decide again
+from the inputs only", the tool schemas kept for the prompt cache, no run
+when the deadline is near. A reply that passes is the verdict
+(`rationale_check.corrected=true`, the first verdict kept under
+`correction`). A reply that fails again, or none, keeps the text
+replacement of round 11 and is compared with the rule tree
+(`_enforce_unverified`): an action above the tree's (`urgent` over
+`standard`), or a priority more than 10 points above the tree's, means the
+rule tree's verdict with `fallback_reason=rationale_unverified` and the
+model's verdict in the trace (`enforcement=rule_tree_verdict`); otherwise
+the model's verdict stays (`enforcement=kept`), because the unsupported
+claim did not make it more severe. A priority of 0 from the model on a
+verdict other than `known_image` takes the executed severity check
+(`priority_from_severity_check`).
+
 ## 7. Evidence round trip
 
 1. Decision returns `needs_more_evidence` and phrases the request with
@@ -595,6 +647,15 @@ YOLO weights and a real corpus arrive.
    photo or changed fields run perception and research again. The response is the
    `/hazards/submit` shape with `status: "decided"`, and the hazard row
    is overwritten with the final verdict.
+4b. Evidence integrity (round 17, 1.11.2026): a reply whose photo is the
+   original file (same sha256) with the same `road_type` and
+   `lane_blocked` and no new reporter text is not evidence; the API
+   answers 422 ("take another angle or add a note"), the request stays
+   pending and is not counted. The same file with a note means the
+   reporter has no other photo: `evidence_declined`, the resumed pass
+   keeps the workers and Decision routes to `human_review` without a
+   model call (`fallback_reason=evidence_declined`). The batch runner,
+   which has no second photo, answers that way.
 5. Cap: one request per hazard
    (`policy.yaml decision.needs_more_evidence.max_requests_per_hazard`),
    enforced in Decision and again at the API (a hazard that already has
@@ -798,3 +859,14 @@ requests in `evidence_requests`. The twice-daily digest and the `rg-*`
 shortcuts read these tables, as do `GET /hazards/{id}` and
 `GET /hazards/history` (per user; fleet-wide on the private operator
 hosts, where /trace and /flow replay it).
+
+Every trace entry carries `ts`, set when the node creates it (round 17;
+until then most entries were stamped when the row was persisted, so
+`stage seconds` attributed the whole run to the last entries). The gap
+before an `await_evidence` entry is the reporter's time and is reported
+as `waiting_evidence`, apart from the nodes' compute; the DONE line reads
+`elapsed=<span>s (compute <c>s, waiting for evidence <w>s)` when a wait
+occurred. The MODEL line lists the detections behind the top one
+(`others=D40 0.46,D00 0.25`) and the PROFILE line the profile's secondary
+classes, so a verdict that mentions a secondary class can be checked
+against the inputs.

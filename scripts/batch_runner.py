@@ -246,9 +246,14 @@ def main() -> int:
                     ev = rep.get("evidence_request") or {}
                     if st == "waiting_for_evidence" and ev.get("id") and not evidence_answered:
                         evidence_answered = True
-                        print(f"[BATCH   ] IMAGE {i} step 2b   agent asked for evidence ({ev.get('missing_field')}): answering with the same upload", flush=True)
+                        # Round 17 (1.11.2026): the same photo alone is
+                        # rejected (422, not evidence); the batch has no
+                        # second photo, so it answers the way a reporter
+                        # without one would: the same upload plus a note.
+                        print(f"[BATCH   ] IMAGE {i} step 2b   agent asked for evidence ({ev.get('missing_field')}): answering with the same upload and a note that no other photo exists", flush=True)
                         try:
-                            _http_json("POST", f"/evidence_requests/{ev['id']}/fulfill", token, hazard, timeout=420)
+                            answer = {**hazard, "reporter_text": "No other photo is available, this is the only picture I took."}
+                            _http_json("POST", f"/evidence_requests/{ev['id']}/fulfill", token, answer, timeout=420)
                         except Exception as exc:
                             print(f"[BATCH   ] IMAGE {i} step 2b   evidence answer failed: {type(exc).__name__}: {exc}", flush=True)
                         continue

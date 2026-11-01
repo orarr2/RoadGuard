@@ -404,3 +404,24 @@ The owner stopped r9 after two cases, read them, and named six items; all six we
 Suite after round 16: 248 tests.
 
 Relevance grid on the new corpus (1.11.2026 17:38 UTC, `scripts/rag_relevance_eval.py --k 3`): 16 of 16 class x road pairs `direct_match` with 3 of 3 class hits each (rate 100%, target 95%). Best distances: D20 0.21 to 0.29, D40 0.22, D10 0.30 to 0.36, D00 0.34 to 0.39 (the previous corpus gave 0.43 to 0.48 for D40/D20 and 0.63 to 0.75 for D10/D00); D00 and D10 now come from IRC:82-2015, the Distress Identification Manual and document 13092. Round r10 started at 17:39:54 UTC on e01c0de with this corpus.
+
+## 25. Round 17 (1.11.2026, late evening): the owner's r10 review
+
+Run r10 (build e01c0de, Benny's corpus) was stopped at 25 of 94 on the owner's word after he read the live trace twice and named his priorities. Two of his readings were checked against the stored data before anything was built:
+
+- **hz_81282e45e8bf is not a state mix-up.** The stored row carries seven YOLO boxes: D20 at 0.885 (the whole frame), D40 at 0.457, D00 at 0.248 and four D40 boxes below 0.2. The Decision's "secondary D40 class" is the second box, which the trace never showed. "D20 pothole" and "no evidence of severe conditions" (the deterministic profile said `severe`) are the model's wording against the inputs, and "low detector confidence (0.885)" is the supervisor's; none of the three was a check the fact-check ran.
+- **The 131 s on approval_gate were a timestamp bug, not waiting.** Only ReAct steps were stamped when created; every other entry got `ts` when the row was persisted (`roadguard_api.py` on save, `emit_live_trace` on print), so `stage seconds` attributed the span to the last entries.
+
+| # | His finding | Change (round 17) | Test |
+|---|---|---|---|
+| 1 | state integrity (D20 / D40, severity, "low confidence") | MODEL and PROFILE lines list every detection; the fact-check gains class-name, severity-word and confidence-band checks; the supervisor note check gains the band check; every agent receives `detector_confidence_band` from the policy thresholds | `tests/test_round17_integrity.py` |
+| 2, 3 | the fact-check replaced the text and the verdict stayed | one correction round, then the rule tree over a verdict more severe than its own (`rationale_unverified`); a verdict not more severe is kept | same file |
+| 4 | the same photo counted as evidence | the API refuses the original file without new text (422, request not consumed); the same file with a note is `evidence_declined` and goes to a human without a model pass; the batch runner answers with the note | same file; `tests/test_round14_resume_inputs.py` |
+| 5 | `check_hazard_severity` called with `{}` | missing arguments come from the state (`args_from_state` in the result and the step); wrong values still fail | same file; `tests/test_round10b_live_fixes.py` |
+| self-match | `lookup_similar_cases` returned the case being triaged | the current id is excluded on every path (the API stores the row before the graph runs); `note` names the outcome | same file |
+| 6 | `direct_match` read as a full basis | `sufficiency` next to `coverage` (sufficient only with a repair window and an urgency or a safety risk); the Decision payload says in words when the standards state none; `repair_window_not_in_sources` | same file |
+| 7 | performance accounting | entries stamped at creation; `waiting_evidence` apart from compute on the DONE and stage lines | same file |
+| mine | `NEEDS_MORE_EVIDENCE priority=0` next to a severity check of 32 | priority 0 on a non-sealed verdict takes the severity check (`priority_from_severity_check`); the worker's reason follows a severity change on the `llm changed` line | same file |
+
+Suite after round 17: 267 tests. Deployed for run r11 after the wipe.
+

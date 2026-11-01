@@ -1817,6 +1817,9 @@ class RoadGuardState(TypedDict, total=False):
     previous_metadata: dict
     # Which decision questions the retrieved standards answer (round 16).
     research_coverage_detail: dict
+    # Round 17: the reporter re-sent the original photo with a note (no
+    # other photo); the case goes to a human without a second model pass.
+    evidence_declined: bool
 
 
 def initial_state(
@@ -4418,6 +4421,15 @@ def _build_decision_prompt() -> str:
         "Severity: `severity_check` is the executed check_hazard_severity for this\n"
         "submission (priority, components, formula): use its priority, do not\n"
         "call the tool again.\n\n"
+        "Research sufficiency: `research_coverage_detail.sufficiency` says whether\n"
+        "the passages answer the decision questions. With insufficient_coverage\n"
+        "write that the standards found do not specify a repair window or an\n"
+        "urgency; never state a deadline the passages do not contain.\n"
+        "Detector confidence: `detector_confidence_band` (low / moderate / high,\n"
+        "policy thresholds) is the wording for the detector's confidence; do not\n"
+        "re-grade the number. Class names: D00 longitudinal crack, D10 transverse\n"
+        "crack, D20 alligator crack, D40 pothole; never pair a code with another\n"
+        "class's name.\n\n"
         "Detector sanity: `quality_warnings` may flag the top-1 box as a tiny area\n"
         "(under 0.5% of the frame: often texture or shadow), an extreme aspect\n"
         "ratio (often a crack line or shadow) or a box hugging the frame edge\n"
@@ -5442,20 +5454,31 @@ def lookup_similar_cases(
             "is_recurring_location": False,
             "note": "location_too_coarse",
         }
+    failed = False
     if vector_mem is not None:
         hits = vector_mem.find_similar(
             location=location,
             hazard_class=hazard_class,
             radius_m=radius_meters,
             days=window_days,
-        )[:k]
+        )
+        if exclude_hazard_id:
+            hits = [h for h in hits if str(h.get("hazard_id") or h.get("id") or "") != str(exclude_hazard_id)]
+        hits = hits[:k]
     else:
-        hits = _hits_from_db(location, hazard_class, window_days, k, exclude_hazard_id)
+        found = _hits_from_db(location, hazard_class, window_days, k, exclude_hazard_id)
+        failed = found is None
+        hits = found or []
 
+    # Round 17 (1.11.2026): in r10 the tool returned the case being triaged
+    # (days_ago 0, no decision yet) as a prior case, because the API stores
+    # the row before the graph runs; the current id is excluded on every
+    # path, and the note says which of the four outcomes this is.
     return {
         "count": len(hits),
         "cases": hits,
         "is_recurring_location": len(hits) >= 3,
+        "note": "lookup_failed" if failed else ("prior_cases" if hits else "no_prior_cases"),
     }
 
 
@@ -5465,14 +5488,14 @@ def _hits_from_db(
     window_days: int,
     k: int,
     exclude_hazard_id: str | None,
-) -> list[dict]:
+) -> list[dict] | None:
     """Read-only query against the configured SQLite file.
 
     Best-effort: a missing or unreadable DB means "no history", never a
-    failed verdict. On a first run the hazard being triaged is not in the
-    table yet (the API persists it after the graph returns); on a resumed
-    run its row exists, so `exclude_hazard_id` keeps it from counting as
-    its own recurrence.
+    failed verdict (None, so the caller can say the lookup failed; round
+    17). The API stores the hazard row before the graph runs, so
+    `exclude_hazard_id` keeps the case being triaged from counting as its
+    own recurrence on the first pass as well as on a resumed one.
     """
     try:
 
@@ -5491,7 +5514,7 @@ def _hits_from_db(
             )
     except Exception as exc:
         LOGGER.warning("similar_cases_lookup_skipped: %s", exc)
-        return []
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -6963,7 +6986,7 @@ def _tool_extract_measurements(text: str) -> dict:
     }
 
 
-def _tool_lookup_prior_reports(location: str, hazard_class: str = "D40", k: int = 3) -> dict:
+def _tool_lookup_prior_reports(location: str, hazard_class: str = "D40", k: int = 3, state: dict | None = None) -> dict:
     """Count prior hazards whose location token-matches, via lookup_similar_cases."""
     try:
         res = lookup_similar_cases(
@@ -6971,6 +6994,7 @@ def _tool_lookup_prior_reports(location: str, hazard_class: str = "D40", k: int 
             hazard_class=hazard_class or "D40",
             window_days=30,
             k=int(k),
+            exclude_hazard_id=(state or {}).get("hazard_id") if isinstance(state, dict) else None,
         )
     except Exception as exc:  # pragma: no cover - defensive
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -6981,6 +7005,7 @@ def _tool_lookup_prior_reports(location: str, hazard_class: str = "D40", k: int 
         "has_prior_reports": bool(cases),
         "is_recurring_location": bool(res.get("is_recurring_location")),
         "sample_ids": [str(c.get("id") or "")[:12] for c in cases[:3]],
+        "note": res.get("note"),
     }
 
 
@@ -7122,6 +7147,7 @@ def _tool_lookup_similar_cases_worker(location: str, hazard_class: str, state: d
             hazard_class=hazard_class,
             window_days=30,
             k=5,
+            exclude_hazard_id=(state or {}).get("hazard_id") if isinstance(state, dict) else None,
         )
         return {"ok": True, **res}
     except Exception as exc:
@@ -7381,6 +7407,10 @@ def _verify_supervisor_note(payload: dict, note) -> tuple[str, str]:
     named = set(_NOTE_CLASS_RE.findall(note.upper()))
     if cls and named and cls not in named:
         problems.append("hazard_class")
+    # Round 17: "low detector confidence (0.885)" in r10; the adjective is
+    # checked against the policy band of the number.
+    if _confidence_word_problems(note, payload.get("detector_confidence")):
+        problems.append("detector_confidence_band")
     if problems:
         return _deterministic_supervisor_note(payload), "replaced:" + ",".join(problems)
     return note, "ok"
@@ -7411,6 +7441,9 @@ def _maybe_run_supervisor_agent(state: dict) -> dict:
     payload = {
         "hazard_class_detected": yolo.get("top1_class"),
         "detector_confidence": yolo.get("top1_confidence"),
+        # Round 17: the band from the policy thresholds, so the note does
+        # not re-grade the number.
+        "detector_confidence_band": _confidence_band(yolo.get("top1_confidence")),
         "road_type": md.get("road_type"),
         "lane_blocked": md.get("lane_blocked"),
         "has_reporter_text": bool(md.get("reporter_text")),
@@ -7439,6 +7472,7 @@ def _maybe_run_supervisor_agent(state: dict) -> dict:
         "iter": state.get("iterations", 0) + 1,
         "speaker": "supervisor",
         "kind": "supervisor_plan",
+        "ts": time.time(),
         "content": plan,
     }
     update: dict = {
@@ -7573,6 +7607,7 @@ def sanitize_node(state: RoadGuardState) -> dict:
         "iter": 0,
         "speaker": "sanitize",
         "kind": "boundary_defence",
+        "ts": time.time(),
         "content": {
             "location_scrubbed": md["location_was_scrubbed"],
             "ocr_suspicious": ocr["is_suspicious_pattern"],
@@ -7631,6 +7666,7 @@ def supervisor_node(state: RoadGuardState) -> dict:
                     "iter": budget.iterations,
                     "speaker": "budget_guard",
                     "kind": "guard_fired",
+                    "ts": time.time(),
                     "content": {"reason": reason},
                 }
             ],
@@ -7991,6 +8027,7 @@ def signal_extractor_node(state: RoadGuardState) -> dict:
         "iter": state.get("iterations", 0) + 1,
         "speaker": "signal_extractor",
         "kind": "reporter_text",
+        "ts": time.time(),
         "content": {
             "has_text": bool(text),
             "source": intake["source"],
@@ -8144,6 +8181,7 @@ def _llm_refine(
         "yolo_output": {
             "top1_class": yolo.get("top1_class"),
             "top1_confidence": yolo.get("top1_confidence"),
+            "top1_confidence_band": _confidence_band(yolo.get("top1_confidence")),
             "top1_margin": yolo.get("top1_margin"),
             "detections": yolo.get("detections", [])[:5],
         },
@@ -8454,6 +8492,7 @@ def profile_builder_node(state: RoadGuardState) -> dict:
         "iter": state.get("iterations", 0) + 1,
         "speaker": "profile_builder",
         "kind": "handoff_out",
+        "ts": time.time(),
         "content": {
             "to": "rag_retriever",
             "primary_class": profile["primary_class"],
@@ -8461,6 +8500,14 @@ def profile_builder_node(state: RoadGuardState) -> dict:
             "confidence": pc,
             "llm_used": in_tok > 0,
             "llm_delta": llm_delta,
+            # Round 17: the other boxes, and the reason the worker gave when
+            # it moved the severity (owner: "document the evidence that
+            # allowed the change").
+            "others": _secondary_labels(profile),
+            "llm_change_reason": (
+                str(refined.get("severity_rationale") or "")[:300]
+                if "severity_signal" in llm_delta else None
+            ),
         },
     }
     _llm_calls = end_llm_log()
@@ -8766,10 +8813,17 @@ def _decision_coverage(procedures: list[dict]) -> dict:
     tell the inspector."""
     text = " ".join(str(p.get("passage") or "") for p in procedures or [])
     answers = {q: bool(rx.search(text)) for q, rx in _DECISION_QUESTIONS.items()}
+    # Round 17: coverage stays the topic axis; sufficiency says whether the
+    # passages carry what a decision needs (a repair window and either an
+    # urgency or a safety-risk statement).
+    sufficient = bool(answers.get("repair_window")) and bool(
+        answers.get("urgency") or answers.get("safety_risk")
+    )
     return {
         **answers,
         "answered": [q for q, ok in answers.items() if ok],
         "missing": [q for q, ok in answers.items() if not ok],
+        "sufficiency": "sufficient_coverage" if sufficient else "insufficient_coverage",
     }
 
 
@@ -8944,6 +8998,7 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
         "iter": state.get("iterations", 0) + 1,
         "speaker": "rag_retriever",
         "kind": "handoff_out",
+        "ts": time.time(),
         "content": {
             "to": "decision",
             "llm_delta": llm_delta,
@@ -9346,6 +9401,22 @@ def _catalogue_context_for_prompt(match: dict | None) -> dict:
     }
 
 
+def _coverage_detail_for_prompt(detail: dict | None) -> dict | None:
+    """answered / missing / sufficiency for the Decision payload; with
+    insufficient_coverage the payload says so in words (round 17), so the
+    model writes that the standards do not specify a window instead of
+    inventing one."""
+    if not detail:
+        return None
+    out = {k: detail.get(k) for k in ("answered", "missing", "sufficiency") if k in detail}
+    if detail.get("sufficiency") == "insufficient_coverage":
+        out["note"] = (
+            "the retrieved standards do not state a repair window or an urgency "
+            "for this case: do not state one"
+        )
+    return out
+
+
 def _decision_messages(state: RoadGuardState, rule_hint: dict) -> list[dict]:
     """System + user messages shared by the panel path and the ReAct path."""
     profile = state.get("hazard_profile") or {}
@@ -9360,6 +9431,8 @@ def _decision_messages(state: RoadGuardState, rule_hint: dict) -> list[dict]:
     user_payload = {
         "hazard_profile": profile,
         "perception_confidence": perception_conf,
+        # Round 17: one wording for the detector's confidence (policy bands).
+        "detector_confidence_band": _confidence_band(profile.get("primary_confidence")),
         "metadata": {
             "road_type": md.get("road_type"),
             "lane_blocked": md.get("lane_blocked"),
@@ -9369,10 +9442,7 @@ def _decision_messages(state: RoadGuardState, rule_hint: dict) -> list[dict]:
         # Round 16: what the standards found say and do not say about the
         # four decision questions (repair window, urgency, traffic control,
         # safety risk); a direct_match that answers none of them is thin.
-        "research_coverage_detail": {
-            k: state.get("research_coverage_detail", {}).get(k)
-            for k in ("answered", "missing")
-        } if state.get("research_coverage_detail") else None,
+        "research_coverage_detail": _coverage_detail_for_prompt(state.get("research_coverage_detail")),
         "tool_result_ids": tool_result_ids[:3],  # bound prompt size
         "procedures": [
             {
@@ -9548,10 +9618,16 @@ def _decision_tool_schemas() -> list[dict]:
 
 # Keys the executor fills from the state; the model may leave them out.
 _TOOL_ARGS_FROM_STATE = ("hazard_id", "sha256", "phash")
+# Round 17 (1.11.2026): arguments the executor fills from the authoritative
+# state when the model leaves them out (r10: three check_hazard_severity
+# calls with {} failed validation). A wrong value still fails.
+_TOOL_ARGS_DEFAULTED = {
+    "check_hazard_severity": ("hazard_class", "confidence", "road_type", "lane_blocked", "recurrence_count_30d"),
+}
 _FINAL_ANSWER_KEYS = ("rationale", "assessment", "cited_sources", "reasoning")
 
 
-def _validate_tool_args(schema: dict, args: dict) -> list[str]:
+def _validate_tool_args(schema: dict, args: dict, fillable: tuple[str, ...] = ()) -> list[str]:
     """Problems with ``args`` against the tool's JSON schema: required keys
     missing (except the ones the executor fills), values outside an enum,
     numbers outside their range, wrong basic types. Round 10b (1.11.2026):
@@ -9563,7 +9639,7 @@ def _validate_tool_args(schema: dict, args: dict) -> list[str]:
     props = params.get("properties") or {}
     problems: list[str] = []
     for key in params.get("required") or []:
-        if key not in args and key not in _TOOL_ARGS_FROM_STATE:
+        if key not in args and key not in _TOOL_ARGS_FROM_STATE and key not in fillable:
             problems.append(f"{key} is required")
     type_checks = {
         "string": lambda v: isinstance(v, str),
@@ -9621,7 +9697,9 @@ def _run_decision_tool(name: str, args: dict, state: RoadGuardState, tools_run: 
     # The unwired tools answer with their stub whatever the arguments.
     problems = (
         [] if name in _UNWIRED_DECISION_TOOLS
-        else _validate_tool_args(schema, args if isinstance(args, dict) else {})
+        else _validate_tool_args(
+            schema, args if isinstance(args, dict) else {}, fillable=_TOOL_ARGS_DEFAULTED.get(name, ())
+        )
     )
     if problems:
         return {"ok": False, "error": "invalid arguments: " + "; ".join(problems)}
@@ -9634,14 +9712,44 @@ def _run_decision_tool(name: str, args: dict, state: RoadGuardState, tools_run: 
             )
             return {"ok": True, **result}
         if name == "check_hazard_severity":
+            # Round 17: missing arguments come from the state the tool is
+            # about (the model copies them at best); the result names them.
+            profile = state.get("hazard_profile") or {}
+            md = state.get("metadata") or {}
+            defaults = {
+                "hazard_class": profile.get("primary_class"),
+                "confidence": profile.get("primary_confidence"),
+                "road_type": md.get("road_type"),
+                "lane_blocked": md.get("lane_blocked"),
+                "recurrence_count_30d": profile.get("recurrence_count_30d", 0),
+            }
+            given = {k: v for k, v in args.items() if v not in (None, "")}
+            filled = [k for k in defaults if k not in given]
+            merged = {**defaults, **given}
+            still_missing = [
+                k for k in ("hazard_class", "confidence", "road_type", "lane_blocked")
+                if merged.get(k) in (None, "")
+            ]
+            if still_missing:
+                # Neither the model nor the state has it (round 10b kept: a
+                # verdict JSON sent as arguments must not score a priority).
+                return {
+                    "ok": False,
+                    "error": "invalid arguments: " + "; ".join(
+                        f"{k} is required (not in the arguments, not on the state)" for k in still_missing
+                    ),
+                }
             result = fn(
-                hazard_class=str(args.get("hazard_class") or ""),
-                confidence=float(args.get("confidence") or 0.0),
-                road_type=str(args.get("road_type") or ""),
-                lane_blocked=str(args.get("lane_blocked") or ""),
-                recurrence_count_30d=int(args.get("recurrence_count_30d") or 0),
+                hazard_class=str(merged.get("hazard_class") or ""),
+                confidence=float(merged.get("confidence") or 0.0),
+                road_type=str(merged.get("road_type") or ""),
+                lane_blocked=str(merged.get("lane_blocked") or ""),
+                recurrence_count_30d=int(merged.get("recurrence_count_30d") or 0),
             )
-            return {"ok": True, **result}
+            out = {"ok": True, **result}
+            if filled:
+                out["args_from_state"] = filled
+            return out
         if name == "flag_for_urgent_review":
             tools_run[name] = {
                 "reason": str(args.get("reason") or "")[:200],
@@ -9931,6 +10039,12 @@ def _llm_decide_react(
             break
 
     info["hops"] = hops
+    # Round 17: the conversation so far, for the one correction round the
+    # fact-check may ask for.
+    info["messages"] = messages
+    info["schemas"] = schemas
+    if msg is not None:
+        info["reply_text"] = msg.content or ""
     if msg is None:
         return None, total_in, total_out, info
     parsed_json = _parse_decision_json(msg.content or "")
@@ -10051,6 +10165,14 @@ _KNOWN_IMAGE_WORDS_RE = re.compile(
     r"matches the catalogued (?:image|photo) exactly)\b",
     re.IGNORECASE,
 )
+# Round 17: "no reporter text", "the reporter's claims are not present" and
+# the like negate the mention; they are removed before the attribution check.
+_NO_REPORTER_TEXT_RE = re.compile(
+    r"\b(?:no|without|absent|lacks?|lacking) (?:any )?reporter'?s? (?:text|claims?|description|statement|note|words|input)\b"
+    r"|\breporter'?s? (?:text|claims?|description|statement|input) (?:is|are|was|were) (?:not present|absent|missing|not sent|not provided|empty)\b"
+    r"|\bno (?:text|description|claims?) (?:from|by) the reporter\b",
+    re.IGNORECASE,
+)
 _CATALOG_WORDS_RE = re.compile(r"\bcatalog(?:ue)?(?:d|ed)?\b", re.IGNORECASE)
 _LANE_BLOCKED_RE = re.compile(
     r"\b(lane (?:is )?(?:partially |fully )?blocked|blocking (?:the |a )?lane|blocks (?:the |a )?lane|"
@@ -10070,6 +10192,75 @@ _ACTION_PHRASE = {
     "human_review": "routed to a human",
     "known_image": "catalogued reference image",
 }
+
+# Round 17 (1.11.2026): consistency checks. In r10 a Decision wrote "D20
+# pothole" and "no evidence of severe conditions" on a case whose profile
+# said severe, the supervisor called 0.885 "low detector confidence", and a
+# rationale stated a 24 h repair window no passage contained.
+_CLASS_NAMES = {
+    "D00": ("longitudinal crack", "longitudinal cracks", "longitudinal cracking", "linear crack", "linear cracks"),
+    "D10": ("transverse crack", "transverse cracks", "transverse cracking", "lateral crack", "lateral cracks"),
+    "D20": ("alligator crack", "alligator cracks", "alligator cracking", "fatigue crack", "fatigue cracks",
+            "fatigue cracking", "crocodile crack", "crocodile cracking"),
+    "D40": ("pothole", "potholes"),
+}
+_NAME_TO_CLASS = {name: code for code, names in _CLASS_NAMES.items() for name in names}
+_CLASS_NAME_ALTERNATION = "|".join(sorted(_NAME_TO_CLASS, key=len, reverse=True))
+_CLASS_NAME_RE = re.compile(r"\b(" + _CLASS_NAME_ALTERNATION + r")\b", re.IGNORECASE)
+_CODE_THEN_NAME_RE = re.compile(
+    r"\b(D(?:00|10|20|40))\b\W{0,3}(?:(?:on|the|a|an|of|is|was|with|large|small|wide|deep)\W{1,3}){0,2}("
+    + _CLASS_NAME_ALTERNATION + r")\b",
+    re.IGNORECASE,
+)
+_NO_SEVERE_RE = re.compile(
+    r"\b(no (?:evidence|sign|signs|indication|indications) of (?:a |any )?(?:severe|serious|critical|major)|"
+    r"not severe|non-severe|minor (?:defect|damage|hazard|severity|issue)|low severity)\b",
+    re.IGNORECASE,
+)
+_SEVERE_RE = re.compile(r"\b(severe|critical|serious hazard|major hazard)\b", re.IGNORECASE)
+_CONF_WORD_RE = re.compile(
+    r"\b(very low|low|moderate|medium|high|very high)[ -](?:detector|detection|model|yolo)[ -]confidence\b"
+    r"|\b(?:detector|detection|model|yolo) confidence(?: level)?(?: is| of| was|:)? (very low|low|moderate|medium|high|very high)\b",
+    re.IGNORECASE,
+)
+_CONF_WORD_BAND = {"very low": "low", "low": "low", "moderate": "moderate", "medium": "moderate",
+                   "high": "high", "very high": "high"}
+_TIME_WINDOW_RE = re.compile(
+    r"\b(within \d+\s*(?:-|to)?\s*\d*\s*(?:h|hr|hrs|hour|hours|day|days|week|weeks)\b"
+    r"|\d+\s*-?\s*(?:h|hr|hrs|hour|hours|day|days|week|weeks)\b[^.;]{0,40}\b(?:repair|fix|response|window|deadline)"
+    r"|(?:repair|response) window of \d+)",
+    re.IGNORECASE,
+)
+
+
+def _confidence_band(conf) -> str:
+    """low / moderate / high from the policy's decision thresholds (the
+    needs_more_evidence band is the moderate one); "unknown" without a
+    number. One source for every agent and for the fact-checks."""
+    try:
+        c = float(conf)
+    except (TypeError, ValueError):
+        return "unknown"
+    pol = _policy_decision_thresholds()
+    if c < pol["nme_lo"]:
+        return "low"
+    if c < pol["nme_hi"]:
+        return "moderate"
+    return "high"
+
+
+def _confidence_word_problems(text: str, conf) -> list[str]:
+    """Confidence adjectives in ``text`` that contradict the band of ``conf``."""
+    band = _confidence_band(conf)
+    if band == "unknown" or not isinstance(text, str):
+        return []
+    found: list[str] = []
+    for m in _CONF_WORD_RE.finditer(text):
+        word = (m.group(1) or m.group(2) or "").lower()
+        word_band = _CONF_WORD_BAND.get(word)
+        if word_band and word_band != band:
+            found.append(f"confidence_word_{word.replace(' ', '_')}_vs_{float(conf):.2f}_{band}")
+    return found
 
 
 def _verify_decision_rationale(decision: dict, state: dict) -> dict:
@@ -10098,7 +10289,7 @@ def _verify_decision_rationale(decision: dict, state: dict) -> dict:
 
     def _text_problems(text: str) -> list[str]:
         found: list[str] = []
-        if not has_text and _REPORTER_ATTRIBUTION_RE.search(text):
+        if not has_text and _REPORTER_ATTRIBUTION_RE.search(_NO_REPORTER_TEXT_RE.sub(" ", text)):
             found.append("reporter_claims_without_text")
         if lane == "none" and _LANE_BLOCKED_RE.search(text) and not _NO_LANE_RE.search(text):
             found.append("lane_blockage_not_in_form")
@@ -10114,6 +10305,27 @@ def _verify_decision_rationale(decision: dict, state: dict) -> dict:
         m = _PRIORITY_TEXT_RE.search(text)
         if m and decision.get("priority") is not None and int(m.group(1)) != int(decision.get("priority")):
             found.append(f"priority_text_{m.group(1)}_vs_{int(decision.get('priority'))}")
+        # Round 17: a class code bound to another class's name ("D20
+        # pothole"), a defect name whose class is in no input, severity
+        # words against the profile, confidence words against the band,
+        # a time window the passages do not state.
+        for cm in _CODE_THEN_NAME_RE.finditer(text):
+            code, name = cm.group(1).upper(), cm.group(2).lower()
+            if _NAME_TO_CLASS.get(name) != code:
+                found.append(f"class_name_mismatch:{code}_{name.replace(' ', '_')}")
+        named_codes = sorted({_NAME_TO_CLASS.get(n.lower(), "") for n in _CLASS_NAME_RE.findall(text)} - {""})
+        foreign_names = [c for c in named_codes if c not in allowed and c not in foreign]
+        if foreign_names:
+            found.append("class_name_not_in_inputs:" + ",".join(foreign_names))
+        severity = str(profile.get("severity_signal") or "")
+        if severity == "severe" and _NO_SEVERE_RE.search(text):
+            found.append("severity_text_minor_vs_profile_severe")
+        elif severity == "minor" and _SEVERE_RE.search(text) and not _NO_SEVERE_RE.search(text):
+            found.append("severity_text_severe_vs_profile_minor")
+        found.extend(_confidence_word_problems(text, profile.get("primary_confidence")))
+        detail = state.get("research_coverage_detail") or {}
+        if detail and not detail.get("repair_window") and _TIME_WINDOW_RE.search(text):
+            found.append("repair_window_not_in_sources")
         return found
 
     # Round 13: each text is checked on its own, so the text that failed is
@@ -10154,7 +10366,11 @@ def _deterministic_rationale(decision: dict, state: dict) -> str:
                 f"a similar catalogued photo exists (pic_id={match.get('pic_id')}, phash distance {match.get('distance')}), not the same file"
             )
     if state.get("research_coverage"):
-        bits.append(f"research coverage {state.get('research_coverage')}")
+        cov = f"research coverage {state.get('research_coverage')}"
+        detail = state.get("research_coverage_detail") or {}
+        if detail.get("sufficiency"):
+            cov += f", {detail['sufficiency']}"
+        bits.append(cov)
     intake = state.get("reporter_intake") or {}
     bits.append("reporter text present" if intake.get("text") else "no reporter text")
     return "; ".join(bits) + "."
@@ -10221,6 +10437,108 @@ def _worker_impact(state: RoadGuardState, rule_hint: dict) -> dict | None:
     }
 
 
+_PROBLEM_SENTENCES = {
+    "reporter_claims_without_text": "no reporter text was sent, so there are no reporter claims to mention",
+    "lane_blockage_not_in_form": "the form says lane_blocked=none and no input states a lane blockage",
+    "known_image_claim_without_sha256_match": "this photo is not a catalogued file (no sha256 match)",
+    "catalogue_claim_without_match": "no catalogue match exists for this photo",
+    "repair_window_not_in_sources": "the retrieved standards state no repair window or deadline; do not state one",
+    "severity_text_minor_vs_profile_severe": "the profile's severity_signal is severe; your text says the opposite",
+    "severity_text_severe_vs_profile_minor": "the profile's severity_signal is minor; your text says severe",
+}
+
+
+def _problem_sentences(problems: list[str], state: dict) -> list[str]:
+    """The fact-check's slugs as sentences the model can act on."""
+    profile = state.get("hazard_profile") or {}
+    out: list[str] = []
+    for p in problems:
+        if p in _PROBLEM_SENTENCES:
+            out.append(_PROBLEM_SENTENCES[p])
+        elif p.startswith("lane_free_claim_but_form_says_"):
+            out.append(f"the form says lane_blocked={p.rsplit('_', 1)[-1]}")
+        elif p.startswith("class_not_in_inputs:"):
+            out.append(f"the class codes {p.split(':', 1)[1]} appear in no input")
+        elif p.startswith("class_name_mismatch:"):
+            out.append(
+                f"'{p.split(':', 1)[1].replace('_', ' ')}' pairs a code with another class's name "
+                "(D00 longitudinal crack, D10 transverse crack, D20 alligator crack, D40 pothole)"
+            )
+        elif p.startswith("class_name_not_in_inputs:"):
+            out.append(f"the defect name you used belongs to {p.split(':', 1)[1]}, which appears in no input")
+        elif p.startswith("confidence_word_"):
+            try:
+                conf = float(profile.get("primary_confidence") or 0.0)
+            except (TypeError, ValueError):
+                conf = 0.0
+            out.append(f"the detector confidence is {conf:.2f}, band {_confidence_band(conf)}; use that band")
+        elif p.startswith("priority_text_"):
+            out.append("the priority number in your text differs from the priority field")
+        else:
+            out.append(p.replace("_", " "))
+    return out
+
+
+def _correct_decision(
+    state: RoadGuardState, react_info: dict | None, problems: list[str]
+) -> tuple[dict | None, int, int, str]:
+    """Round 17: one correction round. The model reads what the fact-check
+    found and decides again from the inputs only. Returns (decision or
+    None, tokens_in, tokens_out, status)."""
+    info = react_info or {}
+    messages = list(info.get("messages") or [])
+    reply = str(info.get("reply_text") or "")
+    if not messages or not reply:
+        return None, 0, 0, "no_conversation"
+    if _deadline_blocks_hop(_run_deadline()):
+        return None, 0, 0, "run_deadline"
+    messages.append({"role": "assistant", "content": reply})
+    messages.append({
+        "role": "user",
+        "content": (
+            "Fact-check of your reply against the inputs failed:\n- "
+            + "\n- ".join(_problem_sentences(problems, state))
+            + "\nDecide again from the inputs only, without those claims. "
+            "Reply with the final JSON object only; no tool calls."
+        ),
+    })
+    try:
+        msg, in_tok, out_tok = chat(messages, tools=info.get("schemas"), temperature=0.0, use_panel=False)
+    except Exception as exc:
+        LOGGER.warning("decision_correction_llm_failed: %s", exc)
+        return None, 0, 0, f"llm_call_failed:{type(exc).__name__}"
+    if msg.finish_reason == "tool_calls" and msg.tool_calls:
+        return None, in_tok, out_tok, "reply_was_tool_call"
+    parsed = _grounded_or_none(
+        _parse_decision_json(msg.content or ""), state.get("tool_result_ids") or [], state
+    )
+    if parsed is None:
+        return None, in_tok, out_tok, "reply_unusable"
+    return parsed, in_tok, out_tok, "ok"
+
+
+_ACTION_RANK = {"known_image": 0, "needs_more_evidence": 0, "standard": 1, "human_review": 1, "urgent": 2}
+
+
+def _enforce_unverified(decision: dict, rule_hint: dict) -> dict:
+    """Round 17: a verdict whose rationale failed the fact-check twice is
+    kept only when it is not more severe than the rule tree's (the claim
+    the inputs do not carry then did not drive it). An action above the
+    tree's, or a priority more than 10 points above it, means the rule
+    tree's verdict."""
+    model_rank = _ACTION_RANK.get(str(decision.get("action") or ""), 1)
+    tree_rank = _ACTION_RANK.get(str(rule_hint.get("action") or ""), 1)
+    try:
+        gap = int(decision.get("priority") or 0) - int(rule_hint.get("priority") or 0)
+    except (TypeError, ValueError):
+        gap = 0
+    if model_rank > tree_rank:
+        return {"kind": "rule_tree_verdict", "why": f"{decision.get('action')} above the tree's {rule_hint.get('action')}"}
+    if gap > 10:
+        return {"kind": "rule_tree_verdict", "why": f"priority {decision.get('priority')} against the tree's {rule_hint.get('priority')}"}
+    return {"kind": "kept", "why": "not more severe than the rule tree"}
+
+
 def decision_node(state: RoadGuardState) -> dict:
     """Produce the final decision, grounded in retrieved sources."""
     begin_llm_log()
@@ -10276,7 +10594,24 @@ def decision_node(state: RoadGuardState) -> dict:
     # LLM call: there is nothing to triage, nothing to reason about, and
     # waiting on the local model for a verdict that is already decided
     # ties up a concurrency slot for 60-120 s per upload.
-    if state.get("dataset_match") and rule_hint["action"] in ("known_image", "human_review"):
+    declined_decision: dict | None = None
+    if state.get("evidence_declined"):
+        # Round 17: the reporter re-sent the original photo with a note; no
+        # new evidence, no second model pass, a human decides.
+        llm_decision = None
+        in_tok = out_tok = 0
+        react_info = None
+        declined_decision = {
+            "action": "human_review",
+            "rationale": (
+                "the reporter could not provide another photo (the original file was "
+                "re-sent with a note); routed to a human"
+            ),
+            "priority": int(rule_hint.get("priority") or 50),
+            "cited_sources": [],
+            "missing_evidence": [],
+        }
+    elif state.get("dataset_match") and rule_hint["action"] in ("known_image", "human_review"):
         llm_decision = None
         in_tok = out_tok = 0
         react_info = None
@@ -10342,6 +10677,9 @@ def decision_node(state: RoadGuardState) -> dict:
                 "cited_sources": list(rule_hint.get("cited_sources") or []),
                 "missing_evidence": [],
             }
+    elif declined_decision is not None:
+        decision = declined_decision
+        fallback_reason = "evidence_declined"
     else:
         fallback_reason = _llm_fallback_reason(react_info)
         last_error = ""
@@ -10394,6 +10732,20 @@ def decision_node(state: RoadGuardState) -> dict:
     # urgent preconditions above).
 
     decision["assessment"] = assessment
+    # Round 17: priority 0 from the model on a verdict that is not a sealed
+    # catalogue image contradicts the severity check it was given (r10: a
+    # needs_more_evidence at 0 while check_hazard_severity said 32).
+    priority_from_check = False
+    if (
+        llm_decision is not None
+        and overridden_llm_verdict is None
+        and decision.get("action") != "known_image"
+        and int(decision.get("priority") or 0) == 0
+    ):
+        sev = _severity_check_for_prompt(state.get("hazard_profile") or {}, state.get("metadata") or {})
+        if sev.get("already_run") and sev.get("priority") is not None:
+            decision["priority"] = int(sev["priority"])
+            priority_from_check = True
     decision, cap_applied = _apply_evidence_cap(decision, state)
     # Round 11: the model's own rationale is checked against the inputs;
     # a rationale that states something the inputs do not carry is
@@ -10403,13 +10755,60 @@ def decision_node(state: RoadGuardState) -> dict:
     if llm_decision is not None and overridden_llm_verdict is None:
         rationale_check = _verify_decision_rationale(decision, state)
         if not rationale_check["ok"]:
-            sentence = _deterministic_rationale(decision, state)
-            if rationale_check.get("rationale_problems"):
-                rationale_check["model_rationale"] = str(decision.get("rationale") or "")[:500]
-                decision["rationale"] = sentence
-            if rationale_check.get("assessment_problems"):
-                rationale_check["model_assessment"] = str(decision.get("assessment") or "")[:500]
-                decision["assessment"] = sentence
+            # Round 17: one correction round first (the model reads what
+            # failed and decides again from the inputs); a reply that still
+            # fails keeps the text replacement and is compared with the
+            # rule tree: a verdict more severe than the tree's rested on a
+            # claim the inputs do not carry and is replaced.
+            first_problems = list(rationale_check["problems"])
+            corrected, c_in, c_out, c_status = _correct_decision(state, react_info, first_problems)
+            in_tok += c_in
+            out_tok += c_out
+            correction = {
+                "status": c_status,
+                "first_problems": first_problems,
+                "first_verdict": {"action": decision.get("action"), "priority": decision.get("priority")},
+            }
+            if corrected is not None:
+                corrected, cap2 = _apply_evidence_cap(corrected, state)
+                cap_applied = cap_applied or cap2
+                recheck = _verify_decision_rationale(corrected, state)
+                correction["recheck_ok"] = recheck["ok"]
+                decision = corrected
+                rationale_check = recheck
+                if recheck["ok"]:
+                    rationale_check["corrected"] = True
+            rationale_check["correction"] = correction
+            if not rationale_check["ok"]:
+                sentence = _deterministic_rationale(decision, state)
+                if rationale_check.get("rationale_problems"):
+                    rationale_check["model_rationale"] = str(decision.get("rationale") or "")[:500]
+                    decision["rationale"] = sentence
+                if rationale_check.get("assessment_problems"):
+                    rationale_check["model_assessment"] = str(decision.get("assessment") or "")[:500]
+                    decision["assessment"] = sentence
+                enforcement = _enforce_unverified(decision, rule_hint)
+                rationale_check["enforcement"] = enforcement["kind"]
+                rationale_check["enforcement_why"] = enforcement["why"]
+                if enforcement["kind"] == "rule_tree_verdict":
+                    overridden_llm_verdict = {
+                        k: decision.get(k) for k in ("action", "rationale", "priority", "cited_sources")
+                    }
+                    fallback_reason = "rationale_unverified"
+                    source = "rule_based"
+                    problems_text = ", ".join(rationale_check["problems"])
+                    decision = {
+                        **{k: rule_hint.get(k) for k in ("action", "priority", "cited_sources", "missing_evidence") if k in rule_hint},
+                        "rationale": (
+                            f"{rule_hint.get('rationale')} (the model's {overridden_llm_verdict['action']} verdict "
+                            f"rested on claims the inputs do not carry: {problems_text})"
+                        )[:500],
+                        "assessment": decision.get("assessment") or "",
+                        "floor_reason": "rationale_unverified",
+                        "floor_trigger": problems_text[:240],
+                    }
+                    if rule_hint.get("image_match_status"):
+                        decision["image_match_status"] = rule_hint["image_match_status"]
 
     hazard_id = state["hazard_id"]
     tools_run = (react_info or {}).get("tools_run") or {}
@@ -10461,6 +10860,8 @@ def decision_node(state: RoadGuardState) -> dict:
         trace_content["worker_impact"] = worker_impact
     if rationale_check is not None:
         trace_content["rationale_check"] = rationale_check
+    if priority_from_check:
+        trace_content["priority_from_severity_check"] = True
     trace_content["cite_support"] = _cite_support_map(decision.get("cited_sources") or [], state)
     if decision["action"] == "known_image":
         trace_content["dataset_match"] = _dataset_lookup_summary(state.get("dataset_match"))
@@ -10522,6 +10923,7 @@ def decision_node(state: RoadGuardState) -> dict:
         "iter": state.get("iterations", 0) + 1,
         "speaker": "decision",
         "kind": "final",
+        "ts": time.time(),
         "content": trace_content,
     }
 
@@ -10691,19 +11093,22 @@ def _await_evidence_node(state: RoadGuardState) -> dict:
         and bool(state.get("hazard_profile"))
         and state.get("procedures") is not None
     )
+    declined = bool(state.get("evidence_declined"))
     entry = {
         "iter": state.get("iterations", 0) + 1,
         "speaker": "await_evidence",
         "kind": "evidence_received",
+        "ts": time.time(),
         "content": {
             "evidence_round": int(state.get("evidence_round", 0) or 0) + 1,
             "previous_request": state.get("evidence_request") or {},
             "delta": delta,
-            "reused": ["profile_builder", "rag_retriever"] if same_inputs else [],
+            "reused": ["profile_builder", "rag_retriever"] if (same_inputs or declined) else [],
+            "declined": declined,
         },
     }
     return {
-        "evidence_reuse": same_inputs,
+        "evidence_reuse": same_inputs or declined,
         "budget": BudgetTracker(
             tokens_offset_in=int(state.get("tokens_in", 0) or 0),
             tokens_offset_out=int(state.get("tokens_out", 0) or 0),
@@ -10777,6 +11182,7 @@ def _approval_gate_node(state: RoadGuardState) -> dict:
         "iter": state.get("iterations", 0) + 1,
         "speaker": "approval_gate",
         "kind": "pending_human_approval",
+        "ts": time.time(),
         "content": {
             "action": action,
             "priority": priority,
@@ -10926,6 +11332,25 @@ def thread_waits_for_evidence(hazard_id: str) -> bool:
     return "await_evidence" in tuple(snapshot.next or ())
 
 
+class IdenticalEvidenceError(ValueError):
+    """The evidence reply is the original upload again: the same file, the
+    same form fields and no new text (round 17, 1.11.2026). The API answers
+    422 and the request stays open; it is not counted as the one evidence
+    round."""
+
+
+def _evidence_identical(prev_md: dict, new_md: dict) -> tuple[bool, bool]:
+    """(same_photo_and_form, has_new_text) for an evidence reply."""
+    prev_sha = str(prev_md.get("image_sha256") or "")
+    same_photo = bool(prev_sha) and prev_sha == str(new_md.get("image_sha256") or "")
+    same_form = all(
+        str(prev_md.get(k) or "") == str(new_md.get(k) or "") for k in ("road_type", "lane_blocked")
+    )
+    new_text = " ".join(str(new_md.get("reporter_text") or "").split())
+    old_text = " ".join(str(prev_md.get("reporter_text") or "").split())
+    return (same_photo and same_form), bool(new_text) and new_text != old_text
+
+
 def resume_graph(
     hazard_id: str,
     yolo_output: dict,
@@ -10952,12 +11377,21 @@ def resume_graph(
             current = dict(getattr(app.get_state(config), "values", None) or {})
         except Exception as exc:  # pragma: no cover - defensive
             LOGGER.warning("resume_previous_inputs_unavailable id=%s: %s", hazard_id, exc)
+        # Round 17: the same file with the same form and no new text is
+        # the original upload, not evidence; with a note it means "no other
+        # photo" and the case goes to a human without a second model pass.
+        same_inputs, has_new_text = _evidence_identical(current.get("metadata") or {}, metadata)
+        if same_inputs and not has_new_text:
+            raise IdenticalEvidenceError(
+                "the evidence is the original photo and form again; take another angle or add a note"
+            )
         app.update_state(
             config,
             {
                 "yolo_output": yolo_output,
                 "image_quality": image_quality,
                 "metadata": metadata,
+                "evidence_declined": bool(same_inputs and has_new_text),
                 # Round 14 (1.11.2026): the first pass's inputs, so the
                 # evidence node can tell a re-upload from a new photo. They
                 # were never stored before: every delta read "None -> x" and
@@ -11159,6 +11593,11 @@ def _react_step_lines(lbl: str, c: dict) -> list[str]:
         pass
     elif status == "ok":
         out.append(f"{_INDENT}  result: {_short(tool_result, 2000)}")
+        if isinstance(tool_result, dict) and tool_result.get("args_from_state"):
+            out.append(
+                f"{_INDENT}  args from state: "
+                + ", ".join(str(a) for a in tool_result["args_from_state"])
+            )
     else:
         err = c.get("error") or tool_result or "(no error text)"
         out.append(f"{_INDENT}  error: {_short(err, 600)}")
@@ -11179,13 +11618,19 @@ def _worker_flags(c: dict) -> str:
     return ("  " + "  ".join(bits)) if bits else ""
 
 
-def _llm_delta_lines(delta) -> list[str]:
+def _llm_delta_lines(delta, reason: str | None = None) -> list[str]:
     """One line naming what a worker's LLM changed against the deterministic
-    labels (round 10); nothing when the LLM kept them or did not run."""
+    labels (round 10); nothing when the LLM kept them or did not run. Round
+    17: the worker's stated reason follows the change."""
     if not isinstance(delta, dict) or not delta:
         return []
     parts = [f"{k} {v.get('before')} -> {v.get('after')}" for k, v in delta.items() if isinstance(v, dict)]
-    return [f"{_INDENT}llm changed: " + "  ".join(parts)] if parts else []
+    if not parts:
+        return []
+    line = f"{_INDENT}llm changed: " + "  ".join(parts)
+    if reason:
+        line += f"  reason: {_short(str(reason), 300)}"
+    return [line]
 
 
 def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
@@ -11240,10 +11685,11 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
         out.append(
             f"{lbl} class={c.get('primary_class')}  severity={c.get('severity')}  "
             f"confidence={c.get('confidence')}  llm_used={c.get('llm_used')}" + _worker_flags(c)
+            + (f"  others={','.join(str(x) for x in c['others'])}" if c.get("others") else "")
         )
         if c.get("llm_skipped_reason"):
             out.append(f"{_INDENT}llm skipped: {c['llm_skipped_reason']}")
-        out.extend(_llm_delta_lines(c.get("llm_delta")))
+        out.extend(_llm_delta_lines(c.get("llm_delta"), c.get("llm_change_reason")))
         dl = c.get("dataset_lookup")
         if isinstance(dl, dict):
             if dl.get("found"):
@@ -11268,7 +11714,7 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             cov_bits = (
                 f"  answers={','.join(dc.get('answered') or []) or 'none'}"
                 f"  missing={','.join(dc.get('missing') or []) or 'none'}"
-            )
+            ) + (f"  sufficiency={dc['sufficiency']}" if dc.get("sufficiency") else "")
         out.append(
             f"{lbl} query_repair_standards -> {c.get('n_procedures', len(ids))} passages  "
             f"coverage={c.get('coverage')}{cov_bits}  llm_used={c.get('llm_used')}" + _worker_flags(c)
@@ -11327,6 +11773,11 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             decision_flags += f"  tool_failures={n_tool_failures}"
         if react_rec.get("final_in_tool_call"):
             decision_flags += "  reply_via=tool_call"
+        if c.get("priority_from_severity_check"):
+            decision_flags += "  priority_from=severity_check"
+        rc_flag = c.get("rationale_check") if isinstance(c.get("rationale_check"), dict) else {}
+        if rc_flag.get("corrected"):
+            decision_flags += "  corrected=1"
         out.append(
             f"{lbl} action={action.upper()}  priority={c.get('priority')}  "
             f"source={c.get('source')}" + decision_flags
@@ -11414,12 +11865,29 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             out.append(f"{_INDENT}uncertainty: {_short(um.group(1).strip(), 300)}")
         rc = c.get("rationale_check")
         if isinstance(rc, dict):
+            corr = rc.get("correction") if isinstance(rc.get("correction"), dict) else None
             if rc.get("ok"):
-                out.append(f"{_INDENT}rationale check: ok")
+                if corr:
+                    out.append(
+                        f"{_INDENT}rationale check: ok after one correction round "
+                        f"(first reply failed: {', '.join(corr.get('first_problems') or [])})"
+                    )
+                else:
+                    out.append(f"{_INDENT}rationale check: ok")
             else:
+                tail = "deterministic sentence shown, model text below"
+                if corr:
+                    tail = f"correction round {corr.get('status')}; " + tail
+                enforcement = rc.get("enforcement")
+                if enforcement == "rule_tree_verdict":
+                    tail += (
+                        "; the model's verdict was more severe than the rule tree's and was "
+                        f"replaced ({rc.get('enforcement_why')})"
+                    )
+                elif enforcement == "kept":
+                    tail += "; verdict kept (not more severe than the rule tree)"
                 out.append(
-                    f"{_INDENT}rationale check: FAIL ({', '.join(rc.get('problems') or [])}); "
-                    "deterministic sentence shown, model text below"
+                    f"{_INDENT}rationale check: FAIL ({', '.join(rc.get('problems') or [])}); {tail}"
                 )
                 if rc.get("model_rationale"):
                     out.append(f"{_INDENT}  model rationale: {_short(rc['model_rationale'], 400)}")
@@ -11516,6 +11984,11 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             f"{lbl} evidence received  round={c.get('evidence_round')}  "
             f"for={prev.get('missing_field')}"
         )
+        if c.get("declined"):
+            out.append(
+                f"{_INDENT}the original photo was re-sent with a note: not new evidence, "
+                "the case goes to a human without a second model pass"
+            )
         # 27.10.2026 trace enrichment: when evidence returns, show how the
         # new frame differs from the one the Decision agent asked about.
         # Helps the operator spot a reporter who re-uploaded the same
@@ -11639,7 +12112,7 @@ def format_trace_lines(
         lines.append(
             f"{_lbl('model')} class={md['class']}  "
             f"confidence={float(md['confidence']):.2f}  "
-            f"source=yolo_live"
+            f"source=yolo_live" + _other_detections(md)
         )
     tool_ids: list[str] = []
     for entry in trace or []:
@@ -11652,8 +12125,13 @@ def format_trace_lines(
             f"priority={v.get('priority')}  status={status}"
         )
         stamps = [float(e["ts"]) for e in trace or [] if isinstance(e, dict) and e.get("ts")]
+        stages = _stage_seconds(trace or [])
+        waiting = float(stages.get("waiting_evidence", 0.0) or 0.0)
         if len(stamps) >= 2:
-            done += f"  elapsed={max(stamps) - min(stamps):.0f}s"
+            span = max(stamps) - min(stamps)
+            done += f"  elapsed={span:.0f}s"
+            if waiting >= 0.5:
+                done += f" (compute {span - waiting:.0f}s, waiting for evidence {waiting:.0f}s)"
         calls = tok_in = tok_out = 0
         for e in trace or []:
             c = e.get("content") if isinstance(e, dict) else None
@@ -11667,13 +12145,64 @@ def format_trace_lines(
         if stamps:
             done = f"{_clock(max(stamps))} {done}"
         lines.append(done)
-        stages = _stage_seconds(trace or [])
         if stages:
-            lines.append(
-                f"{_INDENT}stage seconds: "
-                + "  ".join(f"{sp}={secs:.0f}" for sp, secs in stages.items() if secs >= 0.5)
-            )
+            parts = [
+                f"{sp}={secs:.0f}" for sp, secs in stages.items()
+                if sp != "waiting_evidence" and secs >= 0.5
+            ]
+            line = f"{_INDENT}stage seconds: " + "  ".join(parts)
+            if waiting >= 0.5:
+                line += f"  waiting_evidence={waiting:.0f}"
+            lines.append(line)
     return lines
+
+
+def _other_detections(md: dict) -> str:
+    """``  others=D40 0.46,D00 0.25`` for the detections behind the top one
+    (round 17, 1.11.2026): in r10 a Decision spoke of a "secondary D40
+    class" that the trace never showed, and the reader took it for a state
+    mix-up; it was the second YOLO box."""
+    rows = md.get("bboxes")
+    if isinstance(rows, str):
+        try:
+            rows = json.loads(rows)
+        except Exception:
+            rows = []
+    if not isinstance(rows, list):
+        return ""
+    top_cls = str(md.get("class") or "")
+    try:
+        top_conf = float(md.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        top_conf = 0.0
+    others: list[str] = []
+    skipped_top = False
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+        cls, conf = str(row[4]), row[5]
+        try:
+            conf_f = float(conf)
+        except (TypeError, ValueError):
+            continue
+        if not skipped_top and cls == top_cls and abs(conf_f - top_conf) < 0.005:
+            skipped_top = True
+            continue
+        others.append(f"{cls} {conf_f:.2f}")
+    return f"  others={','.join(others[:6])}" if others else ""
+
+
+def _secondary_labels(profile: dict) -> list[str]:
+    """``["D40 0.46", "D00 0.25"]`` from the profile's secondary detections."""
+    out: list[str] = []
+    for sec in profile.get("secondary_classes") or []:
+        if not isinstance(sec, dict) or not sec.get("class"):
+            continue
+        try:
+            out.append(f"{sec['class']} {float(sec.get('confidence') or 0.0):.2f}")
+        except (TypeError, ValueError):
+            out.append(str(sec["class"]))
+    return out
 
 
 def _stage_seconds(trace: list[dict]) -> dict[str, float]:
@@ -11687,7 +12216,13 @@ def _stage_seconds(trace: list[dict]) -> dict[str, float]:
     )
     out: dict[str, float] = {}
     for (t0, _sp0), (t1, sp1) in zip(stamped, stamped[1:]):
-        out[sp1] = out.get(sp1, 0.0) + max(0.0, t1 - t0)
+        # Round 17 (1.11.2026): until now most entries were stamped when
+        # the row was persisted, so the whole run landed on the last
+        # entries (131 s on approval_gate in r10). Entries are stamped when
+        # they are created now, and the gap before the evidence arrives is
+        # the reporter's time, reported apart from the nodes' compute.
+        key = "waiting_evidence" if sp1 == "await_evidence" else sp1
+        out[key] = out.get(key, 0.0) + max(0.0, t1 - t0)
     return out
 
 

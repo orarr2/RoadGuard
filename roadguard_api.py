@@ -39,6 +39,7 @@ from roadguard_agent import (
     AgentDecision,
     Database,
     Hazard,
+    IdenticalEvidenceError,
     Settings,
     create_jwt,
     decode_jwt,
@@ -4438,6 +4439,8 @@ def create_app() -> FastAPI:
                     "road_type": r.road_type,
                     "lane_blocked": r.lane_blocked,
                     "location": r.location,
+                    # Round 17: the other detections on the MODEL line.
+                    "bboxes": r.bboxes_json,
                 },
                 verdict={"action": r.agent_decision, "priority": r.priority},
                 status=r.status,
@@ -4638,6 +4641,16 @@ def create_app() -> FastAPI:
         hazard_input = _hazard_input_from_batch(body, hazard_id, _now_iso())
         try:
             decision = multiagent_resume(hazard_id, hazard_input)
+        except IdenticalEvidenceError as exc:
+            # Round 17 (1.11.2026): the original upload again is not
+            # evidence; the request stays open and is not counted.
+            try:
+                db.release_evidence_request(request_id)
+            except Exception as release_exc:
+                LOGGER.error(
+                    "evidence_request_release_failed id=%s: %s", request_id, release_exc
+                )
+            raise HTTPException(status_code=422, detail=str(exc))
         except Exception:
             LOGGER.exception("graph_failed hazard_id=%s path=resume", hazard_id)
             try:

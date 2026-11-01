@@ -1415,7 +1415,16 @@ section 11 for the full narrative.
   (round 11).
 - `support=` and `other_class=` on each RAG passage line (round 11).
 - `stage seconds:` under the DONE line: seconds between the timestamped
-  entries, attributed to the node that was running (round 11).
+  entries, attributed to the node that was running (round 11); every
+  entry is stamped when its node creates it and the reporter's wait
+  prints as `waiting_evidence`, apart from compute, also on the DONE line
+  (round 17).
+- `others=` on the MODEL and PROFILE lines (the detections behind the
+  top one), `sufficiency=` on the RAG line, `args from state:` under a
+  severity tool step, `corrected=1` / `priority_from=severity_check` on
+  the Decision line, `rationale check: ok after one correction round` or
+  `FAIL (...); ... replaced (rationale_unverified)`, and the note under
+  `evidence received` when the original photo was re-sent (round 17).
 - a ReAct step's reasoning line is the model's message text or, when that
   is empty, the `why` argument of the tool call (round 12); "(no reasoning
   text)" remains only when the model gave neither.
