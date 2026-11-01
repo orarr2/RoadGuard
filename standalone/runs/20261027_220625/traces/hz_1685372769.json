@@ -1,0 +1,117 @@
+{
+  "verdict": {
+    "action": "needs_more_evidence",
+    "priority": 40,
+    "rationale": "The confidence score for class D40 is low, requiring further verification before determining an urgent or standard repair action.",
+    "cited_sources": [
+      "segment_doc_22_14  well-managed_highway_infrastructure_combined_-_28_october_2016_amended_15_march_2017__180_c2"
+    ]
+  },
+  "approval_record": null,
+  "trace": [
+    {
+      "node": "sanitize",
+      "location_scrubbed": false,
+      "ocr_suspicious": false,
+      "reporter_text_suspicious": false
+    },
+    {
+      "node": "signal_extractor",
+      "has_text": false,
+      "mentioned": {
+        "hazard_class": null,
+        "lane_blocked": null,
+        "road_type": null
+      },
+      "contradictions": 0,
+      "urgency_claimed": false,
+      "reporter_signals": {
+        "size_cm": null,
+        "depth_cm": null,
+        "vehicles_swerving": null,
+        "standing_water": null
+      }
+    },
+    {
+      "node": "supervisor",
+      "iterations": 1,
+      "elapsed_s": 0.0,
+      "fired": false
+    },
+    {
+      "node": "profile_builder",
+      "primary_class": "D40",
+      "primary_confidence": 0.394,
+      "severity_signal": "moderate",
+      "perception_confidence": "medium"
+    },
+    {
+      "node": "supervisor",
+      "iterations": 2,
+      "elapsed_s": 0.8,
+      "fired": false
+    },
+    {
+      "speaker": "rag_retriever",
+      "content": {
+        "coverage": "direct_match",
+        "n_procedures": 3,
+        "tool_result_ids": [
+          "segment_doc_24_irc.gov.in.082.2015_1_c2",
+          "segment_doc_22_14  well-managed_highway_infrastructure_combined_-_28_october_2016_amended_15_march_2017__180_c2",
+          "segment_doc_24_irc.gov.in.082.2015_1_c1"
+        ],
+        "rag_query": "road maintenance repair standards for hazard class D40 on arterial main road: safety requirements, response procedures, repair window",
+        "rag_filter": {
+          "hazard_class": "D40",
+          "road_type": "main",
+          "k": 3
+        },
+        "passage_previews": [
+          {
+            "id": "segment_doc_24_irc.gov.in.082.2015_1_c2",
+            "distance": 0.8069717884063721,
+            "preview": "angements for Traffic and Safety Measures during Road  58  Maintenance \t 12.1\t Safety \tduring\tMaintenance\tWork\tin\tProgress\t 58 \t 12.2\t Road \tSigns,\tPavement\tMar"
+          },
+          {
+            "id": "segment_doc_22_14  well-managed_highway_infrastructure_combined_-_28_october_2016_amended_15_march_2017__180_c2",
+            "distance": 0.8225739598274231,
+            "preview": "n used,  permanent repair should be carried out within a reasonable period.   A.5.8.4. Defects that do not represent an immediate or imminent hazard or risk of "
+          },
+          {
+            "id": "segment_doc_24_irc.gov.in.082.2015_1_c1",
+            "distance": 0.9254152774810791,
+            "preview": "lection of Preventive Maintenance Treatment 33  8.3 Warrants for Preventive Maintenance 35 Section 9: Periodic Renewals 41  9.1 Need and Importance of Periodic "
+          }
+        ]
+      }
+    },
+    {
+      "node": "supervisor",
+      "iterations": 3,
+      "elapsed_s": 1.19,
+      "fired": false
+    },
+    {
+      "speaker": "decision",
+      "content": {
+        "action": "needs_more_evidence",
+        "priority": 40,
+        "rationale": "The confidence score for class D40 is low, requiring further verification before determining an urgent or standard repair action.",
+        "cited_sources": [
+          "segment_doc_22_14  well-managed_highway_infrastructure_combined_-_28_october_2016_amended_15_march_2017__180_c2"
+        ],
+        "source": "llm",
+        "tool_result_ids": [
+          "segment_doc_24_irc.gov.in.082.2015_1_c2",
+          "segment_doc_22_14  well-managed_highway_infrastructure_combined_-_28_october_2016_amended_15_march_2017__180_c2",
+          "segment_doc_24_irc.gov.in.082.2015_1_c1"
+        ]
+      }
+    },
+    {
+      "node": "approval_gate",
+      "approval_record": null
+    }
+  ]
+}

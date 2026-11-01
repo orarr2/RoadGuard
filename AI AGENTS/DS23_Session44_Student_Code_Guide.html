@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DS23 Session 44 - מדריך קוד לסטודנט/ית שורה-אחר-שורה</title>
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  /* ==================================================================
+     DS23 INSTRUCTOR CODE GUIDE - SINGLE SOURCE OF TRUTH
+     BLOCK A below is copied byte-for-byte from S25 Code Guide v2
+     (identical to S24 v2 - the stable QA'd pair).
+     Never rewrite Block A from prose. Copy it.
+     ================================================================== */
+
+  :root {
+    --teal: #0d9488; --emerald: #059669; --dark-teal: #115e59; --light-teal: #ccfbf1;
+    --cyan: #0e7490; --light-cyan: #cffafe;
+    --gray-900: #111827; --gray-700: #374151; --gray-600: #4b5563; --gray-500: #6b7280;
+    --gray-400: #9ca3af; --gray-200: #e5e7eb; --gray-100: #f3f4f6; --gray-50: #f9fafb;
+    --rose: #e11d48; --rose-light: #ffe4e6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body { font-family: 'Heebo', sans-serif; background: var(--gray-50); color: var(--gray-900); line-height: 1.55; }
+  .banner { background: linear-gradient(135deg, var(--dark-teal), var(--teal)); color: white; padding: 1.4rem 2rem; position: sticky; top: 0; z-index: 100; box-shadow: 0 2px 12px rgba(0,0,0,0.08); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.8rem; }
+  .banner-title h1 { font-size: 1.35rem; font-weight: 700; }
+  .banner-title .sub { font-size: 0.9rem; opacity: 0.85; margin-top: 0.15rem; }
+  .banner-controls { display: flex; gap: 0.5rem; align-items: center; }
+  .banner-controls button, .banner-controls input { background: rgba(255,255,255,0.15); color: white; border: 1px solid rgba(255,255,255,0.3); padding: 0.4rem 0.8rem; border-radius: 6px; font-family: inherit; font-size: 0.85rem; cursor: pointer; }
+  .banner-controls button:hover { background: rgba(255,255,255,0.25); }
+  .banner-controls input { width: 240px; cursor: text; }
+  .banner-controls input::placeholder { color: rgba(255,255,255,0.7); }
+  .container { display: grid; grid-template-columns: 290px 1fr; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 900px) { .container { grid-template-columns: 1fr; } .sidebar { display: none; } }
+  .sidebar { background: white; border-left: 1px solid var(--gray-200); position: sticky; top: 92px; align-self: start; height: calc(100vh - 92px); overflow-y: auto; padding: 1rem 0.75rem; }
+  .sidebar h3 { color: var(--dark-teal); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.5px; margin: 1rem 0.5rem 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--gray-200); }
+  .sidebar h3:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+  .sidebar a { display: block; padding: 0.4rem 0.75rem; color: var(--gray-700); text-decoration: none; border-radius: 6px; font-size: 0.88rem; transition: all 0.15s; border-right: 3px solid transparent; cursor: pointer; }
+  .sidebar a:hover { background: var(--light-teal); color: var(--dark-teal); border-right-color: var(--teal); }
+  .sidebar a .num { display: inline-block; width: 1.6rem; color: var(--gray-400); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+  .sidebar a.active { background: var(--light-teal); color: var(--dark-teal); border-right-color: var(--teal); font-weight: 600; }
+  main { padding: 1.5rem 2rem 6rem; max-width: 980px; }
+  .intro { background: white; border-radius: 12px; padding: 1.4rem 1.6rem; margin-bottom: 1.4rem; box-shadow: 0 1px 3px rgba(0,0,0,0.04); border-right: 4px solid var(--cyan); }
+  .intro h2 { font-size: 1.25rem; color: var(--dark-teal); margin-bottom: 0.5rem; }
+  .intro p, .intro li { font-size: 0.95rem; color: var(--gray-700); }
+  .intro ul { padding-right: 1.4rem; margin-top: 0.4rem; }
+  .intro li { margin-bottom: 0.3rem; }
+  .intro b { color: var(--dark-teal); }
+  .slide-card { background: white; border-radius: 12px; padding: 1.4rem 1.6rem; margin-bottom: 1.4rem; box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.06); border-right: 4px solid var(--teal); scroll-margin-top: 100px; }
+  .slide-card .slide-header { display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 1rem; padding-bottom: 0.6rem; border-bottom: 1px solid var(--gray-200); flex-wrap: wrap; }
+  .slide-card .slide-num { background: var(--teal); color: white; font-weight: 700; padding: 0.15rem 0.6rem; border-radius: 6px; font-size: 0.8rem; font-variant-numeric: tabular-nums; flex-shrink: 0; align-self: center; }
+  .slide-card h2 { font-size: 1.22rem; color: var(--gray-900); font-weight: 700; flex-grow: 1; }
+  .slide-card .cell-badge { background: var(--light-cyan); color: var(--cyan); font-size: 0.72rem; font-weight: 600; padding: 0.15rem 0.55rem; border-radius: 5px; direction: ltr; align-self: center; }
+  .code-summary { background: var(--light-teal); border-right: 3px solid var(--teal); padding: 0.6rem 0.9rem; border-radius: 8px; margin-bottom: 0.8rem; font-size: 0.92rem; color: var(--dark-teal); }
+  .code-summary b { color: var(--dark-teal); }
+  .lx-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 1rem; }
+  .lx { display: grid; grid-template-columns: minmax(250px, 44%) 1fr; gap: 14px; align-items: start; padding: 12px 14px; background: white; border-radius: 9px; border: 1px solid var(--gray-200); box-shadow: 0 1px 2px rgba(0,0,0,0.02); }
+  .lx-code { background: #0f172a; color: #7dd3fc; margin: 0; padding: 10px 12px; border-radius: 7px; font-size: 0.84rem; line-height: 1.5; overflow-x: auto; direction: ltr; text-align: left; white-space: pre; font-family: 'Consolas','Courier New',monospace; }
+  .lx-txt { font-size: 0.92rem; color: var(--gray-700); padding-top: 2px; }
+  .lx-txt b { color: var(--dark-teal); }
+  .lx-txt code { direction: ltr; font-family: 'Consolas',monospace; background: var(--gray-100); color: var(--rose); padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.85em; unicode-bidi: isolate; display: inline-block; }
+  @media (max-width: 768px) { .lx { grid-template-columns: 1fr; } }
+  .section { margin-bottom: 0.6rem; }
+  .section.say { background: var(--light-teal); padding: 0.7rem 0.9rem; border-radius: 8px; border-right: 3px solid var(--teal); margin-top: 0.4rem; }
+  .section.say .section-label { color: var(--dark-teal); font-weight: 700; font-size: 0.82rem; }
+  .section.say p { font-style: italic; color: var(--dark-teal); font-size: 0.92rem; }
+  .section.output { background: #0f172a; padding: 0.7rem 0.95rem; border-radius: 8px; margin-top: 0.5rem; }
+  .section.output .section-label { color: #7dd3fc; font-weight: 700; font-size: 0.8rem; direction: rtl; display: block; margin-bottom: 0.3rem; }
+  .section.output pre { color: #a7f3d0; font-size: 0.82rem; direction: ltr; text-align: left; white-space: pre-wrap; font-family: 'Consolas','Courier New',monospace; line-height: 1.5; }
+  .section.note { background: var(--rose-light); padding: 0.7rem 0.9rem; border-radius: 8px; border-right: 3px solid var(--rose); margin-top: 0.5rem; }
+  .section.note .section-label { color: var(--rose); font-weight: 700; font-size: 0.82rem; }
+  .section.note p { color: #9f1239; font-size: 0.92rem; }
+  .floating-nav { position: fixed; bottom: 1.5rem; left: 1.5rem; display: flex; gap: 0.5rem; z-index: 50; }
+  .floating-nav button { background: white; border: 1px solid var(--gray-200); box-shadow: 0 2px 6px rgba(0,0,0,0.1); color: var(--dark-teal); width: 44px; height: 44px; border-radius: 50%; cursor: pointer; font-size: 1.1rem; font-weight: 700; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
+  .floating-nav button:hover { background: var(--teal); color: white; transform: translateY(-2px); }
+  .slide-card.hidden { display: none; }
+  @media print { .banner, .sidebar, .floating-nav { display: none; } .container { grid-template-columns: 1fr; } main { padding: 0; max-width: none; } .slide-card { break-inside: avoid; } }
+
+
+.code-full { background:#0f172a; color:#e2e8f0; padding:0.9rem 1rem; border-radius:9px; font-size:0.82rem; line-height:1.55; direction:ltr; text-align:left; white-space:pre; overflow-x:auto; font-family:'Consolas','Courier New',monospace; margin-bottom:0.6rem; }
+.lx-sub { background:linear-gradient(135deg,#0d9488,#06b6d4); color:white; font-weight:700; font-size:0.85rem; padding:6px 12px; border-radius:7px; margin:10px 0 4px; scroll-margin-top:90px; }
+.lx-blank { height:7px; }
+.nav-link.nav-sub { font-size:0.76rem; padding-right:26px; color:#0e7490; background:#f0fdff; border-color:#cffafe; }
+.nav-link.nav-sub:hover { background:#0891b2; color:white; }
+.slide-card { scroll-margin-top:90px; }
+.lx-code { scroll-margin-top:90px; }
+
+  /* ==================================================================
+     BLOCK C - Mandatory pedagogical components restored from the
+     S16-S19 generation (copied verbatim from S19). Shlomit's decision
+     28.7.2026: every guide MUST use jump, slide-link, warning and
+     part-divider in addition to the v2 layout. The --warn variables
+     were dropped in v2 and are restored here for the warning box.
+     ================================================================== */
+  :root { --warn: #f59e0b; --warn-light: #fef3c7; }
+  .section.jump { background: var(--light-cyan); padding: 0.7rem 0.9rem; border-radius: 8px; border-right: 3px solid var(--cyan); }
+  .section .section-label { font-weight: 700; font-size: 0.82rem; color: var(--dark-teal); display: block; margin-bottom: 0.3rem; }
+  .section.jump .section-label { color: var(--cyan); font-weight: 700; font-size: 0.82rem; }
+  .section.warning { background: var(--warn-light); padding: 0.7rem 0.9rem; border-radius: 8px; border-right: 3px solid var(--warn); }
+  .section.warning .section-label { color: #92400e; font-weight: 700; font-size: 0.82rem; }
+  .section.warning p, .section.warning li { color: #78350f; }
+  .slide-link { display: inline-flex; align-items: center; gap: 0.35rem; background: var(--light-cyan); color: var(--cyan); font-size: 0.78rem; font-weight: 600; padding: 0.2rem 0.6rem; border-radius: 6px; text-decoration: none; border: 1px solid var(--cyan); white-space: nowrap; }
+  .part-divider { background: linear-gradient(135deg, var(--dark-teal), var(--teal)); color: white; padding: 1.1rem 1.6rem; border-radius: 12px; margin: 1.6rem 0 1.2rem; box-shadow: 0 4px 12px rgba(13, 148, 136, 0.25); }
+  .part-divider .part-name { font-size: 0.82rem; opacity: 0.85; letter-spacing: 1px; text-transform: uppercase; }
+  .part-divider h2 { font-size: 1.35rem; margin: 0.2rem 0 0.3rem; }
+  .part-divider p { opacity: 0.92; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<div class="banner">
+  <div class="banner-title">
+    <h1>מדריך קוד לסטודנט/ית שורה-אחר-שורה · מפגש 44</h1>
+    <div class="sub">DS23_Session44_Demo.ipynb · כל שורה בנפרד, ניווט גרנולרי · BIU DS23 · Shlomit Levavi</div>
+  </div>
+  <div class="banner-controls">
+    <input type="text" id="search" placeholder="חיפוש בלוק, פקודה או מושג..." autocomplete="off">
+    <button onclick="window.print()" title="הדפסה / PDF">&#128424;</button>
+  </div>
+</div>
+<div class="container">
+<nav class="sidebar" id="sidebar">
+  <h3>פתיחה</h3>
+  <a href="#s0" class="nav-link"><span class="num">0</span>ייבוא ספריות, תמחור, ו-budget guard</a>
+  <h3>חלק א · שני סוכנים ביד</h3>
+  <a href="#s1" class="nav-link"><span class="num">1</span>הכלים וה-stub הדטרמיניסטי</a>
+  <a href="#s1-sub2" class="nav-link nav-sub">tools: read-only retrieval</a>
+  <a href="#s1-sub13" class="nav-link nav-sub">role_llm: per-persona controller</a>
+  <a href="#s2" class="nav-link"><span class="num">2</span>סכימת ה-handoff ואימות Assert v3</a>
+  <a href="#s2-sub4" class="nav-link nav-sub">assert_handoff: schema + grounding</a>
+  <a href="#s3" class="nav-link"><span class="num">3</span>הצוות ביד: מתווך ו-trace</a>
+  <h3>חלק ב · LangGraph נכנסת</h3>
+  <a href="#s4" class="nav-link"><span class="num">4</span>LangGraph: state, צמתים, וקשת מותנית</a>
+  <a href="#s4-sub4" class="nav-link nav-sub">TeamState: the shared state</a>
+  <a href="#s4-sub11" class="nav-link nav-sub">nodes</a>
+  <a href="#s4-sub18" class="nav-link nav-sub">conditional edge router</a>
+  <a href="#s5" class="nav-link"><span class="num">5</span>קימפול והרצת הגרף</a>
+  <a href="#s6" class="nav-link"><span class="num">6</span>הקשת המותנית נורית פעם אחת</a>
+  <a href="#s6-sub2" class="nav-link nav-sub">flaky researcher: forces the loop</a>
+  <a href="#s6-sub9" class="nav-link nav-sub">same graph, run it</a>
+  <a href="#s7" class="nav-link"><span class="num">7</span>עלות הטופולוגיה: המלכודת והאמת</a>
+  <a href="#s8" class="nav-link"><span class="num">8</span>העברה לדאטה שלכם: שלב 2 של המטלה</a>
+</nav>
+<main>
+
+<div class="intro slide-card">
+  <h2>איך להשתמש במדריך הזה</h2>
+  <p>לכל תא קוד בדמו של מפגש 44: <b>קישור לשקף במצגת</b>, <b>הקוד המלא</b>, <b>הסבר שורה אחר שורה</b> בעברית, ובסוף כל בלוק <b>הפלט הצפוי</b>. <br>ניווט: לחיצה בתפריט הצדדי, וחיפוש חופשי למעלה. <br> כל המספרים בפלט מבוססים על הרצה אמיתית של המחברת, כולל LangGraph חי וטבלת עלות הטופולוגיה.</p>
+</div>
+
+<!-- ===== GENERATED CARDS ===== -->
+<div id="s0" class="slide-card">
+  <div class="slide-header">
+    <div class="slide-num">0</div>
+    <h2>ייבוא ספריות, תמחור, ו-budget guard</h2>
+    <span class="cell-badge">Cell 0</span>
+    <a class="slide-link" href="DS23_Session44_MultiAgent.html">&#9655; שקף 3 · הסוכן והמגבלה שנשארה</a>
+  </div>
+  <div class="code-summary">מכינים את סביבת העבודה: ספריות, תמחור טוקנים, וה-budget guard הנעול.</div>
+  <div class="section jump"><span class="section-label">מתי לקפוץ</span><p>להריץ פעם אחת בתחילת המחברת, לפני הכל.</p></div>
+  <div class="section say"><span class="section-label">שלומית מדגישה כאן:</span><p>"אותה תשתית מ-S42 ו-S43. שימו לב שה-guard נעול בראש: MAX_ITERATIONS ו-COST_CAP. צוות הוא יותר אוטונומיה, אז ה-guard חשוב כאן אפילו יותר."</p></div>
+  <pre class="code-full" dir="ltr">import os, json, re, math
+from datetime import date, timedelta
+
+SEED = 42
+BACKEND = &quot;groq&quot;
+MODEL   = &quot;llama-3.3-70b-versatile&quot;
+
+MAX_ITERATIONS = 8
+COST_CAP_USD   = 0.10
+PRICE_IN  = 0.59 / 1_000_000
+PRICE_OUT = 0.79 / 1_000_000
+
+USE_LIVE = False   # flip to True in class after verifying the Groq key in Colab Secrets
+
+def estimate_tokens(text):
+    return max(1, math.ceil(len(str(text)) / 4))
+
+print(&quot;Backend:&quot;, BACKEND, &quot;| guard:&quot;, MAX_ITERATIONS, &quot;iters,&quot;, COST_CAP_USD, &quot;USD&quot;)</pre>
+  <div class="section"><span class="section-label">הסבר שורה אחר שורה</span>
+    <div class="lx-list">
+      <div class="lx"><pre class="lx-code" dir="ltr">import os, json, re, math</pre><div class="lx-txt">טוען ספריות בסיס: <code>os</code> לסביבה, <code>json</code> לסריאליזציה של הודעות ו-handoffs, <code>re</code> לביטויים רגולריים, <code>math</code> להערכת טוקנים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">from datetime import date, timedelta</pre><div class="lx-txt">מייבא שני טיפוסים לעבודה עם תאריכים, זמינים לכלים בהמשך המודול.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">SEED = 42</pre><div class="lx-txt">זרע קבוע לשחזוריות, אותו זרע לאורך כל הקורס.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">BACKEND = &quot;groq&quot;</pre><div class="lx-txt">ספק ה-inference, groq, בגלל תמיכת function calling אמינה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">MODEL   = &quot;llama-3.3-70b-versatile&quot;</pre><div class="lx-txt">שם המודל אצל groq, מודל של 70B פרמטרים.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">MAX_ITERATIONS = 8</pre><div class="lx-txt">תקרת הצעדים הקשיחה לכל לולאת סוכן. חלק מ-budget guard, נעול בראש כל מחברת.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">COST_CAP_USD   = 0.10</pre><div class="lx-txt">תקרת עלות למשימה בדולרים, יציאה אלגנטית בחריגה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">PRICE_IN  = 0.59 / 1_000_000</pre><div class="lx-txt">מחיר טוקן קלט, 0.59 דולר למיליון. הקו התחתון קוסמטי, פייתון מתעלם ממנו.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">PRICE_OUT = 0.79 / 1_000_000</pre><div class="lx-txt">מחיר טוקן פלט, 0.79 דולר למיליון. פלט יקר מקלט, וזה מה שמניע את חישוב עלות הטופולוגיה.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">USE_LIVE = False   # flip to True in class after verifying the Groq key in Colab Secrets</pre><div class="lx-txt">מתג בין המסלול החי ל-stub האופליין. בכיתה הופכים ל-<code>True</code> אחרי אימות המפתח.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">def estimate_tokens(text):</pre><div class="lx-txt">מגדיר פונקציית אומדן טוקנים גסה, לחישוב עלות אופליין.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    return max(1, math.ceil(len(str(text)) / 4))</pre><div class="lx-txt">מחזיר אורך הטקסט חלקי 4, מעוגל כלפי מעלה, ולפחות 1. כלל האצבע של כ-4 תווים לטוקן.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;Backend:&quot;, BACKEND, &quot;| guard:&quot;, MAX_ITERATIONS, &quot;iters,&quot;, COST_CAP_USD, &quot;USD&quot;)</pre><div class="lx-txt">מדפיס אישור של ה-backend וערכי ה-guard, כדי לראות מיד עם מה עובדים.</div></div>
+    </div>
+  </div>
+  <div class="section output"><span class="section-label">פלט צפוי</span><pre>Backend: groq | guard: 8 iters, 0.1 USD</pre></div>
+</div>
+
+<div class="part-divider"><div class="part-name">חלק א</div><h2>שני סוכנים ביד</h2><p>בונים צוות ראשון בלי framework, מתווך מעביר handoff מאומת.</p></div>
+
+<div id="s1" class="slide-card">
+  <div class="slide-header">
+    <div class="slide-num">1</div>
+    <h2>הכלים וה-stub הדטרמיניסטי</h2>
+    <span class="cell-badge">Cell 1</span>
+    <a class="slide-link" href="DS23_Session44_MultiAgent.html">&#9655; שקף 5 · למה יותר מסוכן אחד</a>
+  </div>
+  <div class="code-summary">מגדירים את כלי השליפה של ה-researcher (קריאה בלבד) ו-stub דטרמיניסטי לכל פרסונה.</div>
+  <div class="section jump"><span class="section-label">מתי לקפוץ</span><p>אחרי שקף 'למה יותר מסוכן אחד', כדי להראות את הפרדת ההרשאות בקוד.</p></div>
+  <div class="section say"><span class="section-label">שלומית מדגישה כאן:</span><p>"ה-researcher מקבל כלי אחד בלבד, search_regulation, והוא לקריאה בלבד. זו הפרדת הרשאות ברמת תפקיד, חוט הבטיחות של המפגש. ה-stub נותן התנהגות דטרמיניסטית לכל פרסונה."</p></div>
+  <div class="section warning"><span class="section-label">שימו לב:</span><p>ה-stub מדמה קריאת LLM נפרדת לכל תפקיד. בבית הפכו USE_LIVE ל-True רק אחרי אימות המפתח ב-Colab Secrets.</p></div>
+  <pre class="code-full" dir="ltr"># researcher&#x27;s only tool: read-only retrieval (least privilege by role)
+_REG = {&quot;gdpr breach&quot;: (&quot;Article 33: notify within 72 hours of awareness.&quot;, [33, 34]),
+        &quot;ai act high-risk&quot;: (&quot;Article 16: providers of high-risk AI ensure conformity.&quot;, [16])}
+
+def search_regulation(query: str, regulation: str) -&gt; str:
+    &quot;&quot;&quot;Read-only retrieval from GDPR / AI Act. The researcher&#x27;s only tool.&quot;&quot;&quot;
+    for key, (text, ids) in _REG.items():
+        if any(w in query.lower() for w in key.split()):
+            return json.dumps({&quot;passage&quot;: text, &quot;article_ids&quot;: ids})
+    return json.dumps({&quot;passage&quot;: &quot;no match&quot;, &quot;article_ids&quot;: []})
+
+# a deterministic per-role stub: returns what each persona would produce
+def role_llm(role, prompt, state):
+    &quot;&quot;&quot;Offline deterministic controller standing in for a per-persona LLM call.&quot;&quot;&quot;
+    if USE_LIVE:
+        from groq import Groq
+        from google.colab import userdata
+        client = Groq(api_key=userdata.get(&quot;GROQ_API_KEY&quot;))
+        msgs = [{&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: prompt}, {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: json.dumps(state)}]
+        r = client.chat.completions.create(model=MODEL, messages=msgs, temperature=0)
+        return r.choices[0].message.content
+    # offline behaviour per role
+    if role == &quot;researcher&quot;:
+        hit = json.loads(search_regulation(&quot;gdpr breach notification&quot;, &quot;GDPR&quot;))
+        return json.dumps({&quot;findings&quot;: [{&quot;claim&quot;: hit[&quot;passage&quot;], &quot;article_ids&quot;: hit[&quot;article_ids&quot;]}],
+                           &quot;confidence&quot;: &quot;high&quot;})
+    if role == &quot;writer&quot;:
+        findings = state.get(&quot;findings&quot;, [])
+        claim = findings[0][&quot;claim&quot;] if findings else &quot;(no findings)&quot;
+        ids = findings[0][&quot;article_ids&quot;] if findings else []
+        return f&quot;Under GDPR {claim} (see articles {ids}).&quot;
+    if role == &quot;judge&quot;:
+        draft = state.get(&quot;draft&quot;, &quot;&quot;)
+        ok = &quot;Article 33&quot; in draft or &quot;articles [33&quot; in draft
+        return json.dumps({&quot;grounded&quot;: ok})
+    return &quot;&quot;
+
+print(&quot;tools + role stub ready. researcher is read-only.&quot;)</pre>
+  <div class="section"><span class="section-label">הסבר שורה אחר שורה</span>
+    <div class="lx-list">
+      <div class="lx"><pre class="lx-code" dir="ltr"># researcher&#x27;s only tool: read-only retrieval (least privilege by role)</pre><div class="lx-txt">הערה: הכלי הבא שייך ל-researcher בלבד, והוא לקריאה בלבד. זו הפרדת הרשאות ברמת תפקיד.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">_REG = {&quot;gdpr breach&quot;: (&quot;Article 33: notify within 72 hours of awareness.&quot;, [33, 34]),</pre><div class="lx-txt">אינדקס רגולציה מדומה. תחילת מילון: מפתח נושא, וערך של נוסח מאמר ומזהיו. תחליף אופליין ל-Chroma.</div></div>
+      <div class="lx-sub" id="s1-sub2">tools: read-only retrieval</div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        &quot;ai act high-risk&quot;: (&quot;Article 16: providers of high-risk AI ensure conformity.&quot;, [16])}</pre><div class="lx-txt">רשומה שנייה באינדקס, על ה-AI Act. סוגר את המילון.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">def search_regulation(query: str, regulation: str) -&gt; str:</pre><div class="lx-txt">מגדיר את כלי השליפה של ה-researcher. מקבל שאילתה וחוק, מחזיר מחרוזת JSON.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    &quot;&quot;&quot;Read-only retrieval from GDPR / AI Act. The researcher&#x27;s only tool.&quot;&quot;&quot;</pre><div class="lx-txt">ה-docstring מדגיש שהכלי לקריאה בלבד, ושהוא הכלי היחיד של ה-researcher. זו הפרדת ההרשאות.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    for key, (text, ids) in _REG.items():</pre><div class="lx-txt">רץ על רשומות האינדקס, מפרק כל ערך לנוסח ולמזהים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        if any(w in query.lower() for w in key.split()):</pre><div class="lx-txt">בודק אם לפחות מילה מהנושא מופיעה בשאילתה, התאמת מילות מפתח פשוטה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">            return json.dumps({&quot;passage&quot;: text, &quot;article_ids&quot;: ids})</pre><div class="lx-txt">מחזיר את הקטע והמזהים כ-JSON מובנה, שה-researcher ימסור הלאה ב-handoff.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    return json.dumps({&quot;passage&quot;: &quot;no match&quot;, &quot;article_ids&quot;: []})</pre><div class="lx-txt">אם לא נמצאה התאמה, מחזיר תוצאה ריקה מובנית, לא קורס.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr"># a deterministic per-role stub: returns what each persona would produce</pre><div class="lx-txt">הערה: הפונקציה הבאה היא stub דטרמיניסטי שמדמה קריאת LLM נפרדת לכל פרסונה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">def role_llm(role, prompt, state):</pre><div class="lx-txt">מגדיר עוטף שמייצג קריאת מודל עבור תפקיד נתון. מקבל את שם התפקיד, פרומפט הפרסונה, וה-state.</div></div>
+      <div class="lx-sub" id="s1-sub13">role_llm: per-persona controller</div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    &quot;&quot;&quot;Offline deterministic controller standing in for a per-persona LLM call.&quot;&quot;&quot;</pre><div class="lx-txt">ה-docstring: בקר דטרמיניסטי אופליין שמחליף קריאת LLM לכל פרסונה, לשחזוריות.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    if USE_LIVE:</pre><div class="lx-txt">מפצל בין המסלול החי לאופליין לפי המתג מהתא הראשון.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        from groq import Groq</pre><div class="lx-txt">מייבא את לקוח groq. הייבוא בתוך הפונקציה כדי שהתא ירוץ גם בלי החבילה במצב אופליין.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        from google.colab import userdata</pre><div class="lx-txt">מייבא את גישת ה-Colab Secrets, לקריאת המפתח בבטחה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        client = Groq(api_key=userdata.get(&quot;GROQ_API_KEY&quot;))</pre><div class="lx-txt">יוצר לקוח groq עם המפתח שנשלף מ-Colab Secrets.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        msgs = [{&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: prompt}, {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: json.dumps(state)}]</pre><div class="lx-txt">בונה את ההודעות לקריאה: הפרסונה כ-system, וה-state הנוכחי כ-user. כל תפקיד נושא את הפרסונה המלאה שלו, וזו התקורה שנמדוד בהמשך.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        r = client.chat.completions.create(model=MODEL, messages=msgs, temperature=0)</pre><div class="lx-txt">שולח את הקריאה החיה ל-API ומקבל תגובה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        return r.choices[0].message.content</pre><div class="lx-txt">מחזיר את תוכן התשובה מהמסלול החי.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    # offline behaviour per role</pre><div class="lx-txt">הערה: מכאן ההתנהגות הדטרמיניסטית לכל תפקיד במצב אופליין.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    if role == &quot;researcher&quot;:</pre><div class="lx-txt">ענף ה-researcher: מבצע שליפה ומחזיר ממצאים מובנים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        hit = json.loads(search_regulation(&quot;gdpr breach notification&quot;, &quot;GDPR&quot;))</pre><div class="lx-txt">קורא לכלי השליפה ומפענח את התוצאה מ-JSON למילון.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        return json.dumps({&quot;findings&quot;: [{&quot;claim&quot;: hit[&quot;passage&quot;], &quot;article_ids&quot;: hit[&quot;article_ids&quot;]}],</pre><div class="lx-txt">מחזיר את הממצאים במבנה handoff. תחילת JSON רב-שורתי: רשימת ממצאים עם טענה ומזהי מאמרים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">                           &quot;confidence&quot;: &quot;high&quot;})</pre><div class="lx-txt">ממשיך: שדה הביטחון. סוגר את ה-JSON. זה מה שיעבור ל-writer.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    if role == &quot;writer&quot;:</pre><div class="lx-txt">ענף ה-writer: מנסח דוח מהממצאים בלבד, בלי כלים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        findings = state.get(&quot;findings&quot;, [])</pre><div class="lx-txt">שולף את הממצאים מה-state. ברירת מחדל רשימה ריקה אם אין.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        claim = findings[0][&quot;claim&quot;] if findings else &quot;(no findings)&quot;</pre><div class="lx-txt">לוקח את הטענה מהממצא הראשון, או הודעת חוסר אם אין ממצאים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        ids = findings[0][&quot;article_ids&quot;] if findings else []</pre><div class="lx-txt">לוקח את מזהי המאמרים מהממצא הראשון, או רשימה ריקה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        return f&quot;Under GDPR {claim} (see articles {ids}).&quot;</pre><div class="lx-txt">מנסח את הדוח מהממצאים בלבד. שימו לב: ה-writer לא ממציא, הוא רק מנסח את מה שקיבל.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    if role == &quot;judge&quot;:</pre><div class="lx-txt">ענף ה-judge: מאמת שהדוח נשען על הממצאים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        draft = state.get(&quot;draft&quot;, &quot;&quot;)</pre><div class="lx-txt">שולף את הטיוטה מה-state לבדיקה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        ok = &quot;Article 33&quot; in draft or &quot;articles [33&quot; in draft</pre><div class="lx-txt">בודק אם הדוח מצטט את המקור הצפוי. אימות עיגון פשוט.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        return json.dumps({&quot;grounded&quot;: ok})</pre><div class="lx-txt">מחזיר את פסק ה-judge כ-JSON: האם הדוח מעוגן.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    return &quot;&quot;</pre><div class="lx-txt">ברירת מחדל לתפקיד לא מוכר, מחרוזת ריקה.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;tools + role stub ready. researcher is read-only.&quot;)</pre><div class="lx-txt">מדפיס אישור שהכלים וה-stub מוכנים, ומזכיר שה-researcher מוגבל לקריאה.</div></div>
+    </div>
+  </div>
+  <div class="section output"><span class="section-label">פלט צפוי</span><pre>tools + role stub ready. researcher is read-only.</pre></div>
+</div>
+
+<div id="s2" class="slide-card">
+  <div class="slide-header">
+    <div class="slide-num">2</div>
+    <h2>סכימת ה-handoff ואימות Assert v3</h2>
+    <span class="cell-badge">Cell 2</span>
+    <a class="slide-link" href="DS23_Session44_MultiAgent.html">&#9655; שקף 8 · ה-handoff הוא חוזה</a>
+  </div>
+  <div class="code-summary">בונים סכימת handoff מובנית ומאמתים אותה: מבנה ועיגון, Assert v3 ברמת הצוות.</div>
+  <div class="section jump"><span class="section-label">מתי לקפוץ</span><p>אחרי שקף 'ה-handoff הוא חוזה', להראות את הסכימה והאימות חיים.</p></div>
+  <div class="section say"><span class="section-label">שלומית מדגישה כאן:</span><p>"ההודעה בין סוכנים היא פרומפט מובנה, ולכן מאמתים אותה לפני שהיא עוברת. שתי בדיקות: מבנה, שכל השדות קיימים, ועיגון, שמזהי המאמרים אמיתיים. handoff שבור נעצר כאן, לא בדוח הסופי."</p></div>
+  <pre class="code-full" dir="ltr">def make_handoff(sender, recipient, findings, confidence):
+    &quot;&quot;&quot;Build a structured handoff message between two agents.&quot;&quot;&quot;
+    return {&quot;from&quot;: sender, &quot;to&quot;: recipient, &quot;findings&quot;: findings, &quot;confidence&quot;: confidence}
+
+def assert_handoff(handoff, tool_result_ids):
+    &quot;&quot;&quot;Assert v3, at the team level: schema + grounding of the handoff.&quot;&quot;&quot;
+    # 1. schema: required fields present
+    for field in (&quot;from&quot;, &quot;to&quot;, &quot;findings&quot;, &quot;confidence&quot;):
+        assert field in handoff, f&quot;handoff missing field: {field}&quot;
+    assert isinstance(handoff[&quot;findings&quot;], list) and handoff[&quot;findings&quot;], &quot;findings must be non-empty&quot;
+    # 2. grounding: every cited article id actually came from the tool
+    for f in handoff[&quot;findings&quot;]:
+        for aid in f.get(&quot;article_ids&quot;, []):
+            assert aid in tool_result_ids, f&quot;ungrounded article id in handoff: {aid}&quot;
+    return True
+
+# quick check
+_hit = json.loads(search_regulation(&quot;gdpr breach notification&quot;, &quot;GDPR&quot;))
+_ho = make_handoff(&quot;researcher&quot;, &quot;writer&quot;,
+                   [{&quot;claim&quot;: _hit[&quot;passage&quot;], &quot;article_ids&quot;: _hit[&quot;article_ids&quot;]}], &quot;high&quot;)
+print(&quot;handoff valid:&quot;, assert_handoff(_ho, _hit[&quot;article_ids&quot;]))</pre>
+  <div class="section"><span class="section-label">הסבר שורה אחר שורה</span>
+    <div class="lx-list">
+      <div class="lx"><pre class="lx-code" dir="ltr">def make_handoff(sender, recipient, findings, confidence):</pre><div class="lx-txt">מגדיר פונקציה שבונה הודעת handoff מובנית בין שני סוכנים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    &quot;&quot;&quot;Build a structured handoff message between two agents.&quot;&quot;&quot;</pre><div class="lx-txt">ה-docstring: בונה הודעת מסירה מובנית בין שני סוכנים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    return {&quot;from&quot;: sender, &quot;to&quot;: recipient, &quot;findings&quot;: findings, &quot;confidence&quot;: confidence}</pre><div class="lx-txt">מחזיר מילון עם ארבעת שדות ה-handoff: שולח, מקבל, ממצאים, וביטחון. זו הסכימה של ההודעה.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx-sub" id="s2-sub4">assert_handoff: schema + grounding</div>
+      <div class="lx"><pre class="lx-code" dir="ltr">def assert_handoff(handoff, tool_result_ids):</pre><div class="lx-txt">מגדיר פונקציה שמאמתת handoff לפני שהוא עובר. זה Assert v3 ברמת הצוות.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    &quot;&quot;&quot;Assert v3, at the team level: schema + grounding of the handoff.&quot;&quot;&quot;</pre><div class="lx-txt">ה-docstring: אימות ברמת הצוות, מבנה ועיגון של ה-handoff.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    # 1. schema: required fields present</pre><div class="lx-txt">הערה: הבדיקה הראשונה, שכל שדות החובה קיימים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    for field in (&quot;from&quot;, &quot;to&quot;, &quot;findings&quot;, &quot;confidence&quot;):</pre><div class="lx-txt">רץ על שמות שדות החובה של ה-handoff.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        assert field in handoff, f&quot;handoff missing field: {field}&quot;</pre><div class="lx-txt">מוודא שכל שדה חובה קיים. אם לא, נזרקת חריגה עם שם השדה החסר.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    assert isinstance(handoff[&quot;findings&quot;], list) and handoff[&quot;findings&quot;], &quot;findings must be non-empty&quot;</pre><div class="lx-txt">מוודא ש-findings הוא רשימה לא-ריקה. handoff בלי ממצאים חסר משמעות.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    # 2. grounding: every cited article id actually came from the tool</pre><div class="lx-txt">הערה: הבדיקה השנייה, שכל מזהה מאמר שצוטט באמת הגיע מהכלי.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    for f in handoff[&quot;findings&quot;]:</pre><div class="lx-txt">רץ על כל ממצא ב-handoff.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        for aid in f.get(&quot;article_ids&quot;, []):</pre><div class="lx-txt">רץ על כל מזהה מאמר בממצא.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">            assert aid in tool_result_ids, f&quot;ungrounded article id in handoff: {aid}&quot;</pre><div class="lx-txt">מוודא שכל מזהה שצוטט באמת הופיע בתוצאות הכלי. תופס הזיות ציטוט לפני שהן מגיעות ל-writer.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    return True</pre><div class="lx-txt">מחזיר אמת אם ה-handoff עבר את כל הבדיקות.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr"># quick check</pre><div class="lx-txt">הערה: שלוש השורות הבאות בודקות את הוולידציה על handoff תקין.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">_hit = json.loads(search_regulation(&quot;gdpr breach notification&quot;, &quot;GDPR&quot;))</pre><div class="lx-txt">שולף תוצאה אמיתית מהכלי לצורך הבדיקה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">_ho = make_handoff(&quot;researcher&quot;, &quot;writer&quot;,</pre><div class="lx-txt">בונה handoff לדוגמה. תחילת קריאה רב-שורתית.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">                   [{&quot;claim&quot;: _hit[&quot;passage&quot;], &quot;article_ids&quot;: _hit[&quot;article_ids&quot;]}], &quot;high&quot;)</pre><div class="lx-txt">ממשיך: הממצאים מהתוצאה, וביטחון גבוה. סוגר את הקריאה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;handoff valid:&quot;, assert_handoff(_ho, _hit[&quot;article_ids&quot;]))</pre><div class="lx-txt">מאמת ומדפיס. אמור להחזיר True כי ה-handoff תקין ומעוגן.</div></div>
+    </div>
+  </div>
+  <div class="section output"><span class="section-label">פלט צפוי</span><pre>handoff valid: True</pre></div>
+</div>
+
+<div id="s3" class="slide-card">
+  <div class="slide-header">
+    <div class="slide-num">3</div>
+    <h2>הצוות ביד: מתווך ו-trace</h2>
+    <span class="cell-badge">Cell 3</span>
+    <a class="slide-link" href="DS23_Session44_MultiAgent.html">&#9655; שקף 9 · הדגמה חיה A</a>
+  </div>
+  <div class="code-summary">מריצים צוות ביד: מתווך מעביר handoff מאומת בין researcher ל-writer, עם trace מלא.</div>
+  <div class="section jump"><span class="section-label">מתי לקפוץ</span><p>בדמו A, אחרי הצגת הסכימה. זה הלב של מחזור-על A.</p></div>
+  <div class="section say"><span class="section-label">שלומית מדגישה כאן:</span><p>"בנינו צוות שלם בלי שום framework. מתווך פשוט מעביר handoff מאומת בין researcher ל-writer, וה-trace המלא מודפס עם תוויות דובר. זה הפרוטוקול שקוראים לדיבוג צוות."</p></div>
+  <pre class="code-full" dir="ltr">def run_team_by_hand(task, verbose=True):
+    &quot;&quot;&quot;Two agents, no framework: researcher -&gt; (validated handoff) -&gt; writer.&quot;&quot;&quot;
+    trace = []
+    # researcher acts
+    r_out = json.loads(role_llm(&quot;researcher&quot;, &quot;You research regulation. Hand off findings only.&quot;, {&quot;task&quot;: task}))
+    tool_ids = [aid for f in r_out[&quot;findings&quot;] for aid in f[&quot;article_ids&quot;]]
+    trace.append((&quot;researcher&quot;, f&quot;findings: {r_out[&#x27;findings&#x27;]}&quot;))
+    # build + validate the handoff (Assert v3 at the team level)
+    handoff = make_handoff(&quot;researcher&quot;, &quot;writer&quot;, r_out[&quot;findings&quot;], r_out[&quot;confidence&quot;])
+    assert_handoff(handoff, tool_ids)
+    trace.append((&quot;mediator&quot;, &quot;handoff validated -&gt; writer&quot;))
+    # writer acts on the findings only
+    draft = role_llm(&quot;writer&quot;, &quot;You write from findings only. Never invent facts.&quot;,
+                     {&quot;findings&quot;: handoff[&quot;findings&quot;]})
+    trace.append((&quot;writer&quot;, f&quot;draft: {draft}&quot;))
+    if verbose:
+        for speaker, msg in trace:
+            print(f&quot;[{speaker:&lt;10}] {msg}&quot;)
+    return {&quot;draft&quot;: draft, &quot;trace&quot;: trace}
+
+result = run_team_by_hand(&quot;Compare the breach-notification duty under GDPR.&quot;)
+print(&quot;\nFINAL DRAFT:&quot;, result[&quot;draft&quot;])
+# trajectory assert: the writer&#x27;s draft must rest on the researcher&#x27;s findings
+assert &quot;Article 33&quot; in result[&quot;draft&quot;]
+print(&quot;trajectory assert passed: draft is grounded in findings.&quot;)</pre>
+  <div class="section"><span class="section-label">הסבר שורה אחר שורה</span>
+    <div class="lx-list">
+      <div class="lx"><pre class="lx-code" dir="ltr">def run_team_by_hand(task, verbose=True):</pre><div class="lx-txt">מגדיר את פונקציית הצוות הידני. מקבל משימה ודגל הדפסה, מריץ researcher ואז writer.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    &quot;&quot;&quot;Two agents, no framework: researcher -&gt; (validated handoff) -&gt; writer.&quot;&quot;&quot;</pre><div class="lx-txt">ה-docstring: שני סוכנים בלי framework, מסירה מאומתת ביניהם.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    trace = []</pre><div class="lx-txt">מאתחל רשימת trace לתיעוד מי אמר מה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    # researcher acts</pre><div class="lx-txt">הערה: השלב הראשון, ה-researcher פועל.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    r_out = json.loads(role_llm(&quot;researcher&quot;, &quot;You research regulation. Hand off findings only.&quot;, {&quot;task&quot;: task}))</pre><div class="lx-txt">קורא ל-researcher עם הפרסונה שלו, ומפענח את הממצאים מ-JSON. שימו לב לפרסונה: "מסור ממצאים בלבד", זה הגבול שלו.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    tool_ids = [aid for f in r_out[&quot;findings&quot;] for aid in f[&quot;article_ids&quot;]]</pre><div class="lx-txt">אוסף את כל מזהי המאמרים מהממצאים, לצורך אימות ה-handoff. list comprehension מקונן.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    trace.append((&quot;researcher&quot;, f&quot;findings: {r_out[&#x27;findings&#x27;]}&quot;))</pre><div class="lx-txt">מתעד ב-trace את ממצאי ה-researcher, עם תווית דובר.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    # build + validate the handoff (Assert v3 at the team level)</pre><div class="lx-txt">הערה: בונים ומאמתים את ה-handoff, אותו עקרון Assert v3 מ-S42.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    handoff = make_handoff(&quot;researcher&quot;, &quot;writer&quot;, r_out[&quot;findings&quot;], r_out[&quot;confidence&quot;])</pre><div class="lx-txt">בונה את הודעת ה-handoff מהממצאים והביטחון של ה-researcher.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    assert_handoff(handoff, tool_ids)</pre><div class="lx-txt">מאמת את ה-handoff לפני שהוא עובר. handoff שבור ייעצר כאן, לא בדוח הסופי.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    trace.append((&quot;mediator&quot;, &quot;handoff validated -&gt; writer&quot;))</pre><div class="lx-txt">מתעד שהמתווך אימת והעביר את ה-handoff ל-writer.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    # writer acts on the findings only</pre><div class="lx-txt">הערה: השלב השני, ה-writer פועל, על הממצאים בלבד.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    draft = role_llm(&quot;writer&quot;, &quot;You write from findings only. Never invent facts.&quot;,</pre><div class="lx-txt">קורא ל-writer עם הפרסונה שלו. תחילת קריאה רב-שורתית. הפרסונה אוסרת עליו להמציא.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">                     {&quot;findings&quot;: handoff[&quot;findings&quot;]})</pre><div class="lx-txt">מעביר ל-writer רק את הממצאים מה-handoff. הוא לא רואה כלים, רק ממצאים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    trace.append((&quot;writer&quot;, f&quot;draft: {draft}&quot;))</pre><div class="lx-txt">מתעד ב-trace את הטיוטה של ה-writer.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    if verbose:</pre><div class="lx-txt">אם הדגל דלוק, מדפיסים את ה-trace המלא.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        for speaker, msg in trace:</pre><div class="lx-txt">רץ על צעדי ה-trace.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">            print(f&quot;[{speaker:&lt;10}] {msg}&quot;)</pre><div class="lx-txt">מדפיס כל צעד עם תווית דובר מיושרת. זה הפרוטוקול שקוראים לדיבוג צוות.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    return {&quot;draft&quot;: draft, &quot;trace&quot;: trace}</pre><div class="lx-txt">מחזיר את הטיוטה הסופית ואת ה-trace המלא.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">result = run_team_by_hand(&quot;Compare the breach-notification duty under GDPR.&quot;)</pre><div class="lx-txt">מריץ את הצוות הידני על משימת דוח ההשוואה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;\nFINAL DRAFT:&quot;, result[&quot;draft&quot;])</pre><div class="lx-txt">מדפיס את הטיוטה הסופית, עם שורה ריקה מפרידה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr"># trajectory assert: the writer&#x27;s draft must rest on the researcher&#x27;s findings</pre><div class="lx-txt">הערה: בדיקת מסלול. הטיוטה חייבת להישען על ממצאי ה-researcher.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">assert &quot;Article 33&quot; in result[&quot;draft&quot;]</pre><div class="lx-txt">מוודא שהטיוטה מצטטת את סעיף 33 שנשלף. בדיקה שהצוות עבד נכון, לא שהטקסט מנוסח יפה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;trajectory assert passed: draft is grounded in findings.&quot;)</pre><div class="lx-txt">מדפיס אישור שבדיקת המסלול עברה.</div></div>
+    </div>
+  </div>
+  <div class="section output"><span class="section-label">פלט צפוי</span><pre>[researcher] findings: [{&#x27;claim&#x27;: &#x27;Article 33: notify within 72 hours of awareness.&#x27;, &#x27;article_ids&#x27;: [33, 34]}]
+[mediator  ] handoff validated -&gt; writer
+[writer    ] draft: Under GDPR Article 33: notify within 72 hours of awareness. (see articles [33, 34]).
+
+FINAL DRAFT: Under GDPR Article 33: notify within 72 hours of awareness. (see articles [33, 34]).
+trajectory assert passed: draft is grounded in findings.</pre></div>
+</div>
+
+<div class="part-divider"><div class="part-name">חלק ב</div><h2>LangGraph נכנסת</h2><p>אותו זוג, כגרף מפורש עם state וקשת מותנית.</p></div>
+
+<div id="s4" class="slide-card">
+  <div class="slide-header">
+    <div class="slide-num">4</div>
+    <h2>LangGraph: state, צמתים, וקשת מותנית</h2>
+    <span class="cell-badge">Cell 4</span>
+    <a class="slide-link" href="DS23_Session44_MultiAgent.html">&#9655; שקף 12 · State וקשתות מותנות</a>
+  </div>
+  <div class="code-summary">מגדירים ב-LangGraph את ה-state, שני צמתים, ואת פונקציית הקשת המותנית.</div>
+  <div class="section jump"><span class="section-label">מתי לקפוץ</span><p>בתחילת מחזור-על B, אחרי שקף LangGraph 'מה קונים ומה משלמים'.</p></div>
+  <div class="section say"><span class="section-label">שלומית מדגישה כאן:</span><p>"עכשיו אותו זוג, כגרף מפורש. ה-state הוא ה-messages מ-S42, הקשת המותנית היא ה-if שכבר כתבנו. LangGraph לא ממציאה מושגים, היא נותנת להם שם ומבנה."</p></div>
+  <pre class="code-full" dir="ltr">from langgraph.graph import StateGraph, END
+from typing import TypedDict, Annotated
+import operator
+
+class TeamState(TypedDict):
+    task: str
+    findings: list
+    draft: str
+    research_rounds: Annotated[int, operator.add]   # accumulates across visits
+
+def researcher_node(state: TeamState) -&gt; dict:
+    out = json.loads(role_llm(&quot;researcher&quot;, &quot;Research regulation; hand off findings.&quot;, state))
+    return {&quot;findings&quot;: out[&quot;findings&quot;], &quot;research_rounds&quot;: 1}
+
+def writer_node(state: TeamState) -&gt; dict:
+    draft = role_llm(&quot;writer&quot;, &quot;Write from findings only.&quot;, {&quot;findings&quot;: state[&quot;findings&quot;]})
+    return {&quot;draft&quot;: draft}
+
+def research_sufficient(state: TeamState) -&gt; str:
+    &quot;&quot;&quot;Conditional edge: enough findings to write, or go back for more?&quot;&quot;&quot;
+    enough = bool(state.get(&quot;findings&quot;)) or state.get(&quot;research_rounds&quot;, 0) &gt;= 2
+    return &quot;writer&quot; if enough else &quot;researcher&quot;
+
+print(&quot;nodes and conditional-edge router defined.&quot;)</pre>
+  <div class="section"><span class="section-label">הסבר שורה אחר שורה</span>
+    <div class="lx-list">
+      <div class="lx"><pre class="lx-code" dir="ltr">from langgraph.graph import StateGraph, END</pre><div class="lx-txt">מייבא מ-LangGraph את <code>StateGraph</code> לבניית הגרף ואת <code>END</code> לסימון סיום.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">from typing import TypedDict, Annotated</pre><div class="lx-txt">מייבא טיפוסים: <code>TypedDict</code> להגדרת מבנה ה-state, ו-<code>Annotated</code> לצירוף מטא-מידע לשדה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">import operator</pre><div class="lx-txt">מייבא את <code>operator</code> כדי להשתמש ב-<code>operator.add</code> לצבירת ערכים ב-state.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx-sub" id="s4-sub4">TeamState: the shared state</div>
+      <div class="lx"><pre class="lx-code" dir="ltr">class TeamState(TypedDict):</pre><div class="lx-txt">מגדיר את מבנה ה-state שזורם דרך הגרף. זה ה-messages מ-S42, עכשיו עם סכימה מפורשת.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    task: str</pre><div class="lx-txt">שדה המשימה, מחרוזת.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    findings: list</pre><div class="lx-txt">שדה הממצאים שה-researcher מייצר וה-writer צורך.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    draft: str</pre><div class="lx-txt">שדה הטיוטה שה-writer מפיק.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    research_rounds: Annotated[int, operator.add]   # accumulates across visits</pre><div class="lx-txt">מונה סבבי מחקר. ה-<code>Annotated</code> עם <code>operator.add</code> אומר ל-LangGraph לצבור את הערך בין ביקורים בצומת, לא לדרוס.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">def researcher_node(state: TeamState) -&gt; dict:</pre><div class="lx-txt">מגדיר את צומת ה-researcher. מקבל state ומחזיר את העדכונים שלו אליו.</div></div>
+      <div class="lx-sub" id="s4-sub11">nodes</div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    out = json.loads(role_llm(&quot;researcher&quot;, &quot;Research regulation; hand off findings.&quot;, state))</pre><div class="lx-txt">קורא ל-researcher ומפענח את הממצאים. אותו <code>role_llm</code> מהצוות הידני, עכשיו בתוך צומת.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    return {&quot;findings&quot;: out[&quot;findings&quot;], &quot;research_rounds&quot;: 1}</pre><div class="lx-txt">מחזיר עדכון ל-state: הממצאים, וקידום מונה הסבבים ב-1. LangGraph ממזג את זה לתוך ה-state.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">def writer_node(state: TeamState) -&gt; dict:</pre><div class="lx-txt">מגדיר את צומת ה-writer.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    draft = role_llm(&quot;writer&quot;, &quot;Write from findings only.&quot;, {&quot;findings&quot;: state[&quot;findings&quot;]})</pre><div class="lx-txt">קורא ל-writer עם הממצאים מה-state בלבד. אותה הפרדת תפקידים כמו בצוות הידני.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    return {&quot;draft&quot;: draft}</pre><div class="lx-txt">מחזיר עדכון ל-state: הטיוטה.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx-sub" id="s4-sub18">conditional edge router</div>
+      <div class="lx"><pre class="lx-code" dir="ltr">def research_sufficient(state: TeamState) -&gt; str:</pre><div class="lx-txt">מגדיר את פונקציית הקשת המותנית. מחליטה לאן ממשיכים לפי ה-state.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    &quot;&quot;&quot;Conditional edge: enough findings to write, or go back for more?&quot;&quot;&quot;</pre><div class="lx-txt">ה-docstring: קשת מותנית, האם יש מספיק ממצאים לכתוב או לחזור למחקר.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    enough = bool(state.get(&quot;findings&quot;)) or state.get(&quot;research_rounds&quot;, 0) &gt;= 2</pre><div class="lx-txt">מחליט אם המחקר מספיק: יש ממצאים, או שכבר היו שני סבבים. התנאי השני מונע לולאה אינסופית.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    return &quot;writer&quot; if enough else &quot;researcher&quot;</pre><div class="lx-txt">מחזיר את שם הצומת הבא: writer אם מספיק, אחרת חזרה ל-researcher. זו הקשת המותנית.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;nodes and conditional-edge router defined.&quot;)</pre><div class="lx-txt">מדפיס אישור שהצמתים והנתב הוגדרו.</div></div>
+    </div>
+  </div>
+  <div class="section output"><span class="section-label">פלט צפוי</span><pre>nodes and conditional-edge router defined.</pre></div>
+</div>
+
+<div id="s5" class="slide-card">
+  <div class="slide-header">
+    <div class="slide-num">5</div>
+    <h2>קימפול והרצת הגרף</h2>
+    <span class="cell-badge">Cell 5</span>
+    <a class="slide-link" href="DS23_Session44_MultiAgent.html">&#9655; שקף 15 · הדגמה חיה B</a>
+  </div>
+  <div class="code-summary">מקמפלים ומריצים את הגרף. אותה תוצאה כמו הצוות הידני, בשפה מפורשת.</div>
+  <div class="section jump"><span class="section-label">מתי לקפוץ</span><p>בדמו B, מיד אחרי הגדרת הצמתים.</p></div>
+  <div class="section say"><span class="section-label">שלומית מדגישה כאן:</span><p>"מחברים את הצמתים, קובעים קשת מותנית, מקמפלים, ומריצים. שימו לב: אותה תוצאה בדיוק כמו הצוות הידני, אבל הקוד קריא יותר ויש שכבת הפשטה מתחת."</p></div>
+  <pre class="code-full" dir="ltr">graph = StateGraph(TeamState)
+graph.add_node(&quot;researcher&quot;, researcher_node)
+graph.add_node(&quot;writer&quot;, writer_node)
+graph.set_entry_point(&quot;researcher&quot;)
+graph.add_conditional_edges(&quot;researcher&quot;, research_sufficient,
+                            {&quot;researcher&quot;: &quot;researcher&quot;, &quot;writer&quot;: &quot;writer&quot;})
+graph.add_edge(&quot;writer&quot;, END)
+app = graph.compile()
+
+# run with a light tracer on the state
+final = app.invoke({&quot;task&quot;: &quot;Compare GDPR breach notification.&quot;,
+                    &quot;findings&quot;: [], &quot;draft&quot;: &quot;&quot;, &quot;research_rounds&quot;: 0})
+print(&quot;research rounds:&quot;, final[&quot;research_rounds&quot;])
+print(&quot;draft:&quot;, final[&quot;draft&quot;])
+
+# same behaviour as the by-hand team, now as an explicit graph
+assert &quot;Article 33&quot; in final[&quot;draft&quot;]
+assert final[&quot;research_rounds&quot;] &gt;= 1
+print(&quot;\nsame result as Demo A, now an explicit LangGraph.&quot;)</pre>
+  <div class="section"><span class="section-label">הסבר שורה אחר שורה</span>
+    <div class="lx-list">
+      <div class="lx"><pre class="lx-code" dir="ltr">graph = StateGraph(TeamState)</pre><div class="lx-txt">יוצר גרף חדש עם סכימת ה-state שהגדרנו. זו נקודת ההתחלה של בניית הגרף המפורש.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">graph.add_node(&quot;researcher&quot;, researcher_node)</pre><div class="lx-txt">מוסיף את צומת ה-researcher לגרף, עם שם והפונקציה שלו.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">graph.add_node(&quot;writer&quot;, writer_node)</pre><div class="lx-txt">מוסיף את צומת ה-writer לגרף.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">graph.set_entry_point(&quot;researcher&quot;)</pre><div class="lx-txt">קובע שהגרף מתחיל מצומת ה-researcher. זו נקודת הכניסה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">graph.add_conditional_edges(&quot;researcher&quot;, research_sufficient,</pre><div class="lx-txt">מוסיף קשת מותנית מ-researcher. תחילת קריאה רב-שורתית. הנתב <code>research_sufficient</code> יחליט לאן.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">                            {&quot;researcher&quot;: &quot;researcher&quot;, &quot;writer&quot;: &quot;writer&quot;})</pre><div class="lx-txt">מפת הניתוב: מה שהנתב מחזיר ממופה לצומת היעד. חזרה ל-researcher או קדימה ל-writer.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">graph.add_edge(&quot;writer&quot;, END)</pre><div class="lx-txt">מוסיף קשת רגילה מ-writer ל-END. אחרי הכתיבה, הגרף מסתיים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">app = graph.compile()</pre><div class="lx-txt">מקמפל את הגרף לאובייקט רץ. LangGraph בונה את מכונת המצבים מהצמתים והקשתות.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr"># run with a light tracer on the state</pre><div class="lx-txt">הערה: מריצים את הגרף ומתבוננים ב-state.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">final = app.invoke({&quot;task&quot;: &quot;Compare GDPR breach notification.&quot;,</pre><div class="lx-txt">מריץ את הגרף עם state התחלתי. תחילת מילון רב-שורתי.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">                    &quot;findings&quot;: [], &quot;draft&quot;: &quot;&quot;, &quot;research_rounds&quot;: 0})</pre><div class="lx-txt">ממשיך את ה-state ההתחלתי: ממצאים ריקים, טיוטה ריקה, אפס סבבים. סוגר את ה-invoke.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;research rounds:&quot;, final[&quot;research_rounds&quot;])</pre><div class="lx-txt">מדפיס כמה סבבי מחקר היו. אמור להיות 1, כי הממצאים נמצאו בסבב הראשון.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;draft:&quot;, final[&quot;draft&quot;])</pre><div class="lx-txt">מדפיס את הטיוטה הסופית מה-state.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr"># same behaviour as the by-hand team, now as an explicit graph</pre><div class="lx-txt">הערה: אותה התנהגות כמו הצוות הידני, עכשיו כגרף מפורש.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">assert &quot;Article 33&quot; in final[&quot;draft&quot;]</pre><div class="lx-txt">מוודא שהטיוטה מעוגנת, בדיוק כמו בדמו הידני.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">assert final[&quot;research_rounds&quot;] &gt;= 1</pre><div class="lx-txt">מוודא שהיה לפחות סבב מחקר אחד.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;\nsame result as Demo A, now an explicit LangGraph.&quot;)</pre><div class="lx-txt">מדפיס את המסר: אותה תוצאה, עכשיו כ-LangGraph מפורש.</div></div>
+    </div>
+  </div>
+  <div class="section output"><span class="section-label">פלט צפוי</span><pre>research rounds: 1
+draft: Under GDPR Article 33: notify within 72 hours of awareness. (see articles [33, 34]).
+
+same result as Demo A, now an explicit LangGraph.</pre></div>
+</div>
+
+<div id="s6" class="slide-card">
+  <div class="slide-header">
+    <div class="slide-num">6</div>
+    <h2>הקשת המותנית נורית פעם אחת</h2>
+    <span class="cell-badge">Cell 6</span>
+    <a class="slide-link" href="DS23_Session44_MultiAgent.html">&#9655; שקף 12 · State וקשתות מותנות</a>
+  </div>
+  <div class="code-summary">מביימים כשל אחד ב-researcher כדי לראות את הקשת המותנית מחזירה אותו למחקר.</div>
+  <div class="section jump"><span class="section-label">מתי לקפוץ</span><p>בדמו B, כדי להראות את המעגל בגרף חי.</p></div>
+  <div class="section say"><span class="section-label">שלומית מדגישה כאן:</span><p>"מבייימים researcher שנכשל פעם אחת, כדי לראות את הקשת המותנית מחזירה אותו למחקר. זו בדיוק הלולאה מ-S42, מצוירת כמעגל בגרף."</p></div>
+  <div class="section warning"><span class="section-label">שימו לב:</span><p>ה-researcher המבוים כאן הוא לצורך הדגמה בלבד. בעולם האמת התנאי לחזרה מגיע מאיכות הממצאים, לא ממונה ביקורים.</p></div>
+  <pre class="code-full" dir="ltr"># a researcher that returns empty on its first visit, then finds on the second
+_visits = {&quot;n&quot;: 0}
+def flaky_researcher(state: TeamState) -&gt; dict:
+    _visits[&quot;n&quot;] += 1
+    if _visits[&quot;n&quot;] == 1:
+        return {&quot;findings&quot;: [], &quot;research_rounds&quot;: 1}      # insufficient: edge sends it back
+    out = json.loads(role_llm(&quot;researcher&quot;, &quot;retry&quot;, state))
+    return {&quot;findings&quot;: out[&quot;findings&quot;], &quot;research_rounds&quot;: 1}
+
+g2 = StateGraph(TeamState)
+g2.add_node(&quot;researcher&quot;, flaky_researcher)
+g2.add_node(&quot;writer&quot;, writer_node)
+g2.set_entry_point(&quot;researcher&quot;)
+g2.add_conditional_edges(&quot;researcher&quot;, research_sufficient,
+                         {&quot;researcher&quot;: &quot;researcher&quot;, &quot;writer&quot;: &quot;writer&quot;})
+g2.add_edge(&quot;writer&quot;, END)
+app2 = g2.compile()
+
+final2 = app2.invoke({&quot;task&quot;: &quot;Compare GDPR breach notification.&quot;,
+                      &quot;findings&quot;: [], &quot;draft&quot;: &quot;&quot;, &quot;research_rounds&quot;: 0})
+print(&quot;research rounds (looped back once):&quot;, final2[&quot;research_rounds&quot;])
+assert final2[&quot;research_rounds&quot;] == 2      # went back exactly once
+print(&quot;conditional edge fired: the writer sent the researcher back for more.&quot;)</pre>
+  <div class="section"><span class="section-label">הסבר שורה אחר שורה</span>
+    <div class="lx-list">
+      <div class="lx"><pre class="lx-code" dir="ltr"># a researcher that returns empty on its first visit, then finds on the second</pre><div class="lx-txt">הערה: researcher מבוים שמחזיר ריק בביקור הראשון וממצאים בשני, כדי להדגים את הקשת המותנית.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">_visits = {&quot;n&quot;: 0}</pre><div class="lx-txt">מונה ביקורים חיצוני, כדי לשנות התנהגות בין הביקור הראשון לשני.</div></div>
+      <div class="lx-sub" id="s6-sub2">flaky researcher: forces the loop</div>
+      <div class="lx"><pre class="lx-code" dir="ltr">def flaky_researcher(state: TeamState) -&gt; dict:</pre><div class="lx-txt">מגדיר גרסת researcher מבוימת שנכשלת פעם אחת בכוונה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    _visits[&quot;n&quot;] += 1</pre><div class="lx-txt">מקדם את מונה הביקורים בכל כניסה לצומת.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    if _visits[&quot;n&quot;] == 1:</pre><div class="lx-txt">בביקור הראשון, מדמה מחקר לא מספק.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">        return {&quot;findings&quot;: [], &quot;research_rounds&quot;: 1}      # insufficient: edge sends it back</pre><div class="lx-txt">מחזיר ממצאים ריקים בסבב הראשון. הקשת המותנית תזהה שאין ממצאים ותחזיר לכאן שוב.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    out = json.loads(role_llm(&quot;researcher&quot;, &quot;retry&quot;, state))</pre><div class="lx-txt">בביקור השני, מבצע מחקר אמיתי ומפענח את הממצאים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    return {&quot;findings&quot;: out[&quot;findings&quot;], &quot;research_rounds&quot;: 1}</pre><div class="lx-txt">מחזיר את הממצאים וקידום המונה. עכשיו הקשת תעביר ל-writer.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx-sub" id="s6-sub9">same graph, run it</div>
+      <div class="lx"><pre class="lx-code" dir="ltr">g2 = StateGraph(TeamState)</pre><div class="lx-txt">יוצר גרף שני עם אותה סכימת state.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">g2.add_node(&quot;researcher&quot;, flaky_researcher)</pre><div class="lx-txt">מוסיף את ה-researcher המבוים כצומת.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">g2.add_node(&quot;writer&quot;, writer_node)</pre><div class="lx-txt">מוסיף את אותו צומת writer מקודם.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">g2.set_entry_point(&quot;researcher&quot;)</pre><div class="lx-txt">קובע את נקודת הכניסה ל-researcher.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">g2.add_conditional_edges(&quot;researcher&quot;, research_sufficient,</pre><div class="lx-txt">מוסיף את אותה קשת מותנית. תחילת קריאה רב-שורתית.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">                         {&quot;researcher&quot;: &quot;researcher&quot;, &quot;writer&quot;: &quot;writer&quot;})</pre><div class="lx-txt">אותה מפת ניתוב: חזרה או קדימה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">g2.add_edge(&quot;writer&quot;, END)</pre><div class="lx-txt">קשת מ-writer ל-END.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">app2 = g2.compile()</pre><div class="lx-txt">מקמפל את הגרף השני.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">final2 = app2.invoke({&quot;task&quot;: &quot;Compare GDPR breach notification.&quot;,</pre><div class="lx-txt">מריץ את הגרף השני. תחילת state התחלתי.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">                      &quot;findings&quot;: [], &quot;draft&quot;: &quot;&quot;, &quot;research_rounds&quot;: 0})</pre><div class="lx-txt">ממשיך וסוגר את ה-state ההתחלתי.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;research rounds (looped back once):&quot;, final2[&quot;research_rounds&quot;])</pre><div class="lx-txt">מדפיס את מספר הסבבים. אמור להיות 2, כי הקשת החזירה פעם אחת.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">assert final2[&quot;research_rounds&quot;] == 2      # went back exactly once</pre><div class="lx-txt">מוודא שהגרף חזר לאחור בדיוק פעם אחת. בדיקה שהקשת המותנית פעלה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;conditional edge fired: the writer sent the researcher back for more.&quot;)</pre><div class="lx-txt">מדפיס אישור שהקשת המותנית פעלה והחזירה למחקר נוסף.</div></div>
+    </div>
+  </div>
+  <div class="section output"><span class="section-label">פלט צפוי</span><pre>research rounds (looped back once): 2
+conditional edge fired: the writer sent the researcher back for more.</pre></div>
+</div>
+
+<div id="s7" class="slide-card">
+  <div class="slide-header">
+    <div class="slide-num">7</div>
+    <h2>עלות הטופולוגיה: המלכודת והאמת</h2>
+    <span class="cell-badge">Cell 7</span>
+    <a class="slide-link" href="DS23_Session44_MultiAgent.html">&#9655; שקף 16 · עלות הטופולוגיה</a>
+  </div>
+  <div class="code-summary">מחשבים את עלות הטופולוגיה: התרחיש הנאיבי המטעה מול הצוות האמיתי עם שלוש התקורות.</div>
+  <div class="section jump"><span class="section-label">מתי לקפוץ</span><p>אחרי שקף 'עלות הטופולוגיה'. זה הרגע המספרי של המפגש.</p></div>
+  <div class="section say"><span class="section-label">שלומית מדגישה כאן:</span><p>"שני תרחישים. הנאיבי נראה זול יותר, וזו מלכודת. האמיתי סופר שלושה מקורות תקורה: פרסונה מלאה לכל תפקיד, handoff שנושא הקשר, ו-orchestrator שעולה קריאות ניתוב. הצוות מתייקר."</p></div>
+  <div class="section warning"><span class="section-label">שימו לב:</span><p>המספרים כאן הם תרחיש הוראה מייצג, לא מדידה חיה. ה-assert בודק את צורת התוצאה, שהנאיבי מטעה והצוות האמיתי יקר יותר, ולא ערכים מדויקים. בכיתה אפשר להריץ חי כדי לראות שהמגמה נשמרת.</p></div>
+  <pre class="code-full" dir="ltr">def cost(cin, cout): return cin * PRICE_IN + cout * PRICE_OUT
+
+# baseline: a single agent doing the whole comparison report
+single = cost(2505, 290)
+
+# NAIVE view (the trap): split work, ignore overhead -&gt; looks cheaper
+naive_team = cost(410+835, 45+260) + cost(320+90+260, 240)
+
+# REAL team: three overhead sources counted explicitly
+FULL_PERSONA, HANDOFF = 520, 260
+real_researcher = cost((FULL_PERSONA+90)+(FULL_PERSONA+90+HANDOFF), 45+260)
+real_writer     = cost(FULL_PERSONA+90+HANDOFF, 240)
+orchestrator    = cost((FULL_PERSONA+120)+(FULL_PERSONA+120+HANDOFF), 30+30)
+real_team = real_researcher + real_writer + orchestrator
+
+# crew of 3: add a judge edge + one more routing hop
+crew = real_team + cost(FULL_PERSONA+240+HANDOFF, 90) + cost(FULL_PERSONA+120+HANDOFF, 30)
+
+for name, c in [(&quot;single agent&quot;, single), (&quot;naive team (trap)&quot;, naive_team),
+                (&quot;real team&quot;, real_team), (&quot;crew of 3&quot;, crew)]:
+    print(f&quot;{name:&lt;18} ${c*1000:&gt;5.2f} / 1k reports   {c/single:&gt;4.1f}x&quot;)
+
+print(&quot;\nthree overhead sources: full persona per role, handoff re-carries context, orchestrator routing&quot;)
+# assert on the SHAPE: naive misleads, real team costs more, crew more still
+assert naive_team &lt; single &lt; real_team &lt; crew
+print(&quot;topology costs money: every edge is an API call carrying context.&quot;)</pre>
+  <div class="section"><span class="section-label">הסבר שורה אחר שורה</span>
+    <div class="lx-list">
+      <div class="lx"><pre class="lx-code" dir="ltr">def cost(cin, cout): return cin * PRICE_IN + cout * PRICE_OUT</pre><div class="lx-txt">פונקציית עזר לחישוב עלות מטוקני קלט ופלט, באותה נוסחה מ-S42.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr"># baseline: a single agent doing the whole comparison report</pre><div class="lx-txt">הערה: הבסיס להשוואה, סוכן יחיד שמבצע את כל דוח ההשוואה לבד.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">single = cost(2505, 290)</pre><div class="lx-txt">עלות הסוכן היחיד: 2505 טוקני קלט ו-290 פלט, המספרים המאומתים מ-S42.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr"># NAIVE view (the trap): split work, ignore overhead -&gt; looks cheaper</pre><div class="lx-txt">הערה: התצוגה הנאיבית, המלכודת. מחלקת עבודה ומתעלמת מתקורה, ולכן נראית זולה יותר.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">naive_team = cost(410+835, 45+260) + cost(320+90+260, 240)</pre><div class="lx-txt">החישוב הנאיבי: מחבר עלות researcher רזה ו-writer רזה, בהנחה שכל אחד שולח רק את המינימום. זו הטעות.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr"># REAL team: three overhead sources counted explicitly</pre><div class="lx-txt">הערה: הצוות האמיתי, עם שלושה מקורות תקורה שנספרים במפורש.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">FULL_PERSONA, HANDOFF = 520, 260</pre><div class="lx-txt">שני קבועים: פרסונה מלאה של תפקיד היא 520 טוקנים, וה-handoff נושא 260 טוקני ממצאים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">real_researcher = cost((FULL_PERSONA+90)+(FULL_PERSONA+90+HANDOFF), 45+260)</pre><div class="lx-txt">עלות ה-researcher האמיתי: שתי קריאות, כל אחת נושאת את הפרסונה המלאה שלו. מקור תקורה ראשון: כל קריאה נושאת system prompt מלא.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">real_writer     = cost(FULL_PERSONA+90+HANDOFF, 240)</pre><div class="lx-txt">עלות ה-writer: קריאה אחת שנושאת את הפרסונה שלו ואת ה-handoff. מקור תקורה שני: הקשת נושאת מחדש את הממצאים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">orchestrator    = cost((FULL_PERSONA+120)+(FULL_PERSONA+120+HANDOFF), 30+30)</pre><div class="lx-txt">עלות ה-orchestrator: שתי קריאות ניתוב. מקור תקורה שלישי: עצם ההחלטה מי פועל הבא היא קריאת LLM שלא קיימת בסוכן יחיד.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">real_team = real_researcher + real_writer + orchestrator</pre><div class="lx-txt">סוכם את שלושת המרכיבים לעלות הצוות האמיתית. עכשיו היא גבוהה מהסוכן היחיד.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr"># crew of 3: add a judge edge + one more routing hop</pre><div class="lx-txt">הערה: צוות של שלושה, מוסיף קשת של judge וקפיצת ניתוב נוספת.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">crew = real_team + cost(FULL_PERSONA+240+HANDOFF, 90) + cost(FULL_PERSONA+120+HANDOFF, 30)</pre><div class="lx-txt">עלות הצוות של שלושה: הצוות האמיתי, ועוד קריאת judge שנושאת את הטיוטה והממצאים, ועוד קפיצת ניתוב.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">for name, c in [(&quot;single agent&quot;, single), (&quot;naive team (trap)&quot;, naive_team),</pre><div class="lx-txt">רץ על ארבע הקונפיגורציות להדפסת הטבלה. תחילת רשימה רב-שורתית.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">                (&quot;real team&quot;, real_team), (&quot;crew of 3&quot;, crew)]:</pre><div class="lx-txt">ממשיך את רשימת הקונפיגורציות: הצוות האמיתי והצוות של שלושה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">    print(f&quot;{name:&lt;18} ${c*1000:&gt;5.2f} / 1k reports   {c/single:&gt;4.1f}x&quot;)</pre><div class="lx-txt">מדפיס שורת טבלה: שם הקונפיגורציה, עלות לאלף דוחות, והיחס לסוכן יחיד.</div></div>
+      <div class="lx-blank"></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;\nthree overhead sources: full persona per role, handoff re-carries context, orchestrator routing&quot;)</pre><div class="lx-txt">מדפיס את שלושת מקורות התקורה, הלקח המרכזי של השקף.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr"># assert on the SHAPE: naive misleads, real team costs more, crew more still</pre><div class="lx-txt">הערה: בדיקה על צורת התוצאה, לא על ערכים מדויקים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">assert naive_team &lt; single &lt; real_team &lt; crew</pre><div class="lx-txt">מוודא את הסדר: הנאיבי מטעה ונראה זול, הצוות האמיתי יקר מהיחיד, והצוות של שלושה יקר עוד יותר. זה הלקח בשורה אחת.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;topology costs money: every edge is an API call carrying context.&quot;)</pre><div class="lx-txt">מדפיס את המסקנה: טופולוגיה עולה כסף, כל קשת היא קריאה שנושאת הקשר.</div></div>
+    </div>
+  </div>
+  <div class="section output"><span class="section-label">פלט צפוי</span><pre>single agent       $ 1.71 / 1k reports    1.0x
+naive team (trap)  $ 1.56 / 1k reports    0.9x
+real team          $ 2.77 / 1k reports    1.6x
+crew of 3          $ 4.00 / 1k reports    2.3x
+
+three overhead sources: full persona per role, handoff re-carries context, orchestrator routing
+topology costs money: every edge is an API call carrying context.</pre></div>
+</div>
+
+<div id="s8" class="slide-card">
+  <div class="slide-header">
+    <div class="slide-num">8</div>
+    <h2>העברה לדאטה שלכם: שלב 2 של המטלה</h2>
+    <span class="cell-badge">Cell 8</span>
+    <a class="slide-link" href="DS23_Session44_MultiAgent.html">&#9655; שקף 18 · הצומת השלישי fact-checker</a>
+  </div>
+  <div class="code-summary">שלב 2 של המטלה: הוספת arxiv_search חי ופיצול הסוכן האישי לשני תפקידים.</div>
+  <div class="section jump"><span class="section-label">מתי לקפוץ</span><p>בסוף המחברת, לקראת התרגול בבית.</p></div>
+  <div class="section say"><span class="section-label">שלומית מדגישה כאן:</span><p>"שלב 2 של המטלה: להוסיף arxiv_search חי לסוכן האישי, ואז לפצל אותו ל-researcher ו-writer עם handoff מאומת, בדיוק כמו כאן."</p></div>
+  <pre class="code-full" dir="ltr"># TODO (home): add a live arxiv_search tool, then split your agent into two roles:
+#   researcher: has arxiv_search (read-only), hands off structured findings
+#   writer:     has no tools, drafts from findings only
+# Validate the handoff with an assert, like assert_handoff above.
+print(&quot;Your team, your roles. See the assignment brief for Step 2.&quot;)</pre>
+  <div class="section"><span class="section-label">הסבר שורה אחר שורה</span>
+    <div class="lx-list">
+      <div class="lx"><pre class="lx-code" dir="ltr"># TODO (home): add a live arxiv_search tool, then split your agent into two roles:</pre><div class="lx-txt">הערה שמכוונת את הסטודנט לשלב הבית: להוסיף כלי arxiv_search חי ולפצל את הסוכן לשני תפקידים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">#   researcher: has arxiv_search (read-only), hands off structured findings</pre><div class="lx-txt">הערה: ה-researcher מקבל את הכלי לקריאה בלבד, ומוסר ממצאים מובנים.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">#   writer:     has no tools, drafts from findings only</pre><div class="lx-txt">הערה: ה-writer בלי כלים, מנסח מהממצאים בלבד. אותה הפרדת תפקידים מהשיעור.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr"># Validate the handoff with an assert, like assert_handoff above.</pre><div class="lx-txt">הערה: לאמת את ה-handoff עם assert, כמו <code>assert_handoff</code> מהתא למעלה.</div></div>
+      <div class="lx"><pre class="lx-code" dir="ltr">print(&quot;Your team, your roles. See the assignment brief for Step 2.&quot;)</pre><div class="lx-txt">מדפיס הפניה למפרט המטלה. זהו שלב 2 של מטלת המודול.</div></div>
+    </div>
+  </div>
+  <div class="section output"><span class="section-label">פלט צפוי</span><pre>Your team, your roles. See the assignment brief for Step 2.</pre></div>
+</div>
+
+</main>
+</div>
+<div class="floating-nav">
+  <button onclick="navSlide(-1)" title="הקודם">&#8593;</button>
+  <button onclick="navSlide(1)" title="הבא">&#8595;</button>
+  <button onclick="window.scrollTo({top:0, behavior:'smooth'})" title="לראש העמוד">&#8962;</button>
+</div>
+<script>
+const cards = document.querySelectorAll('.slide-card');
+const navLinks = document.querySelectorAll('.nav-link');
+const linkMap = {};
+navLinks.forEach(link => { linkMap[link.getAttribute('href').substring(1)] = link; });
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      navLinks.forEach(l => l.classList.remove('active'));
+      const id = entry.target.id;
+      if (linkMap[id]) { linkMap[id].classList.add('active'); linkMap[id].scrollIntoView({ block: 'nearest' }); }
+    }
+  });
+}, { rootMargin: '-20% 0px -70% 0px' });
+cards.forEach(c => { if (c.id) observer.observe(c); });
+function navSlide(direction) {
+  const arr = Array.from(document.querySelectorAll('.slide-card')).filter(c => !c.classList.contains('hidden'));
+  const sy = window.scrollY + 120; let cur = 0;
+  for (let i = 0; i < arr.length; i++) { if (arr[i].offsetTop <= sy) cur = i; else break; }
+  const ni = Math.max(0, Math.min(arr.length - 1, cur + direction));
+  arr[ni].scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowDown' || e.key === 'j') { e.preventDefault(); navSlide(1); }
+  if (e.key === 'ArrowUp' || e.key === 'k') { e.preventDefault(); navSlide(-1); }
+});
+const search = document.getElementById('search');
+search.addEventListener('input', () => {
+  const q = search.value.trim().toLowerCase();
+  document.querySelectorAll('main .slide-card').forEach(card => {
+    if (card.classList.contains('intro')) return;
+    card.classList.toggle('hidden', q.length > 0 && !card.textContent.toLowerCase().includes(q));
+  });
+});
+</script>
+</body>
+</html>

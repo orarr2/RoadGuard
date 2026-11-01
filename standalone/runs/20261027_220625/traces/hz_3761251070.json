@@ -1,0 +1,117 @@
+{
+  "verdict": {
+    "action": "standard",
+    "priority": 45,
+    "rationale": "Moderate severity defect without immediate hazard requires permanent repair within a reasonable period.",
+    "cited_sources": [
+      "segment_doc_22_14  well-managed_highway_infrastructure_combined_-_28_october_2016_amended_15_march_2017__180_c2"
+    ]
+  },
+  "approval_record": null,
+  "trace": [
+    {
+      "node": "sanitize",
+      "location_scrubbed": false,
+      "ocr_suspicious": false,
+      "reporter_text_suspicious": false
+    },
+    {
+      "node": "signal_extractor",
+      "has_text": false,
+      "mentioned": {
+        "hazard_class": null,
+        "lane_blocked": null,
+        "road_type": null
+      },
+      "contradictions": 0,
+      "urgency_claimed": false,
+      "reporter_signals": {
+        "size_cm": null,
+        "depth_cm": null,
+        "vehicles_swerving": null,
+        "standing_water": null
+      }
+    },
+    {
+      "node": "supervisor",
+      "iterations": 1,
+      "elapsed_s": 0.0,
+      "fired": false
+    },
+    {
+      "node": "profile_builder",
+      "primary_class": "D20",
+      "primary_confidence": 0.531,
+      "severity_signal": "moderate",
+      "perception_confidence": "medium"
+    },
+    {
+      "node": "supervisor",
+      "iterations": 2,
+      "elapsed_s": 4.78,
+      "fired": false
+    },
+    {
+      "speaker": "rag_retriever",
+      "content": {
+        "coverage": "direct_match",
+        "n_procedures": 3,
+        "tool_result_ids": [
+          "segment_doc_22_14  well-managed_highway_infrastructure_combined_-_28_october_2016_amended_15_march_2017__180_c2",
+          "segment_doc_24_irc.gov.in.082.2015_1_c2",
+          "segment_doc_24_irc.gov.in.082.2015_14_c30"
+        ],
+        "rag_query": "road maintenance repair standards for hazard class D20 on arterial main road: safety requirements, response procedures, repair window",
+        "rag_filter": {
+          "hazard_class": "D20",
+          "road_type": "main",
+          "k": 3
+        },
+        "passage_previews": [
+          {
+            "id": "segment_doc_22_14  well-managed_highway_infrastructure_combined_-_28_october_2016_amended_15_march_2017__180_c2",
+            "distance": 0.7871083617210388,
+            "preview": "n used,  permanent repair should be carried out within a reasonable period.   A.5.8.4. Defects that do not represent an immediate or imminent hazard or risk of "
+          },
+          {
+            "id": "segment_doc_24_irc.gov.in.082.2015_1_c2",
+            "distance": 0.7998825311660767,
+            "preview": "angements for Traffic and Safety Measures during Road  58  Maintenance \t 12.1\t Safety \tduring\tMaintenance\tWork\tin\tProgress\t 58 \t 12.2\t Road \tSigns,\tPavement\tMar"
+          },
+          {
+            "id": "segment_doc_24_irc.gov.in.082.2015_14_c30",
+            "distance": 0.8956660032272339,
+            "preview": "ed\tinitially\ton\ta\troad\ttend\tto\tget\tflattened\tout\tdue\tto\t traffic.\tBefore\tthe\trenewal\tof\tsurface\tis\tdone,\tthe\tcross\tprofile\tshould\tbe\tcorrected\tby\tmeans\t of\ta\tsu"
+          }
+        ]
+      }
+    },
+    {
+      "node": "supervisor",
+      "iterations": 3,
+      "elapsed_s": 5.72,
+      "fired": false
+    },
+    {
+      "speaker": "decision",
+      "content": {
+        "action": "standard",
+        "priority": 45,
+        "rationale": "Moderate severity defect without immediate hazard requires permanent repair within a reasonable period.",
+        "cited_sources": [
+          "segment_doc_22_14  well-managed_highway_infrastructure_combined_-_28_october_2016_amended_15_march_2017__180_c2"
+        ],
+        "source": "llm",
+        "tool_result_ids": [
+          "segment_doc_22_14  well-managed_highway_infrastructure_combined_-_28_october_2016_amended_15_march_2017__180_c2",
+          "segment_doc_24_irc.gov.in.082.2015_1_c2",
+          "segment_doc_24_irc.gov.in.082.2015_14_c30"
+        ]
+      }
+    },
+    {
+      "node": "approval_gate",
+      "approval_record": null
+    }
+  ]
+}
