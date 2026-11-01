@@ -1416,6 +1416,9 @@ section 11 for the full narrative.
 - `support=` and `other_class=` on each RAG passage line (round 11).
 - `stage seconds:` under the DONE line: seconds between the timestamped
   entries, attributed to the node that was running (round 11).
+- a ReAct step's reasoning line is the model's message text or, when that
+  is empty, the `why` argument of the tool call (round 12); "(no reasoning
+  text)" remains only when the model gave neither.
 - `llm_fallback`: counts of failed LLM calls + first three error
   strings.
 - `budget_state` on final Decision: tokens / iterations / wall-clock

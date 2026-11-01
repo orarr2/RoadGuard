@@ -3592,6 +3592,39 @@ def _tool_defaults(fn) -> set[str]:
     return set(names[len(names) - len(defaults):])
 
 
+_WHY_PROPERTY = {"type": "string", "description": "one sentence: why this tool now (shown in the live trace)"}
+_WHY_ADDENDUM = (
+    "\nEvery tool call carries a `why` argument: one sentence on why this tool "
+    "now; it is shown in the live trace."
+)
+
+
+def _with_why(schema: dict) -> dict:
+    """The tool schema the model sees: the tool's own parameters plus an
+    optional `why` (round 12, 1.11.2026). Small models rarely write a
+    sentence next to a tool call, but they fill arguments, so the reason
+    travels inside the call; the executors drop it before the function
+    runs and the trace prints it as the step's reasoning. The registry
+    schema itself is not changed (validation reads the original)."""
+    fn = dict((schema or {}).get("function") or {})
+    params = dict(fn.get("parameters") or {"type": "object", "properties": {}})
+    props = dict(params.get("properties") or {})
+    if "why" not in props:
+        props["why"] = dict(_WHY_PROPERTY)
+    params["properties"] = props
+    fn["parameters"] = params
+    return {**(schema or {}), "function": fn}
+
+
+def _step_thought(content: str | None, args) -> str:
+    """The reasoning line of a ReAct step: the model's message text, else
+    the `why` argument of the call (round 12)."""
+    text = (content or "").strip()
+    if not text and isinstance(args, dict):
+        text = str(args.get("why") or "").strip()
+    return text[:800]
+
+
 def _react_worker_rounds(
     *,
     agent_name: str,
@@ -3619,7 +3652,7 @@ def _react_worker_rounds(
     """
     if max_hops is None:
         max_hops = worker_react_max_hops()
-    schemas = [schema for (_fn, schema) in tool_registry.values()]
+    schemas = [_with_why(schema) for (_fn, schema) in tool_registry.values()]
     tools_run: dict = {}
     calls: list[dict] = []
     steps: list[dict] = []
@@ -3747,6 +3780,7 @@ def _react_worker_rounds(
                 if problems:
                     result = {"ok": False, "error": "invalid arguments: " + "; ".join(problems)}
                 else:
+                    call_args = {k: v for k, v in call_args.items() if k != "why"}
                     if varnames:
                         call_args = {k: v for k, v in call_args.items() if k in varnames}
                     try:
@@ -3772,6 +3806,7 @@ def _react_worker_rounds(
                 "content": {
                     "hop": len(calls),
                     "tool": name,
+                    "thought": _step_thought(msg.content, parsed_args),
                     "args": _short_json(parsed_args if parsed_args is not None else raw_args, 160),
                     "ok": bool(result.get("ok", False)),
                     "result": _short_json(result, 220),
@@ -3839,7 +3874,9 @@ _AUTONOMY_ADDENDA = {
 
 
 def _autonomy_prompt(agent: str, base: str) -> str:
-    return base + _AUTONOMY_ADDENDA.get(agent, "") if worker_autonomy_enabled() else base
+    if not worker_autonomy_enabled():
+        return base
+    return base + _AUTONOMY_ADDENDA.get(agent, "") + _WHY_ADDENDUM
 
 
 def _autonomy_record(parsed: dict | None, info: dict, required: tuple[str, ...]) -> dict:
@@ -4364,8 +4401,8 @@ def _build_decision_prompt() -> str:
         "Tool calls: the two read-only results you need are already in the\n"
         "message, so a tool call is normally one of the actions\n"
         "(request_additional_evidence, create_draft_work_order,\n"
-        "flag_for_urgent_review). Write one sentence of reasoning in the message\n"
-        "content (why this tool now); it is shown in the live trace.\n\n"
+        "flag_for_urgent_review). Give every tool call a `why` argument: one\n"
+        "sentence on why this tool now; it is shown in the live trace.\n\n"
         "Reply with ONLY this JSON object, no prose, no markdown fences:\n\n"
         "{\n"
         '  "reasoning": "<=60 words linking the inputs to the chosen action>",\n'
@@ -9421,7 +9458,7 @@ _UNWIRED_DECISION_TOOLS = ("rank_similarity_to_catalog", "check_recent_cluster")
 
 def _decision_tool_schemas() -> list[dict]:
     return [
-        schema
+        _with_why(schema)
         for name, (_fn, schema) in _decision_tools().items()
         if name not in _UNWIRED_DECISION_TOOLS
     ]
@@ -9789,7 +9826,7 @@ def _llm_decide_react(
                     # text)" - the model wrote none, now we at least do not
                     # truncate those that do exist. Formatter prints up to
                     # 500 chars; the content keeps the raw text (up to 800).
-                    "thought": (msg.content or "").strip()[:800],
+                    "thought": _step_thought(msg.content, args),
                     "tool": name,
                     "args": args if args is not None else raw_args,
                     "ok": bool(result.get("ok", False)),

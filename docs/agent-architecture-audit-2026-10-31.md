@@ -377,3 +377,7 @@ The owner read the r7 trace himself and named six problems; round 10/10b had alr
 | 6 | median above 90 s, no per-stage timing | `stage seconds:` under the DONE line (seconds between timestamped entries, attributed to the running node); the speed changes themselves are rounds 10 and 10b | same file |
 
 Suite after round 11: 232 tests. Rounds 10, 10b and 11 deploy together for r8, after r7 ends.
+
+## 22. Round 12 (1.11.2026, evening): the `why` argument
+
+The owner asked why the trace reads `[RAG] step 1: (no reasoning text)`. The step's reasoning line is the text the model writes next to a tool call; qwen2.5:3b through Ollama emits the `<tool_call>` block alone, so every worker and Decision step in r7 and the start of r8 had no text, and only the Decision prompt had asked for a sentence. Since a small model fills arguments far more reliably than it writes prose, every offered tool schema now carries an optional `why` argument (`_with_why`, applied when the schemas are offered; the registry schema and the validation stay unchanged), the prompts ask for one sentence in it, both executors drop it before the function runs, and the step's `thought` falls back to it (`_step_thought`). Tests: `tests/test_round12_why.py`. Deploys for r9 with whatever the owner finds in the r8 trace.

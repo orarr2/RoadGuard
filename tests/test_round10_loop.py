@@ -58,7 +58,7 @@ def test_decision_prompt_names_the_prefilled_results_and_schemas_are_shorter():
     prompt = ra._build_decision_prompt()
     assert "severity_check" in prompt and "already_run" in prompt
     schemas = ra._decision_tool_schemas()
-    assert len(json.dumps(schemas)) < 3100  # 2,933 on 1.11.2026, down from 3,485
+    assert len(json.dumps(schemas)) < 3600  # 2,933 after round 10 (from 3,485); round 12 adds the why argument to each of the five
     by_name = {s["function"]["name"]: s["function"]["description"] for s in schemas}
     assert "already in the message" in by_name["check_hazard_severity"]
     assert "already in the message" in by_name["lookup_dataset_image"]

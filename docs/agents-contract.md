@@ -510,7 +510,12 @@ sources, missing evidence). Since 1.11.2026 (round 10) the two read-only
 tools therefore cost no ReAct round; they stay in the offer, the tool
 schemas stay in the request on the final round as well (so the prompt
 prefix stays cached) and a one-line user message closes the tool budget
-before the final answer. Tool arguments are validated against the tool's
+before the final answer. Every tool call the model is offered carries an
+optional `why` argument (round 12): one sentence the trace prints as the
+step's reasoning, because a small model rarely writes text next to a tool
+call but fills arguments; the executors drop it before the function runs
+and validation reads the registry schema without it. Tool arguments are
+validated against the tool's
 JSON schema before anything runs (a missing required key, a value outside
 an enum or a number outside its range returns `invalid arguments` instead
 of a result; in r7 an empty `hazard_class` had produced a priority of 10
