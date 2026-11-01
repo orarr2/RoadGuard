@@ -4277,6 +4277,12 @@ def _build_decision_prompt() -> str:
         "contradiction: answer human_review and name it ('catalogued D20 but\n"
         "detector reports D40 at 0.65'). Never answer known_image without a\n"
         "dataset_match.\n\n"
+        "Similar catalogue photo: `similar_catalogue_photo`, when present, is a\n"
+        "different photo that merely looks alike (perceptual-hash distance and\n"
+        "similarity given). Its labels are a hint about what such defects were\n"
+        "in the past, never this photo's labels: it is not a known image and\n"
+        "not a catalogue contradiction; decide from this photo's detector,\n"
+        "text and standards.\n\n"
         "Severity: `severity_check` is the executed check_hazard_severity for this\n"
         "submission (priority, components, formula): use its priority, do not\n"
         "call the tool again.\n\n"
@@ -9084,6 +9090,39 @@ def _compact_rule_hint(rule_hint: dict) -> dict:
     return out
 
 
+def _catalogue_context_for_prompt(match: dict | None) -> dict:
+    """{dataset_match, similar_catalogue_photo} for the Decision payload: the
+    same file (sha256) is the catalogued photo; a perceptual-hash neighbour
+    is only a similar photo and is labelled as such."""
+    if not match or not match.get("found"):
+        return {"dataset_match": None, "similar_catalogue_photo": None}
+    summary = _dataset_lookup_summary(match)
+    if str(match.get("match") or "") == "sha256":
+        return {
+            "dataset_match": {"tool": "lookup_dataset_image", "already_run": True, **summary},
+            "similar_catalogue_photo": None,
+        }
+    distance = match.get("distance")
+    try:
+        similarity_pct = max(0, 100 - int(round(float(distance) * 100 / 64))) if distance is not None else None
+    except (TypeError, ValueError):
+        similarity_pct = None
+    return {
+        "dataset_match": None,
+        "similar_catalogue_photo": {
+            "note": (
+                "a DIFFERENT catalogued photo that looks alike (perceptual hash); "
+                "its labels describe that photo, not this one"
+            ),
+            "pic_id": summary.get("pic_id"),
+            "phash_distance": distance,
+            "similarity_pct": similarity_pct,
+            "its_labels": summary.get("classes"),
+            "its_recorded_prediction": summary.get("model_prediction"),
+        },
+    }
+
+
 def _decision_messages(state: RoadGuardState, rule_hint: dict) -> list[dict]:
     """System + user messages shared by the panel path and the ReAct path."""
     profile = state.get("hazard_profile") or {}
@@ -9142,11 +9181,13 @@ def _decision_messages(state: RoadGuardState, rule_hint: dict) -> list[dict]:
         # tools stay in the offer for the cases it still wants them.
         "severity_check": _severity_check_for_prompt(profile, md),
         # The catalogued image this photo matched, if any (profile_builder);
-        # the lookup already ran, the summary is its confirmed result.
-        "dataset_match": (
-            {"tool": "lookup_dataset_image", "already_run": True, **_dataset_lookup_summary(state.get("dataset_match"))}
-            if state.get("dataset_match") else None
-        ),
+        # the lookup already ran, the summary is its confirmed result. Round
+        # 10b (1.11.2026): only the same file (sha256) is `dataset_match`; a
+        # perceptual-hash neighbour is a different photo that looks alike and
+        # travels as `similar_catalogue_photo` with its distance, so the
+        # model does not read its labels as this photo's labels (in r7 it
+        # called such neighbours "catalogue contradictions" and escalated).
+        **_catalogue_context_for_prompt(state.get("dataset_match")),
         "rule_based_hint": _compact_rule_hint(rule_hint),
     }
     return [
@@ -9269,6 +9310,62 @@ def _decision_tool_schemas() -> list[dict]:
     ]
 
 
+# Keys the executor fills from the state; the model may leave them out.
+_TOOL_ARGS_FROM_STATE = ("hazard_id", "sha256", "phash")
+_FINAL_ANSWER_KEYS = ("rationale", "assessment", "cited_sources", "reasoning")
+
+
+def _validate_tool_args(schema: dict, args: dict) -> list[str]:
+    """Problems with ``args`` against the tool's JSON schema: required keys
+    missing (except the ones the executor fills), values outside an enum,
+    numbers outside their range, wrong basic types. Round 10b (1.11.2026):
+    in run r7 the model sent its final answer as check_hazard_severity
+    arguments, the tool computed a priority of 10 for the empty class and
+    the verdict carried it."""
+    fn = (schema or {}).get("function") or {}
+    params = fn.get("parameters") or {}
+    props = params.get("properties") or {}
+    problems: list[str] = []
+    for key in params.get("required") or []:
+        if key not in args and key not in _TOOL_ARGS_FROM_STATE:
+            problems.append(f"{key} is required")
+    type_checks = {
+        "string": lambda v: isinstance(v, str),
+        "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+        "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+        "boolean": lambda v: isinstance(v, bool),
+        "array": lambda v: isinstance(v, list),
+        "object": lambda v: isinstance(v, dict),
+    }
+    for key, value in args.items():
+        spec = props.get(key)
+        if not isinstance(spec, dict):
+            continue
+        expected = spec.get("type")
+        check = type_checks.get(expected)
+        if check and not check(value):
+            problems.append(f"{key} must be {expected}, got {type(value).__name__}")
+            continue
+        enum = spec.get("enum")
+        if enum and value not in enum:
+            problems.append(f"{key} must be one of {list(enum)}, got {value!r}")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            lo, hi = spec.get("minimum"), spec.get("maximum")
+            if lo is not None and value < lo:
+                problems.append(f"{key} must be >= {lo}, got {value}")
+            if hi is not None and value > hi:
+                problems.append(f"{key} must be <= {hi}, got {value}")
+    return problems
+
+
+def _looks_like_final_answer(args: dict) -> bool:
+    """True when a tool call's arguments are the verdict JSON the model was
+    asked to reply with (action plus rationale / assessment / ...)."""
+    return isinstance(args, dict) and args.get("action") in _VALID_ACTIONS and any(
+        k in args for k in _FINAL_ANSWER_KEYS
+    )
+
+
 def _run_decision_tool(name: str, args: dict, state: RoadGuardState, tools_run: dict) -> dict:
     """Execute one tool call from the LLM and return the result for the
     tool message.
@@ -9284,7 +9381,14 @@ def _run_decision_tool(name: str, args: dict, state: RoadGuardState, tools_run: 
     hazard_id = state["hazard_id"]
     if name not in _decision_tools():
         return {"ok": False, "error": f"unknown tool {name!r}"}
-    fn = _decision_tools()[name][0]
+    fn, schema = _decision_tools()[name]
+    # The unwired tools answer with their stub whatever the arguments.
+    problems = (
+        [] if name in _UNWIRED_DECISION_TOOLS
+        else _validate_tool_args(schema, args if isinstance(args, dict) else {})
+    )
+    if problems:
+        return {"ok": False, "error": "invalid arguments: " + "; ".join(problems)}
     try:
         if name == "lookup_dataset_image":
             md = state.get("metadata") or {}
@@ -9494,6 +9598,7 @@ def _llm_decide_react(
                 for i, c in enumerate(msg.tool_calls)
             ],
         })
+        misrouted_final: dict | None = None
         for i, call in enumerate(msg.tool_calls):
             call_id = call.get("id") or f"call_{len(calls) + i}"
             fn_block = call.get("function") or {}
@@ -9505,6 +9610,23 @@ def _llm_decide_react(
                     args = None
             except (json.JSONDecodeError, TypeError, ValueError):
                 args = None
+
+            if args is not None and _looks_like_final_answer(args):
+                # Round 10b (1.11.2026): the model put its verdict JSON into a
+                # tool call's arguments (r7, case 34037.webp: the tool then
+                # computed priority 10 for the empty class). The verdict is
+                # read from the arguments; nothing is executed.
+                misrouted_final = args
+                calls.append({
+                    "tool": name,
+                    "ok": False,
+                    "executed": False,
+                    "args": args,
+                    "error": "final answer arrived as a tool call; parsed as the verdict",
+                    "duration_s": 0.0,
+                })
+                info["final_in_tool_call"] = name
+                break
 
             cap_hit = hops >= DECISION_REACT_MAX_HOPS
             if budget is not None and not cap_hit:
@@ -9567,6 +9689,9 @@ def _llm_decide_react(
                 "name": name,
                 "content": _tool_result_for_model(name, result),
             })
+        if misrouted_final is not None:
+            msg = ChatMessage(finish_reason="stop", content=json.dumps(misrouted_final, ensure_ascii=False), tool_calls=[])
+            break
 
     info["hops"] = hops
     if msg is None:

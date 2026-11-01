@@ -351,3 +351,14 @@ From the comprehensive review he asked for, the owner approved items 1, 2, 3, 4,
 | 7 | Worker impact | the workers' LLM labels were merged silently | `llm_delta` on the profile_builder and rag_retriever entries; `worker_baseline` on the state; Decision records `worker_impact` (the rule tree's action with and without the workers' labels) | same file |
 
 Suite after the round: 216 tests. The build deploys for the next loop round, after r7 ends.
+
+### 20.1 Live findings in r7 (round 10b, same day)
+
+Watching the live trace during r7 (the owner asked for continuous live monitoring) showed two faults, both fixed before the round 10 deploy:
+
+| Finding | Case | Cause | Fix | Test |
+|---|---|---|---|---|
+| A verdict with `priority=10` instead of 55 | hz_403dd7849e13 (34037.webp) | the model sent its final JSON (rationale, assessment, cited_sources) as the arguments of a second `check_hazard_severity` call; the tool scored the empty class at 10 and the verdict carried it | `_validate_tool_args` checks every Decision tool call against its JSON schema (required keys except the ones the executor fills, enums, ranges, types) and returns `invalid arguments`; `_looks_like_final_answer` reads a tool call whose arguments are the verdict as the final answer and executes nothing (the unwired stub tools keep answering regardless) | `tests/test_round10b_live_fixes.py` |
+| Invented catalogue contradictions on web photos | hz_34b3e7d1f9a0, hz_e5b2736154e9, hz_ffb73fa18705 | the relaxed lookup (perceptual hash up to distance 16) and the profile builder's distance-10 hits reached the model as `dataset_match`; it read the neighbour's labels as this photo's and answered human_review or asked for evidence | `_catalogue_context_for_prompt`: only the same file (sha256) is `dataset_match`; a neighbour travels as `similar_catalogue_photo` with its distance and similarity, and the prompt says it is neither a known image nor a contradiction | same file |
+
+Suite after 10b: 221 tests. The Decision prompt is 8,241 characters (12,071 before round 9).

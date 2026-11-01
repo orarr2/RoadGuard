@@ -492,13 +492,25 @@ to the rule tree. The user message carries `hazard_profile`,
 contradictions, `urgency_claimed`, `suspicious`), `evidence_round`,
 `severity_check` (the executed `check_hazard_severity` for this
 submission, `already_run=true`), `dataset_match` as the confirmed lookup
-result when the photo is catalogued, and `rule_based_hint` (action,
+result when the photo is the same file as a catalogued one (sha256), or
+`similar_catalogue_photo` (pic_id, perceptual-hash distance, similarity
+percentage, that photo's labels and recorded prediction) when the match
+is only a look-alike, which the prompt tells the model is neither a
+known image nor a catalogue contradiction (round 10b: in r7 the model
+read such neighbours' labels as this photo's and escalated), and
+`rule_based_hint` (action,
 priority, the rationale cut to 240 characters, up to three cited
 sources, missing evidence). Since 1.11.2026 (round 10) the two read-only
 tools therefore cost no ReAct round; they stay in the offer, the tool
 schemas stay in the request on the final round as well (so the prompt
 prefix stays cached) and a one-line user message closes the tool budget
-before the final answer. When the reporter wrote text it also carries
+before the final answer. Tool arguments are validated against the tool's
+JSON schema before anything runs (a missing required key, a value outside
+an enum or a number outside its range returns `invalid arguments` instead
+of a result; in r7 an empty `hazard_class` had produced a priority of 10
+that the verdict carried), and a tool call whose arguments are the
+verdict JSON itself (`action` plus rationale / assessment) is read as the
+final answer and never executed (round 10b). When the reporter wrote text it also carries
 `reporter_claims`: `size_cm`, `depth_cm`, `vehicles_swerving`,
 `standing_water` from `reporter_signals` plus `describes` (the class,
 lane blockage and road type the text mentions). The system prompt
