@@ -1815,6 +1815,8 @@ class RoadGuardState(TypedDict, total=False):
     # evidence replaces them (round 14, 1.11.2026).
     previous_yolo: dict
     previous_metadata: dict
+    # Which decision questions the retrieved standards answer (round 16).
+    research_coverage_detail: dict
 
 
 def initial_state(
@@ -3546,8 +3548,9 @@ def _llm_react_worker(
     previous = current_deadline()
     if narrowed:
         set_deadline(deadline)
+    started_wall = time.time()
     try:
-        return _react_worker_rounds(
+        parsed, in_tok, out_tok, info = _react_worker_rounds(
             agent_name=agent_name,
             system_prompt=system_prompt,
             user_payload=user_payload,
@@ -3558,6 +3561,10 @@ def _llm_react_worker(
             time_cap_s=time_cap_s,
             deadline=deadline,
         )
+        # Round 16 (1.11.2026): the time the worker spent against its cap
+        # goes on the record, so a time_cap violation shows what was cut.
+        info["time_used_s"] = round(time.time() - started_wall, 1)
+        return parsed, in_tok, out_tok, info
     finally:
         if narrowed:
             set_deadline(previous)
@@ -3743,6 +3750,7 @@ def _react_worker_rounds(
             except (json.JSONDecodeError, TypeError, ValueError):
                 parsed_args = None
 
+            misrouted_now = False
             cap_hit = hops >= max_hops
             if cap_hit:
                 result = {
@@ -3757,7 +3765,10 @@ def _react_worker_rounds(
                 # Round 11: the reply JSON arrived as a tool call; the
                 # arguments are the reply, nothing runs.
                 misrouted_final = parsed_args
-                result = {"ok": False, "error": "final reply arrived as a tool call; used as the reply"}
+                misrouted_now = True
+                # Round 16: not a failed tool. The reply came in the wrong
+                # envelope; it is used as the reply and labelled as such.
+                result = {"ok": False, "reply_in_tool_call": True, "error": "final reply arrived as a tool call; used as the reply"}
             else:
                 fn, schema = tool_registry[name]
                 code = getattr(fn, "__code__", None)
@@ -3801,7 +3812,8 @@ def _react_worker_rounds(
             calls.append({
                 "tool": name,
                 "ok": bool(result.get("ok", False)),
-                "executed": not cap_hit and parsed_args is not None,
+                "executed": not cap_hit and parsed_args is not None and not misrouted_now,
+                "reply_in_tool_call": misrouted_now,
             })
             step = {
                 "iter": state.get("iterations", 0) + 1,
@@ -3811,6 +3823,7 @@ def _react_worker_rounds(
                     "hop": len(calls),
                     "tool": name,
                     "thought": _step_thought(msg.content, parsed_args),
+                    "reply_in_tool_call": misrouted_now,
                     # Round 15 (1.11.2026): the trace keeps what the agent
                     # saw (the tool message is cut at 2,000 characters), not
                     # a 220-character stub; the owner reads the trace.
@@ -3912,6 +3925,11 @@ def _autonomy_record(parsed: dict | None, info: dict, required: tuple[str, ...])
         "failed_tools": failed,
         "final_in_tool_call": bool(info.get("final_in_tool_call")),
         "hops": int(info.get("hops") or 0),
+        # Round 16: time spent against the cap; cut_by_cap when the loop
+        # stopped on the cap (the call in flight was cut by its timeout).
+        "time_used_s": info.get("time_used_s"),
+        "time_cap_s": info.get("time_cap_s"),
+        "cut_by_cap": bool(info.get("timed_out")),
         "violations": violations,
     }
 
@@ -8718,6 +8736,43 @@ def _autonomous_retrieval(
     return label, result, in_tok, out_tok, record
 
 
+_DECISION_QUESTIONS = {
+    "repair_window": re.compile(
+        r"\b(within \d+\s*(?:hours?|hrs|days?|weeks?)|\d+\s*(?:hours?|hrs|working days|days?|weeks?)\b|repair window|response time|"
+        r"respond(?:ed|ing)? within|time ?frame|as soon as practicable)",
+        re.IGNORECASE,
+    ),
+    "urgency": re.compile(
+        r"\b(urgent(?:ly)?|immediate(?:ly)?|emergency|priorit(?:y|ise|ize)|without delay|high[- ]risk|category 1|cat ?1)\b",
+        re.IGNORECASE,
+    ),
+    "traffic_control": re.compile(
+        r"\b(lane closure|close (?:the )?(?:lane|road)|road closure|traffic (?:control|management|arrangements?)|signage|warning signs?|"
+        r"cones?|barriers?|diversion|detour|flagg(?:er|ing)|temporary traffic)\b",
+        re.IGNORECASE,
+    ),
+    "safety_risk": re.compile(
+        r"\b(hazard(?:ous)?|danger(?:ous)?|safety|risk|injur(?:y|ies|ed)|accident|crash|vehicle damage|loss of control|skid)\b",
+        re.IGNORECASE,
+    ),
+}
+
+
+def _decision_coverage(procedures: list[dict]) -> dict:
+    """Which of the four decision questions the retrieved passages answer
+    (repair window, urgency, traffic control, safety risk), by the words in
+    the passages themselves (round 16, 1.11.2026). ``direct_match`` says the
+    retrieval found this class; this says what the standards found actually
+    tell the inspector."""
+    text = " ".join(str(p.get("passage") or "") for p in procedures or [])
+    answers = {q: bool(rx.search(text)) for q, rx in _DECISION_QUESTIONS.items()}
+    return {
+        **answers,
+        "answered": [q for q, ok in answers.items() if ok],
+        "missing": [q for q, ok in answers.items() if not ok],
+    }
+
+
 def rag_retriever_node(state: RoadGuardState) -> dict:
     """Call the RAG tool, optionally LLM-label coverage, build the handoff."""
     begin_llm_log()
@@ -8828,6 +8883,7 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
 
     base_coverage = result["coverage"]
     base_confidence = "high" if base_coverage == "direct_match" else "medium"
+    coverage_detail = _decision_coverage(result["procedures"])
 
     fb_reason: str | None = None
     if autonomous:
@@ -8892,6 +8948,7 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
             "to": "decision",
             "llm_delta": llm_delta,
             "coverage": coverage,
+            "decision_coverage": coverage_detail,
             "n_procedures": len(procedures_safe),
             "tool_result_ids": result["tool_result_ids"],
             "key_findings": findings,
@@ -8923,6 +8980,7 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
         "procedures": procedures_safe,
         "tool_result_ids": result["tool_result_ids"],
         "research_coverage": coverage,
+        "research_coverage_detail": coverage_detail,
         "worker_baseline": {
             **(state.get("worker_baseline") or {}),
             "research": {
@@ -9308,6 +9366,13 @@ def _decision_messages(state: RoadGuardState, rule_hint: dict) -> list[dict]:
             "location": md.get("location"),
         },
         "research_coverage": coverage,
+        # Round 16: what the standards found say and do not say about the
+        # four decision questions (repair window, urgency, traffic control,
+        # safety risk); a direct_match that answers none of them is thin.
+        "research_coverage_detail": {
+            k: state.get("research_coverage_detail", {}).get(k)
+            for k in ("answered", "missing")
+        } if state.get("research_coverage_detail") else None,
         "tool_result_ids": tool_result_ids[:3],  # bound prompt size
         "procedures": [
             {
@@ -9792,6 +9857,7 @@ def _llm_decide_react(
                     "tool": name,
                     "ok": False,
                     "executed": False,
+                    "reply_in_tool_call": True,
                     "args": args,
                     "error": "final answer arrived as a tool call; parsed as the verdict",
                     "duration_s": 0.0,
@@ -10194,7 +10260,10 @@ def decision_node(state: RoadGuardState) -> dict:
                     "hop": 0,
                     "tool": "lookup_dataset_image",
                     "ok": True,
-                    "note": f"relaxed catalogue hit pic_id={relaxed.get('pic_id')} dist={relaxed.get('distance')}",
+                    "note": (
+                        f"similar catalogued photo pic_id={relaxed.get('pic_id')} "
+                        f"phash distance {relaxed.get('distance')} (not the same file)"
+                    ),
                 })
         except Exception as _exc:
             LOGGER.warning("decision_relaxed_lookup_failed: %s", _exc)
@@ -10429,7 +10498,7 @@ def decision_node(state: RoadGuardState) -> dict:
             "hops": react_info.get("hops", 0),
             "calls": react_info.get("calls", []),
         }
-        for key in ("reply_kind", "reply_excerpt", "llm_failed", "deadline_hit"):
+        for key in ("reply_kind", "reply_excerpt", "llm_failed", "deadline_hit", "final_in_tool_call"):
             if react_info.get(key) is not None:
                 trace_content["react"][key] = react_info[key]
     # 27.10.2026 trace enrichment: snapshot the budget tracker on the
@@ -11070,7 +11139,8 @@ def _react_step_lines(lbl: str, c: dict) -> list[str]:
     tool_args = c.get("args")
     tool_result = c.get("result")
     duration = c.get("duration_s")
-    status = "ok" if c.get("ok") else "failed"
+    reply_in_tool_call = bool(c.get("reply_in_tool_call"))
+    status = "ok" if c.get("ok") else ("reply (JSON arrived as a tool call; used as the agent's reply, no tool ran)" if reply_in_tool_call else "failed")
     out.append(f"{_INDENT}tool attempted: {tool_name}")
     try:
         args_json = json.dumps(tool_args, ensure_ascii=False, default=str)
@@ -11085,12 +11155,28 @@ def _react_step_lines(lbl: str, c: dict) -> list[str]:
             out.append(f"{_INDENT}  duration: {float(duration):.2f}s")
         except (TypeError, ValueError):
             pass
-    if status == "ok":
+    if reply_in_tool_call:
+        pass
+    elif status == "ok":
         out.append(f"{_INDENT}  result: {_short(tool_result, 2000)}")
     else:
         err = c.get("error") or tool_result or "(no error text)"
         out.append(f"{_INDENT}  error: {_short(err, 600)}")
     return out
+
+
+def _worker_flags(c: dict) -> str:
+    """Suffix for a worker's result line (round 16): tool_failures=<n> when a
+    call the agent made failed, reply_via=tool_call when its reply arrived
+    in a tool envelope, so the result itself carries the caveat."""
+    auto = c.get("autonomy") if isinstance(c.get("autonomy"), dict) else {}
+    bits = []
+    failed = auto.get("failed_tools") or []
+    if failed:
+        bits.append(f"tool_failures={len(failed)}")
+    if auto.get("final_in_tool_call"):
+        bits.append("reply_via=tool_call")
+    return ("  " + "  ".join(bits)) if bits else ""
 
 
 def _llm_delta_lines(delta) -> list[str]:
@@ -11153,7 +11239,7 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
     elif speaker == "profile_builder":
         out.append(
             f"{lbl} class={c.get('primary_class')}  severity={c.get('severity')}  "
-            f"confidence={c.get('confidence')}  llm_used={c.get('llm_used')}"
+            f"confidence={c.get('confidence')}  llm_used={c.get('llm_used')}" + _worker_flags(c)
         )
         if c.get("llm_skipped_reason"):
             out.append(f"{_INDENT}llm skipped: {c['llm_skipped_reason']}")
@@ -11161,8 +11247,11 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
         dl = c.get("dataset_lookup")
         if isinstance(dl, dict):
             if dl.get("found"):
+                # Round 16: only the same file is a known image; a
+                # perceptual-hash neighbour is a similar image.
+                label = "KNOWN IMAGE" if str(dl.get("match") or "") == "sha256" else "SIMILAR IMAGE"
                 out.append(
-                    f"{_INDENT}dataset: KNOWN IMAGE pic_id={dl.get('pic_id')} "
+                    f"{_INDENT}dataset: {label} pic_id={dl.get('pic_id')} "
                     f"{dl.get('split')}/{dl.get('file_name')}  labels={dl.get('classes') or 'none'}  "
                     f"stored_prediction={dl.get('model_prediction') or 'none'}  "
                     f"({_match_descriptor(dl.get('match'), dl.get('distance'))})"
@@ -11173,9 +11262,16 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
     elif speaker == "rag_retriever":
         ids = [str(x) for x in (c.get("tool_result_ids") or [])]
         tool_ids[:] = ids
+        dc = c.get("decision_coverage") if isinstance(c.get("decision_coverage"), dict) else None
+        cov_bits = ""
+        if dc is not None:
+            cov_bits = (
+                f"  answers={','.join(dc.get('answered') or []) or 'none'}"
+                f"  missing={','.join(dc.get('missing') or []) or 'none'}"
+            )
         out.append(
             f"{lbl} query_repair_standards -> {c.get('n_procedures', len(ids))} passages  "
-            f"coverage={c.get('coverage')}  llm_used={c.get('llm_used')}"
+            f"coverage={c.get('coverage')}{cov_bits}  llm_used={c.get('llm_used')}" + _worker_flags(c)
         )
         # 27.10.2026 trace enrichment: show what was actually asked and what
         # came back. _short limits grew to 400+ so a passage preview up to
@@ -11221,9 +11317,19 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
         out.extend(_react_step_lines(lbl, c))
     elif speaker == "decision":
         action = str(c.get("action") or "?")
+        react_rec = c.get("react") if isinstance(c.get("react"), dict) else {}
+        n_tool_failures = sum(
+            1 for call in react_rec.get("calls") or []
+            if isinstance(call, dict) and call.get("executed") and not call.get("ok")
+        )
+        decision_flags = ""
+        if n_tool_failures:
+            decision_flags += f"  tool_failures={n_tool_failures}"
+        if react_rec.get("final_in_tool_call"):
+            decision_flags += "  reply_via=tool_call"
         out.append(
             f"{lbl} action={action.upper()}  priority={c.get('priority')}  "
-            f"source={c.get('source')}"
+            f"source={c.get('source')}" + decision_flags
         )
         dm = c.get("dataset_match")
         if isinstance(dm, dict) and dm.get("found"):
@@ -11234,6 +11340,11 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
                 f"({_match_descriptor(dm.get('match'), dm.get('distance'))})"
             )
         for call in (c.get("react") or {}).get("calls") or []:
+            if call.get("reply_in_tool_call"):
+                out.append(
+                    f"{_INDENT}reply arrived as a tool call ({call.get('tool')}); parsed as the verdict, no tool ran"
+                )
+                continue
             if call.get("ok"):
                 flag = "ok"
             elif call.get("executed"):
@@ -11468,19 +11579,30 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
         out.insert(1, _llm_line(llm))
     auto = c.get("autonomy")
     if isinstance(auto, dict):
+        # Round 16: one word per channel, so autonomy is never credited
+        # for what the code ran. agent_called = tools the agent chose and
+        # that ran; auto_ran = tools the contract ran for it; fallback = the
+        # deterministic path that stood in; failed = calls it made that
+        # failed; reply_via = how its reply arrived; time = spent / cap.
         tools = ",".join(auto.get("tools_used") or []) or "none"
         violations = ",".join(auto.get("violations") or []) or "none"
-        line = f"{_INDENT}autonomy: tools={tools}  hops={auto.get('hops', 0)}  violations={violations}"
+        line = f"{_INDENT}autonomy: agent_called={tools}  hops={auto.get('hops', 0)}"
         if auto.get("auto_ran"):
             line += f"  auto_ran={','.join(auto['auto_ran'])}"
+        if auto.get("fallback"):
+            line += f"  fallback={auto['fallback']}"
         if auto.get("failed_tools"):
             line += f"  failed={','.join(auto['failed_tools'])}"
         if auto.get("final_in_tool_call"):
-            line += "  reply_in_tool_call=yes"
-        if auto.get("fallback"):
-            line += f"  fallback={auto['fallback']}"
+            line += "  reply_via=tool_call"
+        if auto.get("time_used_s") is not None:
+            cap = auto.get("time_cap_s")
+            line += f"  time={float(auto['time_used_s']):.0f}s/{float(cap):.0f}s" if cap else f"  time={float(auto['time_used_s']):.0f}s"
+            if auto.get("cut_by_cap"):
+                line += " (cut by cap)"
         if auto.get("source"):
             line += f"  source={auto['source']}"
+        line += f"  violations={violations}"
         out.append(line)
     ts = entry.get("ts")
     if ts and out:

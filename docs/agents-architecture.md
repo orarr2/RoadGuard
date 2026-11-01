@@ -1339,7 +1339,7 @@ ROADGUARD_USE_LIVE=1 \
 ## 26-27.10.2026 - Batch audit deltas
 
 The 26.10 batch of 94 citizen images was replayed on the production
-VM against Benny's `charter_grounded_corpus` (2,433 passages). The
+VM against Benny's `charter_grounded_corpus` (2,433 passages until the evening of 1.11.2026; 3,409 since Benny's corpus of 31.10 replaced it, see the audit document, section 24). The
 following agent-layer changes landed as a result; see `PLAN.md`
 section 11 for the full narrative.
 

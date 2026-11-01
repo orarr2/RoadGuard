@@ -385,3 +385,20 @@ The owner asked why the trace reads `[RAG] step 1: (no reasoning text)`. The ste
 ## 23. Round 15 (1.11.2026, evening): the trace shows what the agent saw
 
 The owner asked why a RAG step's `result:` line ends in "A..." mid-word. The worker loop stored each step's result cut at 220 characters and its payload at 160, the step formatter printed at most 320, and the passage previews in the RAG handoff were cut at 160; the model itself had received the tool message cut at 2,000. The stored result and the printed result and passages now keep up to 2,000 characters (payloads 600), so the trace carries the passages the agent actually read. Storage grows by a few kilobytes per case. Tests: `tests/test_round15_trace_width.py`.
+
+## 24. Round 16 (1.11.2026, evening): the owner's r9 review, and Benny's new corpus
+
+The owner stopped r9 after two cases, read them, and named six items; all six were built, and the worker time cap went from 45 to 90 s at his choice.
+
+| # | His finding | Change (round 16) | Test |
+|---|---|---|---|
+| 1 | a reply JSON sent as a tool call was labelled a failed tool (`tool_call_failed`, `status: failed`) | the worker and Decision loops mark such a call `reply_in_tool_call` with `executed=false`; the step prints `status: reply (JSON arrived as a tool call; used as the agent's reply, no tool ran)`; it is no longer a `tool_call_failed` violation | `tests/test_round16_labels.py` |
+| 2 | a result that followed a tool failure read as a clean result | the result line itself carries `tool_failures=<n>` and `reply_via=tool_call` ([PROFILE], [RAG], [DECISION]) | same file |
+| 3 | autonomy metrics mixed the channels | the autonomy line reads `agent_called= hops= auto_ran= fallback= failed= reply_via= time=<used>s/<cap>s violations=`; /stats/agents already counts them apart (round 11) | same file; `tests/test_worker_autonomy.py` |
+| 4 | `time_cap` without the numbers; does the cap bite? | the cap is enforced through each call's timeout (the call in flight is cut); the record now carries `time_used_s`, `time_cap_s`, `cut_by_cap`; `policy.yaml latency.worker_time_cap_s` 45 -> 90, because two worker calls on this CPU take 15 to 45 s each | same file |
+| 5 | `direct_match` is not proof the standards answer the operational questions | `_decision_coverage` says which of four questions the retrieved passages answer (repair window, urgency, traffic control, safety risk); the RAG line prints `answers= missing=`, Decision receives `research_coverage_detail` | same file |
+| 6 | an approximate catalogue match read as a hit | `SIMILAR IMAGE` in the trace for a perceptual-hash match (`KNOWN IMAGE` only for the same file); the live note reads `similar catalogued photo pic_id=... phash distance ... (not the same file)` | same file |
+
+**Benny's corpus.** The team repository (shaisadeh/Final-Project-DS, commit 2fbdcfc of 31.10.2026 21:54) carries `Data/processed/english_vector_corpus_backup.json` (SHA256 be8b38274fcff413298cb916ed99877e14b16ca278add1a02956b3e468ed4398): 3,409 English chunks from 27 source documents (median 1,000 characters; the largest sources are Well-managed highway infrastructure, the 2024 general specification, temporary traffic arrangements, the Distress Identification Manual, IRC:82-2015), with the same id scheme as the previous corpus and no vectors. It was embedded on the VM with the application's own embedding function (ONNX all-MiniLM-L6-v2, 384 dimensions, 3 minutes) into `charter_grounded_corpus`, replacing the 2,433-chunk corpus of 26.10, whose directory the owner chose to delete. The relevance grid result is recorded with the deploy of r10.
+
+Suite after round 16: 248 tests.

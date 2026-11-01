@@ -72,7 +72,7 @@ def test_signal_agent_gets_information_gap_and_numbers_are_verified(monkeypatch)
     assert "detector" not in seen["user_payload"] and "form" not in seen["user_payload"]
     assert seen["user_payload"]["location"] == "Allenby 42"
     assert "AUTONOMOUS MODE" in seen["system_prompt"]
-    assert seen["time_cap_s"] == 45.0
+    assert seen["time_cap_s"] == 90.0  # policy latency.worker_time_cap_s, raised 1.11.2026
     # The ReAct reply is normalised like the single-call reply.
     assert parsed["mentioned"] == {"hazard_class": "D40", "lane_blocked": "partial", "road_type": None}
     sig = parsed["reporter_signals"]
@@ -285,7 +285,7 @@ def test_trace_and_stats_show_autonomy():
                          "autonomy": {"mode": "autonomous", "tools_used": ["inspect_image_quality"], "declared_tools": [],
                                       "hops": 1, "violations": ["recurrence_claim_contradicts_lookup"]}}}
     lines = ra.format_trace_lines("hz1", [entry], metadata={"class": "D40"}, verdict={"action": "standard", "priority": 10}, status="open")
-    assert any("autonomy: tools=inspect_image_quality  hops=1  violations=recurrence_claim_contradicts_lookup" in ln for ln in lines)
+    assert any("autonomy: agent_called=inspect_image_quality  hops=1  violations=recurrence_claim_contradicts_lookup" in ln for ln in lines)
     agg = api._aggregate_agent_metrics([{"agent_trace_json": json.dumps([entry]), "class": "D40"}])
     # Round 11 (1.11.2026): tools the agent called, tools the contract ran
     # for it and failed calls are counted apart.

@@ -82,7 +82,9 @@ latency:
   # Autonomous workers (AGENT_WORKER_AUTONOMY=1): a worker's ReAct loop
   # stops once it has spent this many seconds and the rule path stands, so
   # three workers with three hops each cannot eat the run's wall clock.
-  worker_time_cap_s: 45
+  # 1.11.2026 (owner): 90 s, because two calls of a worker on the CPU-only
+  # VM take 15 to 45 s each and 45 s cut one of them in most slow cases.
+  worker_time_cap_s: 90
 
 queues:
   # Operator queues. An approval pending longer than approval_sla_hours is

@@ -136,7 +136,7 @@ its timeout is not retried at all (the same prompt against the same host
 takes the same time; until 1.11.2026 the backoff repeated it up to four
 times), and the chain calls each distinct spec once. Inside an autonomous worker the
 bound is the tighter of the run deadline and the worker's
-`latency.worker_time_cap_s`; no ReAct round, worker or Decision, starts
+`latency.worker_time_cap_s` (45 s until 1.11.2026, 90 s since: two worker calls on the CPU-only VM take 15 to 45 s each, and the record carries `time_used_s`, `time_cap_s`, `cut_by_cap`); no ReAct round, worker or Decision, starts
 with under 5 s of headroom, and a Decision stopped this way reports
 `fallback_reason=run_deadline`. A 429 that signals quota
 exhaustion (Gemini "Quota exceeded ... limit", Mistral code 1300) is not

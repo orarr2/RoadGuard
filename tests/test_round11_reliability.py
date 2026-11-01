@@ -57,7 +57,9 @@ def test_worker_reply_sent_as_a_tool_call_is_used_as_the_reply(monkeypatch):
     assert parsed == reply and len(seen) == 1
     assert record == [], "nothing may run with the reply as arguments"
     assert info["final_in_tool_call"] is True and info["hops"] == 0
-    assert info["calls"][0]["ok"] is False and info["calls"][0]["executed"] is True
+    # Round 16: the reply in a tool envelope is a reply, not an executed (failed) tool.
+    assert info["calls"][0]["ok"] is False and info["calls"][0]["executed"] is False
+    assert info["calls"][0]["reply_in_tool_call"] is True
 
 
 def test_worker_tool_arguments_are_validated_and_unknown_keys_dropped(monkeypatch):
@@ -98,7 +100,7 @@ def test_autonomy_line_names_failed_tools_and_a_reply_in_a_tool_call():
                      "failed_tools": ["lookup_similar_cases"], "final_in_tool_call": True,
                      "violations": ["tool_call_failed:lookup_similar_cases"]}}}
     text = "\n".join(ra._entry_lines(entry, []))
-    assert "failed=lookup_similar_cases" in text and "reply_in_tool_call=yes" in text
+    assert "failed=lookup_similar_cases" in text and "reply_via=tool_call" in text
     assert "violations=tool_call_failed:lookup_similar_cases" in text
 
 
