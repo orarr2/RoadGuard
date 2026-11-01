@@ -211,8 +211,14 @@ isolate themselves with a temporary `ROADGUARD_DB_PATH` and
 - Input: `{ hazard_class, road_type, k=3 }`.
 - Output: `{ procedures[], tool_result_ids[], coverage }`.
 - Coverage: `direct_match` when a passage matches the hazard class and
-  the road type (or is tagged `any`), `partial_match` when the passages
-  match the class only, `no_match` when nothing comes back. ChromaDB is
+  the road type (or is tagged `any`) and, for a semantic hit, its text
+  supports this class at least as much as any other class (round 11:
+  `relevance.support` is `direct`, `weak` when another class's terms
+  dominate, `none` when the class is not named; `other_class_hits` and
+  `sentence_complete` are recorded, the summary the model reads is a
+  whole sentence up to 320 characters), `partial_match` when the passages
+  match the class only or support it weakly, `no_match` when nothing
+  comes back. ChromaDB is
   queried for class and road type first, then for the class alone. A
   Chroma query error yields `no_match`, not the in-code stub corpus.
 - Source: ChromaDB (`ROADGUARD_RAG_PATH`), seeded from
@@ -510,7 +516,23 @@ an enum or a number outside its range returns `invalid arguments` instead
 of a result; in r7 an empty `hazard_class` had produced a priority of 10
 that the verdict carried), and a tool call whose arguments are the
 verdict JSON itself (`action` plus rationale / assessment) is read as the
-final answer and never executed (round 10b). When the reporter wrote text it also carries
+final answer and never executed (round 10b). The worker loops
+(profile_builder, rag_retriever, signal_extractor) follow the same
+contract since round 11: arguments are validated against the tool's
+schema (a required key the function fills with its own default is not a
+problem), keys the function does not take are dropped instead of raising
+`TypeError`, a reply JSON sent as a tool call is used as the reply, and a
+call the worker made that failed is a `tool_call_failed:<tool>` violation
+in its autonomy record (`failed_tools`, `reply_in_tool_call` on the trace
+line). Since round 11 the model's rationale and assessment are also
+fact-checked against the inputs (`rationale_check` on the decision
+entry): reporter claims when no text was sent, a lane blockage the form
+does not state, a known-image claim without the same file, a class code
+that is neither the detector's nor a catalogue label, a priority number
+other than the verdict's. On a failure the rationale is replaced by a
+deterministic sentence built from the inputs, the verdict and the
+priority stay (the floors guard them), and the trace shows the model's
+text under the check. When the reporter wrote text it also carries
 `reporter_claims`: `size_cm`, `depth_cm`, `vehicles_swerving`,
 `standing_water` from `reporter_signals` plus `describes` (the class,
 lane blockage and road type the text mentions). The system prompt

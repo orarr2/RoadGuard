@@ -3559,6 +3559,39 @@ def _llm_react_worker(
             set_deadline(previous)
 
 
+# Keys that mark a worker's final JSON reply; a tool call whose arguments
+# carry two or more of them and none of the tool's own parameters is the
+# reply in the wrong envelope (round 11, 1.11.2026: in r7 profile_builder
+# sent severity_signal, confidence, needs_more_evidence ... as
+# lookup_similar_cases arguments and the function raised TypeError).
+_WORKER_FINAL_KEYS = {
+    "profile_builder": ("severity_signal", "severity_rationale", "confidence", "needs_more_evidence", "missing_fields", "is_recurring_location"),
+    "rag_retriever": ("coverage", "confidence", "key_findings", "cited_ids"),
+    "signal_extractor": ("summary", "contradictions", "urgency_claimed", "suspicious", "reporter_signals", "jurisdiction_hint"),
+}
+
+
+def _worker_final_in_tool_call(agent_name: str, args: dict | None, schema: dict | None) -> bool:
+    keys = _WORKER_FINAL_KEYS.get(agent_name) or ()
+    if not isinstance(args, dict) or not keys:
+        return False
+    props = (((schema or {}).get("function") or {}).get("parameters") or {}).get("properties") or {}
+    hits = sum(1 for k in keys if k in args)
+    own = sum(1 for k in args if k in props)
+    return hits >= 2 and own == 0
+
+
+def _tool_defaults(fn) -> set[str]:
+    """Parameter names the callable has defaults for (a missing required
+    key the function fills itself is not a contract problem)."""
+    code = getattr(fn, "__code__", None)
+    defaults = getattr(fn, "__defaults__", None) or ()
+    if not code or not defaults:
+        return set()
+    names = code.co_varnames[: code.co_argcount]
+    return set(names[len(names) - len(defaults):])
+
+
 def _react_worker_rounds(
     *,
     agent_name: str,
@@ -3660,6 +3693,7 @@ def _react_worker_rounds(
                 for i, c in enumerate(msg.tool_calls)
             ],
         })
+        misrouted_final: dict | None = None
         for i, call in enumerate(msg.tool_calls):
             call_id = call.get("id") or f"call_{len(calls) + i}"
             fn_block = call.get("function") or {}
@@ -3682,29 +3716,49 @@ def _react_worker_rounds(
                 result = {"ok": False, "error": "arguments were not a JSON object"}
             elif name not in tool_registry:
                 result = {"ok": False, "error": f"unknown tool {name!r}"}
+            elif _worker_final_in_tool_call(agent_name, parsed_args, tool_registry[name][1]):
+                # Round 11: the reply JSON arrived as a tool call; the
+                # arguments are the reply, nothing runs.
+                misrouted_final = parsed_args
+                result = {"ok": False, "error": "final reply arrived as a tool call; used as the reply"}
             else:
-                fn = tool_registry[name][0]
-                try:
-                    code = getattr(fn, "__code__", None)
-                    varnames = tuple(code.co_varnames[: code.co_argcount]) if code else ()
-                    call_args = parsed_args
-                    if (
-                        len(parsed_args) == 1
-                        and isinstance(next(iter(parsed_args.values())), dict)
-                        and next(iter(parsed_args)) not in varnames
-                    ):
-                        # {"payload": {a: .., b: ..}} from a small model: the
-                        # object is the argument list
-                        call_args = {k: v for k, v in next(iter(parsed_args.values())).items() if k in varnames}
-                    if "state" in varnames:
-                        raw_result = fn(state=state, **call_args)
-                    else:
-                        raw_result = fn(**call_args)
-                    result = raw_result if isinstance(raw_result, dict) else {"ok": True, "value": raw_result}
-                    hops += 1
-                    tools_run[name] = result
-                except Exception as exc:
-                    result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                fn, schema = tool_registry[name]
+                code = getattr(fn, "__code__", None)
+                varnames = tuple(code.co_varnames[: code.co_argcount]) if code else ()
+                call_args = parsed_args
+                if (
+                    len(parsed_args) == 1
+                    and isinstance(next(iter(parsed_args.values())), dict)
+                    and next(iter(parsed_args)) not in varnames
+                ):
+                    # {"payload": {a: .., b: ..}} from a small model: the
+                    # object is the argument list
+                    call_args = {k: v for k, v in next(iter(parsed_args.values())).items() if k in varnames}
+                # Round 11: the schema is the contract. A value outside an
+                # enum or range is an error the agent reads, not a TypeError
+                # in the log; a required key the function fills with its own
+                # default is not a problem; keys the function does not take
+                # are dropped.
+                defaults = _tool_defaults(fn)
+                problems = [
+                    pr for pr in _validate_tool_args(schema, call_args)
+                    if not (pr.endswith(" is required") and pr.split(" ", 1)[0] in defaults)
+                ]
+                if problems:
+                    result = {"ok": False, "error": "invalid arguments: " + "; ".join(problems)}
+                else:
+                    if varnames:
+                        call_args = {k: v for k, v in call_args.items() if k in varnames}
+                    try:
+                        if "state" in varnames:
+                            raw_result = fn(state=state, **call_args)
+                        else:
+                            raw_result = fn(**call_args)
+                        result = raw_result if isinstance(raw_result, dict) else {"ok": True, "value": raw_result}
+                        hops += 1
+                        tools_run[name] = result
+                    except Exception as exc:
+                        result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
             calls.append({
                 "tool": name,
@@ -3732,6 +3786,10 @@ def _react_worker_rounds(
                 "name": name,
                 "content": json.dumps(result, ensure_ascii=False)[:2000],
             })
+        if misrouted_final is not None:
+            info["hops"] = hops
+            info["final_in_tool_call"] = True
+            return misrouted_final, total_in, total_out, info
 
     info["hops"] = hops
     return None, total_in, total_out, info
@@ -3793,12 +3851,22 @@ def _autonomy_record(parsed: dict | None, info: dict, required: tuple[str, ...])
     declared = [str(t) for t in declared] if isinstance(declared, list) else []
     violations = [f"declared_not_run:{t}" for t in declared if t not in ran]
     violations += [f"required_not_called:{t}" for t in required if t not in ran]
+    # Round 11 (1.11.2026): a call the agent made that failed (invalid
+    # arguments, an exception) is a contract violation too; until r7 the
+    # record read violations=none over a TypeError.
+    failed = sorted({
+        str(c.get("tool")) for c in (info.get("calls") or [])
+        if c.get("executed") and not c.get("ok")
+    })
+    violations += [f"tool_call_failed:{t}" for t in failed]
     if info.get("timed_out"):
         violations.append("time_cap")
     return {
         "mode": "autonomous",
         "tools_used": ran,
         "declared_tools": declared,
+        "failed_tools": failed,
+        "final_in_tool_call": bool(info.get("final_in_tool_call")),
         "hops": int(info.get("hops") or 0),
         "violations": violations,
     }
@@ -5544,11 +5612,20 @@ def _coverage(passages: list[dict], hazard_class: str, road_type: str) -> str:
     Passages without road metadata (injected test clients) count as
     matching the road."""
     class_hits = [p for p in passages if hazard_class in p.get("hazard_types", [])]
+
+    def _direct(p: dict) -> bool:
+        # Round 11: a semantic hit counts as direct only when its text
+        # supports this class at least as much as any other; a tagged
+        # passage (metadata filter, stub corpus) keeps its tag's word.
+        rel = p.get("relevance") or {}
+        return bool(rel.get("tag_hit")) or rel.get("support") in (None, "direct")
+
+    direct = [p for p in class_hits if _direct(p)]
     road_ok = any(
         road_type in p.get("road_types", [road_type]) or "any" in p.get("road_types", [])
-        for p in class_hits
+        for p in direct
     )
-    if class_hits and road_ok:
+    if direct and road_ok:
         return "direct_match"
     return "partial_match" if passages else "no_match"
 
@@ -5596,6 +5673,21 @@ _HAZARD_REPAIR_QUERY = {
 }
 
 _SENTENCE_END_RE = re.compile(r"[.!?][\s\"')\]]")
+
+
+def _sentence_cut(text: str, limit: int) -> str:
+    """The text up to ``limit`` characters, cut at the last sentence end
+    when one lies in the second half, else at the last space with an
+    ellipsis; whitespace collapsed."""
+    t = re.sub(r"\s+", " ", text or "").strip()
+    if len(t) <= limit:
+        return t
+    head = t[:limit]
+    cut = max(head.rfind(". "), head.rfind("! "), head.rfind("? "))
+    if cut >= limit // 2:
+        return head[: cut + 1]
+    sp = head.rfind(" ")
+    return (head[:sp] if sp > 0 else head).rstrip(",;:") + "..."
 
 
 def _clean_passage_text(text: str) -> str:
@@ -5660,10 +5752,31 @@ _REPAIR_TERMS = (
 
 
 def _passage_relevance(text: str, hazard_class: str) -> dict[str, Any]:
+    """Evidence grading of one passage for the queried class. Round 11
+    (1.11.2026) adds the other classes it names, whether it is a whole
+    sentence, and a support level: ``direct`` names this class at least as
+    often as any other class, ``weak`` names it but another class dominates
+    (a D00 query answered by an alligator-cracking passage), ``none`` does
+    not name it."""
     low = (text or "").lower()
+    # The strongest term per class, not the sum: "longitudinal crack" and
+    # "longitudinal" are the same mentions.
+    counts = {cls: max((low.count(t) for t in terms), default=0) for cls, terms in _CLASS_EVIDENCE_TERMS.items()}
+    own = counts.get(hazard_class, 0)
+    others = {cls: n for cls, n in counts.items() if cls != hazard_class and n > 0}
+    stripped = (text or "").strip()
+    if own == 0:
+        support = "none"
+    elif others and max(others.values()) > own:
+        support = "weak"
+    else:
+        support = "direct"
     return {
-        "class_keyword_hit": any(t in low for t in _CLASS_EVIDENCE_TERMS.get(hazard_class, ())),
+        "class_keyword_hit": own > 0,
         "repair_term_hit": any(t in low for t in _REPAIR_TERMS),
+        "other_class_hits": sorted(others),
+        "sentence_complete": bool(stripped) and stripped[0].isupper() and stripped[-1] in ".!?\"')",
+        "support": support,
     }
 
 
@@ -6982,7 +7095,7 @@ PERCEPTION_WORKER_TOOLS: dict = {
                     "type": "object",
                     "properties": {
                         "location": {"type": "string"},
-                        "hazard_class": {"type": "string"},
+                        "hazard_class": {"type": "string", "enum": ["D00", "D10", "D20", "D40"]},
                     },
                     "required": ["hazard_class"],
                 },
@@ -8383,7 +8496,9 @@ def _quarantine_extract(passage_text: str) -> dict:
             "severe" if "severe" in lower or "immediate" in lower else "routine"
         ),
         "requires_signage": "signage" in lower,
-        "trimmed_summary": text[:160],
+        # Round 11: a whole sentence up to 320 characters instead of the
+        # first 160 characters cut anywhere (the model read half sentences).
+        "trimmed_summary": _sentence_cut(text, 320),
     }
 
 
@@ -8642,6 +8757,8 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
             "score": p.get("score"),
             "class_hit": rel.get("class_keyword_hit"),
             "repair_hit": rel.get("repair_term_hit"),
+            "support": rel.get("support"),
+            "other_class": rel.get("other_class_hits"),
             "preview": text,
         })
 
@@ -9799,6 +9916,112 @@ def _phrase_evidence_request(
 # ---------------------------------------------------------------------------
 
 
+_REPORTER_ATTRIBUTION_RE = re.compile(
+    r"\breporter'?s?\b[^.;]{0,40}\b(claim|claims|claimed|said|says|stated|states|describ\w*|"
+    r"report(?:ed|s)|mention\w*|text|description|words)\b"
+    r"|\baccording to the (?:reporter|citizen|user)\b"
+    r"|\b(?:citizen|user)'?s? (?:claim|report|description)s?\b",
+    re.IGNORECASE,
+)
+_KNOWN_IMAGE_WORDS_RE = re.compile(
+    r"\b(known image|catalogued (?:image|photo)|same (?:image|photo|file)|identical (?:image|photo))\b",
+    re.IGNORECASE,
+)
+_CATALOG_WORDS_RE = re.compile(r"\bcatalog(?:ue)?(?:d|ed)?\b", re.IGNORECASE)
+_LANE_BLOCKED_RE = re.compile(
+    r"\b(lane (?:is )?(?:partially |fully )?blocked|blocking (?:the |a )?lane|blocks (?:the |a )?lane|"
+    r"partial(?:ly)? block\w*|full(?:y)? block\w*|lane blockage|affects the vehicle path|in the (?:driving|vehicle) path)\b",
+    re.IGNORECASE,
+)
+_NO_LANE_RE = re.compile(
+    r"\b(no lane blockage|lane (?:is )?not blocked|without (?:a )?lane blockage|does not block|not blocking|no blockage)\b",
+    re.IGNORECASE,
+)
+_PRIORITY_TEXT_RE = re.compile(r"\bpriority(?: of| is|:|=)? (\d{1,3})\b", re.IGNORECASE)
+_CLASS_CODE_RE = re.compile(r"\bD(?:00|10|20|40)\b")
+_ACTION_PHRASE = {
+    "urgent": "urgent dispatch",
+    "standard": "routine repair queue",
+    "needs_more_evidence": "one more photo requested",
+    "human_review": "routed to a human",
+    "known_image": "catalogued reference image",
+}
+
+
+def _verify_decision_rationale(decision: dict, state: dict) -> dict:
+    """Round 11 (1.11.2026): the model's rationale and assessment are checked
+    against the inputs the way the supervisor note is. A claim the inputs
+    do not carry is a problem: reporter claims when no text was sent, a
+    lane blockage the form does not state, a known-image claim without the
+    same file, a class code that is neither the detector's nor a catalogue
+    label, a priority number other than the verdict's. In r7 the model
+    wrote "the reporter's claims are consistent" on photos with no text,
+    and the grounding check (citations only) passed."""
+    text = " ".join(str(decision.get(k) or "") for k in ("rationale", "assessment"))
+    problems: list[str] = []
+    intake = state.get("reporter_intake") or {}
+    md = state.get("metadata") or {}
+    has_text = bool(intake.get("text")) or bool(str(md.get("reporter_text") or "").strip())
+    if not has_text and _REPORTER_ATTRIBUTION_RE.search(text):
+        problems.append("reporter_claims_without_text")
+    lane = str(md.get("lane_blocked") or "none")
+    if lane == "none" and _LANE_BLOCKED_RE.search(text) and not _NO_LANE_RE.search(text):
+        problems.append("lane_blockage_not_in_form")
+    if lane != "none" and _NO_LANE_RE.search(text):
+        problems.append(f"lane_free_claim_but_form_says_{lane}")
+    match = state.get("dataset_match") or {}
+    if _KNOWN_IMAGE_WORDS_RE.search(text) and str(match.get("match") or "") != "sha256":
+        problems.append("known_image_claim_without_sha256_match")
+    elif _CATALOG_WORDS_RE.search(text) and not match:
+        problems.append("catalogue_claim_without_match")
+    profile = state.get("hazard_profile") or {}
+    allowed = {str(profile.get("primary_class") or "")}
+    allowed |= {c.strip().upper() for c in str(match.get("classes") or "").split(",") if c.strip()}
+    pred = match.get("model_prediction")
+    if isinstance(pred, dict) and pred.get("top1_class"):
+        allowed.add(str(pred["top1_class"]))
+    for sec in profile.get("secondary_classes") or []:
+        if isinstance(sec, dict) and sec.get("class"):
+            allowed.add(str(sec["class"]))
+    foreign = sorted({c for c in _CLASS_CODE_RE.findall(text) if c not in allowed})
+    if foreign:
+        problems.append("class_not_in_inputs:" + ",".join(foreign))
+    m = _PRIORITY_TEXT_RE.search(text)
+    if m and decision.get("priority") is not None and int(m.group(1)) != int(decision.get("priority")):
+        problems.append(f"priority_text_{m.group(1)}_vs_{int(decision.get('priority'))}")
+    return {"ok": not problems, "problems": problems}
+
+
+def _deterministic_rationale(decision: dict, state: dict) -> str:
+    """Plain sentence from the inputs, used when the model's rationale
+    failed the fact-check (the verdict and the priority stay)."""
+    profile = state.get("hazard_profile") or {}
+    md = state.get("metadata") or {}
+    action = str(decision.get("action") or "?")
+    cls = profile.get("primary_class") or "?"
+    try:
+        conf = float(profile.get("primary_confidence") or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    bits = [
+        f"{_ACTION_PHRASE.get(action, action)} for {cls} at detector confidence {conf:.2f} "
+        f"on a {md.get('road_type') or '?'} road, lane {md.get('lane_blocked') or 'none'}"
+    ]
+    match = state.get("dataset_match") or {}
+    if match.get("found"):
+        if str(match.get("match") or "") == "sha256":
+            bits.append(f"the photo is catalogued (pic_id={match.get('pic_id')}, labels {match.get('classes') or 'none'})")
+        else:
+            bits.append(
+                f"a similar catalogued photo exists (pic_id={match.get('pic_id')}, phash distance {match.get('distance')}), not the same file"
+            )
+    if state.get("research_coverage"):
+        bits.append(f"research coverage {state.get('research_coverage')}")
+    intake = state.get("reporter_intake") or {}
+    bits.append("reporter text present" if intake.get("text") else "no reporter text")
+    return "; ".join(bits) + "."
+
+
 def _llm_fallback_reason(react_info: dict | None) -> str:
     """Why the rule tree decided instead of the model: one slug per cause
     (round 10, 1.11.2026; until then every cause read
@@ -10031,6 +10254,16 @@ def decision_node(state: RoadGuardState) -> dict:
 
     decision["assessment"] = assessment
     decision, cap_applied = _apply_evidence_cap(decision, state)
+    # Round 11: the model's own rationale is checked against the inputs;
+    # a rationale that states something the inputs do not carry is
+    # replaced by a deterministic sentence (the verdict and the priority
+    # stay, the floors already guard them) and the trace shows both.
+    rationale_check: dict | None = None
+    if llm_decision is not None and overridden_llm_verdict is None:
+        rationale_check = _verify_decision_rationale(decision, state)
+        if not rationale_check["ok"]:
+            rationale_check["model_rationale"] = str(decision.get("rationale") or "")[:500]
+            decision["rationale"] = _deterministic_rationale(decision, state)
 
     hazard_id = state["hazard_id"]
     tools_run = (react_info or {}).get("tools_run") or {}
@@ -10080,6 +10313,8 @@ def decision_node(state: RoadGuardState) -> dict:
         trace_content["fallback_reason"] = fallback_reason
     if worker_impact:
         trace_content["worker_impact"] = worker_impact
+    if rationale_check is not None:
+        trace_content["rationale_check"] = rationale_check
     trace_content["cite_support"] = _cite_support_map(decision.get("cited_sources") or [], state)
     if decision["action"] == "known_image":
         trace_content["dataset_match"] = _dataset_lookup_summary(state.get("dataset_match"))
@@ -10877,6 +11112,10 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
                 score_bits.append(f"class_hit={pv.get('class_hit')}")
             if pv.get("repair_hit") is not None:
                 score_bits.append(f"repair_hit={pv.get('repair_hit')}")
+            if pv.get("support"):
+                score_bits.append(f"support={pv.get('support')}")
+            if pv.get("other_class"):
+                score_bits.append(f"other_class={','.join(str(x) for x in pv['other_class'])}")
             score_str = ("  " + "  ".join(score_bits)) if score_bits else ""
             text = pv.get("preview") or ""
             out.append(f"{_INDENT}- {pid}{score_str}")
@@ -10972,6 +11211,17 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
         out.append(f"{_INDENT}rationale: {_short(rat_main, 500)}")
         if um:
             out.append(f"{_INDENT}uncertainty: {_short(um.group(1).strip(), 300)}")
+        rc = c.get("rationale_check")
+        if isinstance(rc, dict):
+            if rc.get("ok"):
+                out.append(f"{_INDENT}rationale check: ok")
+            else:
+                out.append(
+                    f"{_INDENT}rationale check: FAIL ({', '.join(rc.get('problems') or [])}); "
+                    "deterministic sentence shown, model text below"
+                )
+                if rc.get("model_rationale"):
+                    out.append(f"{_INDENT}  model rationale: {_short(rc['model_rationale'], 400)}")
         cited = [str(x) for x in (c.get("cited_sources") or [])]
         out.append(f"{_INDENT}cited_sources={cited}")
         # 27.10.2026 trace enrichment: per-source grounding breakdown so
@@ -11131,6 +11381,10 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
         line = f"{_INDENT}autonomy: tools={tools}  hops={auto.get('hops', 0)}  violations={violations}"
         if auto.get("auto_ran"):
             line += f"  auto_ran={','.join(auto['auto_ran'])}"
+        if auto.get("failed_tools"):
+            line += f"  failed={','.join(auto['failed_tools'])}"
+        if auto.get("final_in_tool_call"):
+            line += "  reply_in_tool_call=yes"
         if auto.get("fallback"):
             line += f"  fallback={auto['fallback']}"
         if auto.get("source"):
@@ -11199,7 +11453,28 @@ def format_trace_lines(
         if stamps:
             done = f"{_clock(max(stamps))} {done}"
         lines.append(done)
+        stages = _stage_seconds(trace or [])
+        if stages:
+            lines.append(
+                f"{_INDENT}stage seconds: "
+                + "  ".join(f"{sp}={secs:.0f}" for sp, secs in stages.items() if secs >= 0.5)
+            )
     return lines
+
+
+def _stage_seconds(trace: list[dict]) -> dict[str, float]:
+    """Seconds between consecutive timestamped entries, attributed to the
+    speaker of the later entry (the node that was running); round 11, so a
+    slow case shows which stage took the time."""
+    stamped = sorted(
+        (float(e["ts"]), str(e.get("speaker") or "?"))
+        for e in trace or []
+        if isinstance(e, dict) and e.get("ts") and e.get("kind") != "llm_call"
+    )
+    out: dict[str, float] = {}
+    for (t0, _sp0), (t1, sp1) in zip(stamped, stamped[1:]):
+        out[sp1] = out.get(sp1, 0.0) + max(0.0, t1 - t0)
+    return out
 
 
 def _p(line: str = "") -> None:

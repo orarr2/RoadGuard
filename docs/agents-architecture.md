@@ -1409,6 +1409,13 @@ section 11 for the full narrative.
   changed against the deterministic labels) and `worker_impact` on
   Decision (the rule tree's action with and without those labels)
   (round 10).
+- `rationale check: ok | FAIL (...)` under the Decision rationale, with
+  the model's text when the deterministic sentence replaced it (round 11).
+- `failed=` and `reply_in_tool_call=yes` on a worker's autonomy line
+  (round 11).
+- `support=` and `other_class=` on each RAG passage line (round 11).
+- `stage seconds:` under the DONE line: seconds between the timestamped
+  entries, attributed to the node that was running (round 11).
 - `llm_fallback`: counts of failed LLM calls + first three error
   strings.
 - `budget_state` on final Decision: tokens / iterations / wall-clock

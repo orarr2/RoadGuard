@@ -2307,15 +2307,27 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
             if isinstance(auto, dict):
                 # Autonomous workers: runs, tool calls made, contract
                 # violations found by verification, and clean runs.
-                a = autonomy.setdefault(speaker or "?", {"runs": 0, "tool_calls": 0, "violations": 0, "clean_runs": 0, "auto_ran": 0})
+                # Round 11 (1.11.2026): agent_called = tools the agent chose
+                # and that ran, auto_ran_tools = tools the contract ran for
+                # it, tool_failures = calls it made that failed; the three
+                # are counted apart so autonomy is not credited for what
+                # the code did.
+                a = autonomy.setdefault(speaker or "?", {
+                    "runs": 0, "tool_calls": 0, "agent_called": 0, "auto_ran": 0, "auto_ran_tools": 0,
+                    "tool_failures": 0, "violations": 0, "clean_runs": 0,
+                })
                 a["runs"] += 1
-                a["tool_calls"] += len(auto.get("tools_used") or [])
+                n_called = len(auto.get("tools_used") or [])
+                a["tool_calls"] += n_called
+                a["agent_called"] += n_called
                 n_viol = len(auto.get("violations") or [])
                 a["violations"] += n_viol
                 if n_viol == 0:
                     a["clean_runs"] += 1
                 if auto.get("auto_ran"):
                     a["auto_ran"] += 1
+                    a["auto_ran_tools"] += len(auto.get("auto_ran") or [])
+                a["tool_failures"] += len(auto.get("failed_tools") or [])
         if had_fallback:
             llm_fallback_runs += 1
     return {

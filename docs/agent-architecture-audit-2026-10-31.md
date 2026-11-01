@@ -362,3 +362,18 @@ Watching the live trace during r7 (the owner asked for continuous live monitorin
 | Invented catalogue contradictions on web photos | hz_34b3e7d1f9a0, hz_e5b2736154e9, hz_ffb73fa18705 | the relaxed lookup (perceptual hash up to distance 16) and the profile builder's distance-10 hits reached the model as `dataset_match`; it read the neighbour's labels as this photo's and answered human_review or asked for evidence | `_catalogue_context_for_prompt`: only the same file (sha256) is `dataset_match`; a neighbour travels as `similar_catalogue_photo` with its distance and similarity, and the prompt says it is neither a known image nor a contradiction | same file |
 
 Suite after 10b: 221 tests. The Decision prompt is 8,241 characters (12,071 before round 9).
+
+## 21. Round 11 (1.11.2026, evening): the owner's reliability round
+
+The owner read the r7 trace himself and named six problems; round 10/10b had already covered two of them (the second `check_hazard_severity` call with the verdict as arguments, and the Decision tool contracts). He asked for a reliability round before any new capability, and for r8 to run only once it is deployed together with rounds 10 and 10b.
+
+| # | His finding | Change (round 11) | Test |
+|---|---|---|---|
+| 1 | `TypeError: _tool_lookup_similar_cases_worker() got an unexpected keyword argument 'severity_signal'` with `violations=none` | the worker loop applies the Decision contract: `_validate_tool_args` against the tool schema (a required key the function fills itself is fine), keys the function does not take are dropped, a reply JSON sent as a tool call (`_worker_final_in_tool_call`, two or more reply keys and none of the tool's) is used as the reply, and `_autonomy_record` adds `tool_call_failed:<tool>` plus `failed_tools`; the worker `lookup_similar_cases` schema gets the class enum | `tests/test_round11_reliability.py` |
+| 2 | "The reporter's claims are consistent with the detector" on a photo with `has_text=False`; grounding (citations) passed | `_verify_decision_rationale` checks rationale and assessment against the inputs (reporter attribution without text, lane blockage not in the form, known-image wording without sha256, class codes outside the inputs, a priority number other than the verdict's); on a failure `_deterministic_rationale` replaces the text, the verdict and priority stay, the trace prints `rationale check: FAIL (...)` and the model's text | same file |
+| 3 | `check_hazard_severity` twice, priority 10 | round 10b (schema validation, verdict-in-tool-call) | `tests/test_round10b_live_fixes.py` |
+| 4 | autonomy metrics mix what the agent chose with what the code ran | `/stats/agents` counts `agent_called`, `auto_ran_tools` and `tool_failures` apart; the trace line shows `failed=` and `reply_in_tool_call=yes` | same file; `tests/test_worker_autonomy.py` |
+| 5 | `direct_match` almost automatic, cut texts, D20 passages for D00 queries | `_passage_relevance` grades `support` (direct / weak / none) from the strongest class term against the other classes' terms and records `other_class_hits` and `sentence_complete`; `_coverage` gives `direct_match` only on direct support (tagged passages keep their tag); the summary the model reads is a whole sentence up to 320 characters (`_sentence_cut`) instead of the first 160 characters; the trace prints `support=` and `other_class=` per passage | same file |
+| 6 | median above 90 s, no per-stage timing | `stage seconds:` under the DONE line (seconds between timestamped entries, attributed to the running node); the speed changes themselves are rounds 10 and 10b | same file |
+
+Suite after round 11: 232 tests. Rounds 10, 10b and 11 deploy together for r8, after r7 ends.

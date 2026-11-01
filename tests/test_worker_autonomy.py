@@ -287,4 +287,9 @@ def test_trace_and_stats_show_autonomy():
     lines = ra.format_trace_lines("hz1", [entry], metadata={"class": "D40"}, verdict={"action": "standard", "priority": 10}, status="open")
     assert any("autonomy: tools=inspect_image_quality  hops=1  violations=recurrence_claim_contradicts_lookup" in ln for ln in lines)
     agg = api._aggregate_agent_metrics([{"agent_trace_json": json.dumps([entry]), "class": "D40"}])
-    assert agg["autonomy"] == {"profile_builder": {"runs": 1, "tool_calls": 1, "violations": 1, "clean_runs": 0, "auto_ran": 0}}
+    # Round 11 (1.11.2026): tools the agent called, tools the contract ran
+    # for it and failed calls are counted apart.
+    assert agg["autonomy"] == {"profile_builder": {
+        "runs": 1, "tool_calls": 1, "agent_called": 1, "auto_ran": 0, "auto_ran_tools": 0,
+        "tool_failures": 0, "violations": 1, "clean_runs": 0,
+    }}
