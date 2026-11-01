@@ -1419,6 +1419,9 @@ section 11 for the full narrative.
 - a ReAct step's reasoning line is the model's message text or, when that
   is empty, the `why` argument of the tool call (round 12); "(no reasoning
   text)" remains only when the model gave neither.
+- tool payloads, tool results and RAG passages print at the length the
+  agent saw, up to 2,000 characters, instead of 160 / 220 / 320-character
+  stubs (round 15).
 - `llm_fallback`: counts of failed LLM calls + first three error
   strings.
 - `budget_state` on final Decision: tokens / iterations / wall-clock

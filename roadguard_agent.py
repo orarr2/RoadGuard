@@ -3811,9 +3811,12 @@ def _react_worker_rounds(
                     "hop": len(calls),
                     "tool": name,
                     "thought": _step_thought(msg.content, parsed_args),
-                    "args": _short_json(parsed_args if parsed_args is not None else raw_args, 160),
+                    # Round 15 (1.11.2026): the trace keeps what the agent
+                    # saw (the tool message is cut at 2,000 characters), not
+                    # a 220-character stub; the owner reads the trace.
+                    "args": _short_json(parsed_args if parsed_args is not None else raw_args, 600),
                     "ok": bool(result.get("ok", False)),
-                    "result": _short_json(result, 220),
+                    "result": _short_json(result, 2000),
                 },
             }
             steps.append(step)
@@ -8791,8 +8794,10 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
     passage_previews = []
     for p in result["procedures"]:
         text = str(p.get("passage") or "").strip().replace("\n", " ")
-        if len(text) > 160:
-            text = text[:157] + "..."
+        # Round 15: the passage as retrieved, up to 2,000 characters (it was
+        # cut at 160, so the trace never showed what the agent cited).
+        if len(text) > 2000:
+            text = text[:1997] + "..."
         rel = p.get("relevance") or {}
         passage_previews.append({
             "id": (p.get("article_ids") or ["?"])[0],
@@ -11071,7 +11076,9 @@ def _react_step_lines(lbl: str, c: dict) -> list[str]:
         args_json = json.dumps(tool_args, ensure_ascii=False, default=str)
     except Exception:
         args_json = str(tool_args)
-    out.append(f"{_INDENT}  payload: {_short(args_json, 320)}")
+    # Round 15 (1.11.2026): payload and result print at the length the
+    # agent saw (up to 2,000 characters), not a 320-character stub.
+    out.append(f"{_INDENT}  payload: {_short(args_json, 600)}")
     out.append(f"{_INDENT}  status: {status}")
     if duration is not None:
         try:
@@ -11079,10 +11086,10 @@ def _react_step_lines(lbl: str, c: dict) -> list[str]:
         except (TypeError, ValueError):
             pass
     if status == "ok":
-        out.append(f"{_INDENT}  result: {_short(tool_result, 320)}")
+        out.append(f"{_INDENT}  result: {_short(tool_result, 2000)}")
     else:
         err = c.get("error") or tool_result or "(no error text)"
-        out.append(f"{_INDENT}  error: {_short(err, 320)}")
+        out.append(f"{_INDENT}  error: {_short(err, 600)}")
     return out
 
 
