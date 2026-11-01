@@ -112,7 +112,12 @@ _STATE_NO_TEXT = {
 def test_rationale_check_flags_claims_the_inputs_do_not_carry():
     dec = {"action": "standard", "priority": 45, "rationale": "The reporter's claims are consistent with the detector's class.", "assessment": ""}
     check = ra._verify_decision_rationale(dec, _STATE_NO_TEXT)
-    assert check == {"ok": False, "problems": ["reporter_claims_without_text"]}
+    assert check["ok"] is False and check["problems"] == ["reporter_claims_without_text"]
+    assert check["rationale_problems"] == ["reporter_claims_without_text"] and check["assessment_problems"] == []
+    only_assessment = {"action": "standard", "priority": 45, "rationale": "D40 pothole on main road; routine repair.",
+                       "assessment": "The reporter's claims are consistent with the pothole."}
+    split = ra._verify_decision_rationale(only_assessment, _STATE_NO_TEXT)
+    assert split["rationale_problems"] == [] and split["assessment_problems"] == ["reporter_claims_without_text"]
     with_text = {**_STATE_NO_TEXT, "reporter_intake": {"text": "big hole, cars swerve"}}
     assert ra._verify_decision_rationale(dec, with_text)["ok"] is True
 
@@ -131,6 +136,8 @@ def test_rationale_check_flags_claims_the_inputs_do_not_carry():
 
     known = {"action": "standard", "priority": 45, "rationale": "This is a known image in the catalogue.", "assessment": ""}
     assert ra._verify_decision_rationale(known, with_match)["problems"] == ["known_image_claim_without_sha256_match"]
+    similar_ok = {"action": "standard", "priority": 45, "rationale": "The catalogued photo is similar but not the same file.", "assessment": ""}
+    assert ra._verify_decision_rationale(similar_ok, with_match)["ok"] is True
     sha = {**with_match, "dataset_match": {**with_match["dataset_match"], "match": "sha256", "distance": 0}}
     assert ra._verify_decision_rationale(known, sha)["ok"] is True
     catalog = {"action": "standard", "priority": 45, "rationale": "catalog matches this pothole", "assessment": ""}
@@ -157,6 +164,10 @@ def test_trace_lines_show_the_rationale_check():
     text = "\n".join(ra._entry_lines(failed, []))
     assert "rationale check: FAIL (reporter_claims_without_text); deterministic sentence shown" in text
     assert "model rationale: The reporter's claims are consistent" in text
+    both = {"speaker": "decision", "kind": "final", "content": {
+        "action": "standard", "priority": 45, "source": "llm_react", "rationale": "deterministic", "cited_sources": [],
+        "rationale_check": {"ok": False, "problems": ["reporter_claims_without_text"], "model_assessment": "The reporter's claims are unverified"}}}
+    assert "model assessment: The reporter's claims are unverified" in "\n".join(ra._entry_lines(both, []))
     ok = {"speaker": "decision", "kind": "final", "content": {"action": "standard", "priority": 45, "source": "llm_react",
                                                               "rationale": "fine", "cited_sources": [], "rationale_check": {"ok": True, "problems": []}}}
     assert "rationale check: ok" in "\n".join(ra._entry_lines(ok, []))

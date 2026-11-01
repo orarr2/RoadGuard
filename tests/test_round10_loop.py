@@ -52,6 +52,9 @@ def test_decision_payload_carries_the_deterministic_tool_results():
     assert "source_url" not in payload["procedures"][0]
     without_match = json.loads(ra._decision_messages({**_STATE, "dataset_match": None}, _HINT)[1]["content"])
     assert without_match["dataset_match"] is None
+    # Round 13: no reporter text is said explicitly, not left as null.
+    assert without_match["reporter_intake"] == {"text_present": False, "note": "no reporter text was sent: there are no reporter claims to weigh or mention"}
+    assert "text_present is false" in ra._build_decision_prompt()
 
 
 def test_decision_prompt_names_the_prefilled_results_and_schemas_are_shorter():
