@@ -105,7 +105,7 @@ await_evidence -> sanitize  (resumed run)
 | `supervisor` | no | `state["budget"]` | `guard_fired`, routing | - |
 | `perception` | opt-in: one call only with `AGENT_PROFILE_BUILDER_LLM=1` (default `0`, section 6) | `yolo_output`, `image_quality`, `metadata` | `hazard_profile`, `perception_confidence`, `similar_cases` | `lookup_similar_cases` |
 | `research` | opt-in: one call only with `AGENT_RAG_RETRIEVER_LLM=1` (default `0`, section 6) | `hazard_profile`, `road_type` | `procedures`, `tool_result_ids`, `research_coverage` | `query_repair_standards` |
-| `decision` | panel (3 providers) or ReAct loop; production: single-provider ReAct against `ollama:qwen2.5:3b` | everything above, `reporter_intake`, `reporter_signals`, `evidence_round` | `action`, `rationale`, `priority`, `cited_sources`, `assessment`, `evidence_request` | 4 action tools (`check_hazard_severity`, `request_additional_evidence`, `create_draft_work_order`, `flag_for_urgent_review`) + 4 read-only tools (`lookup_dataset_image`, `rank_similarity_to_catalog`, `check_system_health`, `check_recent_cluster`) |
+| `decision` | panel (3 providers) or ReAct loop; production: single-provider ReAct against `ollama:qwen2.5:3b` | everything above, `reporter_intake`, `reporter_signals`, `evidence_round` | `action`, `rationale`, `priority`, `cited_sources`, `assessment`, `evidence_request` | 4 action tools (`check_hazard_severity`, `request_additional_evidence`, `create_draft_work_order`, `flag_for_urgent_review`) + `lookup_dataset_image` (read-only) + `recall_agent_notes` when `AGENT_WORKER_AUTONOMY=1`; `rank_similarity_to_catalog`, `check_recent_cluster` and `check_system_health` exist but are not offered (sections 4.8-4.10) |
 | `approval_gate` | no | verdict | `approvals` row, email | - |
 | `await_evidence` | no | new inputs from `update_state` | fresh budget (offset by the tokens already spent), `evidence_round += 1` | - |
 
@@ -128,9 +128,13 @@ computed from the `tokens_in` and `tokens_out` accumulated on the state
 (`BudgetTracker.sync_tokens` before every check), which includes the
 panel's threads. Every provider call is bounded by
 `min(AGENT_LLM_TIMEOUT_SECONDS, time remaining to the run's deadline)`
-(default 30) with no SDK-level retries; retries belong to the backoff
-and the fallback chain, and both stop at the deadline
-(`started_at + WALL_CLOCK_CAP_SECONDS`). Inside an autonomous worker the
+(default 30; the VM runs 150 since 1.11.2026, because a 4,000-token
+Decision prompt takes 100-130 s on its CPU) with no SDK-level retries;
+retries belong to the backoff and the fallback chain, both stop at the
+deadline (`started_at + WALL_CLOCK_CAP_SECONDS`), a call that ran out of
+its timeout is not retried at all (the same prompt against the same host
+takes the same time; until 1.11.2026 the backoff repeated it up to four
+times), and the chain calls each distinct spec once. Inside an autonomous worker the
 bound is the tighter of the run deadline and the worker's
 `latency.worker_time_cap_s`; no ReAct round, worker or Decision, starts
 with under 5 s of headroom, and a Decision stopped this way reports
@@ -256,7 +260,13 @@ isolate themselves with a temporary `ROADGUARD_DB_PATH` and
   `known_image` verdict and emits `fallback_reason=known_image_in_dataset`;
   no LLM triage runs.
 
-### 4.8 `rank_similarity_to_catalog` (Decision, read-only)
+### 4.8 `rank_similarity_to_catalog` (read-only; not offered to Decision since 1.11.2026)
+
+> The dispatcher answers this tool with a structured stub (no backend
+> yet). Offering it cost 738 characters of schema on every Decision call
+> and, in run r6 of 1.11.2026, a tool hop in two of the 17 slow passes, so
+> the schema stays out of the Decision offer until the backend exists; a
+> call the model still makes from memory gets the stub.
 
 - Input: `{ sha256, phash, k=3 }`.
 - Output: `{ matches: [{ pic_id, class, country, similarity_pct, phash_distance }] }`,
@@ -283,7 +293,10 @@ isolate themselves with a temporary `ROADGUARD_DB_PATH` and
   tool calls) so the assessment can name "pipeline is degraded (model X not
   loaded, host memory 94%)" instead of fabricating certainty.
 
-### 4.10 `check_recent_cluster` (Decision, read-only)
+### 4.10 `check_recent_cluster` (read-only; not offered to Decision since 1.11.2026)
+
+> Same status as 4.8: the dispatcher returns a stub, so the schema (919
+> characters) is not offered until the tool is wired to its backend.
 
 - Input: `{ location, hazard_class, window_hours=168 }`.
 - Output: `{ count, cluster_flag: enum[none, emerging, strong], recent_hazard_ids }`.

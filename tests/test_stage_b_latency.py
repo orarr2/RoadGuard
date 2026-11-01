@@ -55,8 +55,10 @@ def test_rag_relabel_does_not_retry_single_call_after_react_miss(monkeypatch):
 def test_check_system_health_not_offered_to_decision():
     names = {s["function"]["name"] for s in ra._decision_tool_schemas()}
     assert "check_system_health" not in names
-    assert {"check_hazard_severity", "lookup_dataset_image", "rank_similarity_to_catalog",
-            "check_recent_cluster", "request_additional_evidence",
+    # 1.11.2026: the two tools without a backend left the offer as well.
+    assert "rank_similarity_to_catalog" not in names
+    assert "check_recent_cluster" not in names
+    assert {"check_hazard_severity", "lookup_dataset_image", "request_additional_evidence",
             "create_draft_work_order", "flag_for_urgent_review"} <= names
 
 

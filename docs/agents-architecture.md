@@ -13,7 +13,7 @@
 
 > הערת כלים ל-Decision (24.10.2026): סוכן ה-Decision מחזיק 8 כלים (לא 4 כפי שמתואר בטבלאות הישנות למטה):
 > - **פעולה (write):** `check_hazard_severity`, `request_additional_evidence`, `create_draft_work_order`, `flag_for_urgent_review`
-> - **קריאה בלבד (read):** `lookup_dataset_image` (fast-path ל-`known_image` על hit), `rank_similarity_to_catalog` (top-K near-matches ב-%), `check_recent_cluster` (same-class same-location, 7 ימים חזרה; `cluster_flag=none|emerging|strong`). עדכון 31.10.2026: `check_system_health` הוסר מההצעה ל-Decision (בבאץ' של 27.10 הוא צרך hop אחד מתוך שניים בשש ריצות ולא שינה אף verdict; הפונקציה נשארה ל-`/health/system`), ו-`recall_agent_notes` (לקחים מהכרעות המפקח) מוצע ל-Decision ולעובדים כש-`AGENT_WORKER_AUTONOMY=1`
+> - **קריאה בלבד (read):** `lookup_dataset_image` (fast-path ל-`known_image` על hit), `rank_similarity_to_catalog` (top-K near-matches ב-%), `check_recent_cluster` (same-class same-location, 7 ימים חזרה; `cluster_flag=none|emerging|strong`). עדכון 31.10.2026: `check_system_health` הוסר מההצעה ל-Decision (בבאץ' של 27.10 הוא צרך hop אחד מתוך שניים בשש ריצות ולא שינה אף verdict; הפונקציה נשארה ל-`/health/system`), ו-`recall_agent_notes` (לקחים מהכרעות המפקח) מוצע ל-Decision ולעובדים כש-`AGENT_WORKER_AUTONOMY=1`. עדכון 1.11.2026: `rank_similarity_to_catalog` ו-`check_recent_cluster` יצאו מההצעה עד שיחוברו ל-backend (ה-dispatcher מחזיר stub); ה-system prompt של Decision קוצר מ-12,071 ל-7,472 תווים, ותוצאות הכלים שחוזרות למודל מכווצות (שורת הקטלוג בלי רשימת התוויות)
 >
 > החלטה חשובה (24.10.2026): ה-floors הדטרמיניסטיים של `confidence < 0.5` ו-zero confidence הוסרו. הם ניתבו ~60% מההגשות האמיתיות ל-human_review בלי קשר ליתר האותות. ה-persona החדשה של Decision היא "פקח כבישים עירוני ותיק" שכותב 2-3 משפטים חופשיים ב-`rationale`, שדה `uncertainty` נפרד, ולוקח בעלות על ההחלטה. ה-floors שנשארו: `known_image` על hit ב-catalog, `human_review` על suspicious OCR / sanitize / `jurisdiction_hint != "il"`, ו-`urgent` preconditions ב-policy.
 
@@ -1045,7 +1045,7 @@ python scripts/rag_relevance_eval.py --json rag_eval.json
 
 - **איפה:** [`chat.py`](../src/agent/multiagent/chat.py), `_call_with_fallback`.
 - **מתי:** כל פעם ש־`call_provider` של הספק הראשי זורקת exception (timeout, 429, 500, parse error מהספק).
-- **מה קורה:** exponential backoff (1s/2s/4s) על 429/5xx/timeout חולפים. 429 שמסמן מכסה שנגמרה (Gemini "Quota exceeded ... limit", Mistral code 1300) אינו מנוסה שוב: הספק נזכר כמת ל-`AGENT_LLM_DEAD_SECONDS` (ברירת מחדל 300 שניות) ומדולג בכל קריאה בתקופה הזו. אם זה נכשל, `_call_with_fallback` הולך לאורך ה-chain ב-`AGENT_LLM_FALLBACK` (`gemini:gemini-flash-lite-latest` -> `groq:openai/gpt-oss-20b` -> `gemini:gemini-3.5-flash`), כל חוליה עם backoff משלה, ומדלג על חוליה שהיא אותו ספק שנפל או ספק מת. ה-backoff וה-chain נעצרים ב-deadline של הריצה (`started_at + WALL_CLOCK_CAP_SECONDS`), וה-timeout לקריאה הוא `min(AGENT_LLM_TIMEOUT_SECONDS, הזמן שנותר)`. ההודעה שחזרה נושאת `committee_note` שמסמן איזה ספק נכשל ומי החזיר. בפאנל, מושב שנפל אינו מוחלף: הפאנל מצביע עם המושבים שענו ונופל לעץ הכללים רק כשאף מושב לא ענה. אם כל ה-chain נופל - exception מקורי עולה והקוד בצומת תופס + נופל ל־rule tree ומעדכן `fallback_reason` ב-state. הסדר בכוונה מתחיל בספק שונה מהראשי (Groq), כך ש-429 יומי של ספק אחד מכוסה על ידי ספק אחר; `gemini-3.5-flash` אחרון כי ה-free tier שלו נמדד ב-20 בקשות ליום. בלי retries פנימיים של ה-SDK, ה-backoff וה-chain הם המנגנון היחיד שחוזר על קריאה.
+- **מה קורה:** exponential backoff (1s/2s/4s) על 429/5xx חולפים; קריאה שנפלה על timeout אינה מנוסה שוב (אותו prompt מול אותו host ייקח אותו זמן; עדכון 1.11.2026), וכל spec בשרשרת נקרא פעם אחת גם אם הוא מופיע בה פעמיים. 429 שמסמן מכסה שנגמרה (Gemini "Quota exceeded ... limit", Mistral code 1300) אינו מנוסה שוב: הספק נזכר כמת ל-`AGENT_LLM_DEAD_SECONDS` (ברירת מחדל 300 שניות) ומדולג בכל קריאה בתקופה הזו. אם זה נכשל, `_call_with_fallback` הולך לאורך ה-chain ב-`AGENT_LLM_FALLBACK` (`gemini:gemini-flash-lite-latest` -> `groq:openai/gpt-oss-20b` -> `gemini:gemini-3.5-flash`), כל חוליה עם backoff משלה, ומדלג על חוליה שהיא אותו ספק שנפל או ספק מת. ה-backoff וה-chain נעצרים ב-deadline של הריצה (`started_at + WALL_CLOCK_CAP_SECONDS`), וה-timeout לקריאה הוא `min(AGENT_LLM_TIMEOUT_SECONDS, הזמן שנותר)`. ההודעה שחזרה נושאת `committee_note` שמסמן איזה ספק נכשל ומי החזיר. בפאנל, מושב שנפל אינו מוחלף: הפאנל מצביע עם המושבים שענו ונופל לעץ הכללים רק כשאף מושב לא ענה. אם כל ה-chain נופל - exception מקורי עולה והקוד בצומת תופס + נופל ל־rule tree ומעדכן `fallback_reason` ב-state. הסדר בכוונה מתחיל בספק שונה מהראשי (Groq), כך ש-429 יומי של ספק אחד מכוסה על ידי ספק אחר; `gemini-3.5-flash` אחרון כי ה-free tier שלו נמדד ב-20 בקשות ליום. בלי retries פנימיים של ה-SDK, ה-backoff וה-chain הם המנגנון היחיד שחוזר על קריאה.
 - **מודלים מקומיים (Ollama) כברירת מחדל בפרודקשן:** ה-VM הוא Oracle `VM.Standard.A1.Flex` עם 4 OCPU ARM ו-24 GB RAM, מה שמאפשר להריץ 5+ מודלי Ollama פתוחים במקביל (qwen2.5:3b, gemma2:2b, phi3.5, llama3.2:3b, granite3.3:2b) ללא עלות API ועם זמינות של 24/7. ה-fallback chain של ספקי API חיצוניים (Groq / Gemini / Mistral) נשמר כגיבוי קונפיגורטיבי בלבד; ברירת המחדל היא Ollama מקומי.
 - **מצב בפרודקשן:** מופעל (`AGENT_LLM_FALLBACK` ב־`/etc/roadguard/env`).
 
@@ -1077,7 +1077,7 @@ python scripts/rag_relevance_eval.py --json rag_eval.json
 | LLM של סוכן Pattern | פסקת ספירות מהקוד | הדו"ח יוצא, מסומן `rule summary` |
 | תו שאינו Latin-1 ב-PDF | מוחלף ב-`?` | הדו"ח יוצא במקום לקרוס |
 | פייתון קורס | systemd Restart | חזרה אוטומטית תוך 5 שניות |
-| ספק LLM שאינו עונה | timeout של `min(AGENT_LLM_TIMEOUT_SECONDS, הזמן שנותר)`, אז backoff ו-chain עד ה-deadline של הריצה | הריצה לא נתקעת דקות על ספק תלוי |
+| ספק LLM שאינו עונה | timeout של `min(AGENT_LLM_TIMEOUT_SECONDS, הזמן שנותר)`; קריאה שנפלה על timeout אינה מנוסה שוב, שגיאות אחרות מקבלות backoff ו-chain עד ה-deadline של הריצה | הריצה לא נתקעת דקות על ספק תלוי |
 | קישור אישור בלי token או עם token שגוי | 403 `approval_link_invalid` | אי אפשר לאשר מפגע מניחוש id |
 | הגרף זורק exception | log `graph_failed` + 500 | אין verdict מומצא; ה-webapp מציג שגיאה |
 | בקשת ראיות שלא נענתה 7 ימים | הדו"ח היומי: `expire_evidence_requests` -> `expired`, המפגע `evidence_expired` | אין שורות pending לנצח |
@@ -1366,7 +1366,14 @@ section 11 for the full narrative.
   the model stops retrying and the trace records the call. (31.10.2026:
   `check_system_health` was then removed from the Decision offer, since
   it consumed hops and never changed a verdict; `recall_agent_notes` is
-  offered instead when `AGENT_WORKER_AUTONOMY=1`.)
+  offered instead when `AGENT_WORKER_AUTONOMY=1`. 1.11.2026:
+  `rank_similarity_to_catalog` and `check_recent_cluster` left the offer
+  too, until they get a backend; the dispatcher keeps the stub branch. The
+  Decision system prompt no longer describes them, which with the general
+  tightening cut it from 12,071 to 7,472 characters; the tool results the
+  model reads back are compact too (the catalogue row without its label
+  list, lists cut to 5 items, strings to 240 characters, the message to
+  1,200), while the trace keeps the full result.)
 
 ### RAG retriever
 

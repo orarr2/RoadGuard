@@ -307,3 +307,30 @@ Measured query distances come from `scratchpad/rag_query_experiment.py` run agai
 
 Overnight run on this build (1.11.2026, 94 images, 3.74 h, unit result success, no OOM, swap unused): known_image 29, standard 33, human_review 32, needs_more_evidence 0 (all 10 evidence requests were answered by the runner and resumed to a verdict). Catalogue seals fell from 41 to 29 because the label check and the 0.4 stored-confidence floor now apply (3 label disputes went to a human, the rest to the rule tree). Contradiction floors: 1 (sha256) instead of 9. Supervisor notes: 93 ok, 1 replaced. RAG passage distance median 0.48. Worker ReAct steps stored: 188. Per image: p50 108 s, p90 241 s, max 484 s (an evidence round). 17 of 104 decision passes reached the 240 s cap and were decided by the rule tree (Decision's model decided 14); with every agent now using its hops the pipeline needs about 280 s on this CPU, so the owner raised `WALL_CLOCK_CAP_SECONDS` to 360 on the VM (environment only).
 
+
+## 19. Round 9 (1.11.2026, afternoon): run r6 from zero and the Decision timeout
+
+Run r6 (same build 09caff3, `WALL_CLOCK_CAP_SECONDS=360`, every case, image, checkpoint and agent note wiped first so no agent memory carried over): 94/94 verdicts in 4 h 06 min (09:28-13:35 UTC), no errors, no OOM, swap unused.
+
+| | batch of 31.10 (old build) | r5 (night, cap 240) | r6 (cap 360) |
+|---|---|---|---|
+| known_image / standard / human_review / needs_more_evidence | 41 / 26 / 17 / 10 | 29 / 33 / 32 / 0 (10 answered) | 28 / 37 / 29 / 0 (10 answered) |
+| submit-to-verdict p50 / p90 / max (s) | 81 / 178 / 249 | 108 / 241 / 484 | 114 / 358 / 568 |
+| p50 without an evidence round (s) | 81 | 84 | 86 |
+| passes past 240 s | - | 17 (cut at the cap) | 17 (4 LLM-decided, 9 rule-based before 360, 4 at the cap) |
+| LLM-decided passes | 17 / 121 | 14 / 104 | 13 / 104 |
+| supervisor notes ok | - | 93 / 94 | 94 / 94 |
+
+Of the 50 catalogue images 28 sealed; the 22 that did not: 12 `stored_confidence_below_floor` (policy 0.4), 6 `severity_blocks_shortcut`, 4 label disputes (3 `label_vs_prediction`, 1 contradiction) to human_review. `/report` shows tokens and models for all 94 cases (checked with the builder on the stored traces). RAG distances identical to r5 (median 0.484). 187 worker ReAct steps stored.
+
+**Why the run got longer than the batch of 31.10, and what did not change.** Per call the model is as fast as on 31.10 (service journal, qwen2.5:3b: latency p50 20.3 s then, 17.8 s now; p90 56.4 then, 54.7 now; prompts of 2,000+ tokens that succeeded took p50 48.7 s then, 54.1 s now; the largest prompts 4,034 then, 4,061 now). Four deliberate changes lengthened the run: research and supervisor moved from granite3.3:2b (8.7 s per call) to qwen2.5:3b (15-20 s) to stop the hallucinated lane-blocked notes (+15-20 s per case); the stricter KNOWN_IMAGE seal (sha256, label agreement, 0.4 floor) sends 14 more cases through the full pipeline (about 100 s instead of 28 s); the batch runner answers evidence requests, so 10 cases run the graph twice (the 568 s maximum); the cap moved from 240 to 360 s, so the slow tail runs two minutes longer before the rule tree decides.
+
+**The pre-existing cause of the slow tail (31.10: 30 calls at the 60 s timeout; r6: 32).** The Ollama server logged the final Decision call of case hz_6088b2b03457 at 4,044 prompt tokens on a 4,096 context (`truncated = 1`); the CPU evaluates 30-45 tokens per second, so that call needs 100-130 s, while `AGENT_LLM_TIMEOUT_SECONDS` was 60. The call failed with ReadTimeout and the backoff repeated the identical call: four requests of exactly 60 s (HTTP 500 after 1m0s in the Ollama log at 10:02:24, 10:03:25, 10:04:27) and a last one cut at the deadline (46.86 s at 10:05:18), then the rule tree decided. Nine Decision passes, ten profile_builder calls and two rag_retriever calls ended this way in r6. The prompt was 12,071 characters of system text plus 5,146 characters of tool schemas (seven tools, two of them answered by a stub, and a section about `check_system_health`, which Decision has not been offered since 31.10) plus the tool results fed back verbatim (the catalogue row with its 20-label list).
+
+| Change (round 9) | Before | After | Test |
+|---|---|---|---|
+| Decision system prompt | 12,071 characters; sections about three tools the model cannot use | 7,472 characters; every rule kept, the dead sections and the duplicated prose gone | `tests/test_round9_decision_prompt.py` (size ceiling 7,600; the contract phrases present; the three tool names absent) |
+| Tools offered to Decision | 7 schemas (5,146 characters), two answered by a stub | 5 schemas (3,485 characters); `_UNWIRED_DECISION_TOOLS` keeps `rank_similarity_to_catalog` and `check_recent_cluster` out of the offer, the dispatcher still answers them with the stub | same file; `tests/test_stage_b_latency.py` |
+| Tool results fed back to the model | `json.dumps(result)[:2000]` | `_tool_result_for_model`: the catalogue row as `_dataset_lookup_summary` (no label list), other results with lists cut to 5 items and strings to 240 characters, the message to 1,200; the react_step in the trace keeps the full result | same file |
+| Retry after a timeout | backoff repeated the identical call up to 4 times; the fallback chain could name the same model twice | `_is_timeout`: a call that ran out of its SDK timeout is not retried; the chain calls each distinct spec once | same file (timeout: 1 call, no sleep; 503: still 4 calls; chain dedupe) |
+| Per-call timeout on the VM | `AGENT_LLM_TIMEOUT_SECONDS=60` | 150 (env only), so a 4,000-token call completes in one attempt; the run deadline still cuts it | runtime |
