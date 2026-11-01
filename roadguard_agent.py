@@ -1811,6 +1811,10 @@ class RoadGuardState(TypedDict, total=False):
     # flag an evidence pass sets when the photo and the form are unchanged.
     worker_baseline: dict
     evidence_reuse: bool
+    # The first pass's inputs, stored by resume_graph before the new
+    # evidence replaces them (round 14, 1.11.2026).
+    previous_yolo: dict
+    previous_metadata: dict
 
 
 def initial_state(
@@ -10869,12 +10873,23 @@ def resume_graph(
     app = build_graph()
     config = {"configurable": {"thread_id": hazard_id}}
     if thread_waits_for_evidence(hazard_id):
+        current: dict = {}
+        try:
+            current = dict(getattr(app.get_state(config), "values", None) or {})
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.warning("resume_previous_inputs_unavailable id=%s: %s", hazard_id, exc)
         app.update_state(
             config,
             {
                 "yolo_output": yolo_output,
                 "image_quality": image_quality,
                 "metadata": metadata,
+                # Round 14 (1.11.2026): the first pass's inputs, so the
+                # evidence node can tell a re-upload from a new photo. They
+                # were never stored before: every delta read "None -> x" and
+                # the reuse of perception and research (round 10) never fired.
+                "previous_yolo": current.get("yolo_output") or {},
+                "previous_metadata": current.get("metadata") or {},
             },
         )
         return app.invoke(None, config=config)
