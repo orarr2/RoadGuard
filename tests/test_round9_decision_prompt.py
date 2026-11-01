@@ -15,7 +15,7 @@ import roadguard_agent as ra
 
 def test_decision_prompt_is_compact_and_keeps_the_contract():
     prompt = ra._build_decision_prompt()
-    assert len(prompt) < 7600, len(prompt)  # 7,472 on 1.11.2026, down from 12,071
+    assert len(prompt) < 8000, len(prompt)  # 7,472 after round 9, 7,875 after round 10 (severity_check paragraph); 12,071 before
     for needle in (
         '"urgent"', '"standard"', '"needs_more_evidence"', '"human_review"', '"known_image"',
         "Policy version", "SAFETY", "reporter_claims", "jurisdiction_hint", "dataset_match",

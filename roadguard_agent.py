@@ -1806,6 +1806,11 @@ class RoadGuardState(TypedDict, total=False):
     next_hop: str
     refine_hint: str
     refine_count: Annotated[int, operator.add]
+    # Round 10 (1.11.2026): the deterministic labels the workers started
+    # from, so Decision can tell what the workers' LLM changed, and the
+    # flag an evidence pass sets when the photo and the form are unchanged.
+    worker_baseline: dict
+    evidence_reuse: bool
 
 
 def initial_state(
@@ -4263,14 +4268,18 @@ def _build_decision_prompt() -> str:
         "or infrastructure), say so plainly in the assessment and prefer\n"
         "human_review so an operator can archive or forward it; never route a\n"
         "non-Israeli report into the urgent / standard queue. Empty = domestic.\n\n"
-        "Known images: when the user message carries `dataset_match`, call\n"
-        "lookup_dataset_image once to confirm it. Catalogued labels that cover the\n"
-        "detector's top class: answer known_image (rationale = the catalogued\n"
-        "labels and the recorded prediction, cited_sources [], priority 0). A\n"
-        "detector class NOT in the catalogued labels at confidence >= 0.30 is a\n"
-        "catalog-vs-detector contradiction: answer human_review and name it\n"
-        "('catalogued D20 but detector reports D40 at 0.65'). Never answer\n"
-        "known_image without a dataset_match.\n\n"
+        "Known images: `dataset_match`, when present, is the confirmed result of\n"
+        "lookup_dataset_image for this photo (already_run=true): do not call the\n"
+        "tool again. Catalogued labels that cover the detector's top class:\n"
+        "answer known_image (rationale = the catalogued labels and the recorded\n"
+        "prediction, cited_sources [], priority 0). A detector class NOT in the\n"
+        "catalogued labels at confidence >= 0.30 is a catalog-vs-detector\n"
+        "contradiction: answer human_review and name it ('catalogued D20 but\n"
+        "detector reports D40 at 0.65'). Never answer known_image without a\n"
+        "dataset_match.\n\n"
+        "Severity: `severity_check` is the executed check_hazard_severity for this\n"
+        "submission (priority, components, formula): use its priority, do not\n"
+        "call the tool again.\n\n"
         "Detector sanity: `quality_warnings` may flag the top-1 box as a tiny area\n"
         "(under 0.5% of the frame: often texture or shadow), an extreme aspect\n"
         "ratio (often a crack line or shadow) or a box hugging the frame edge\n"
@@ -4278,8 +4287,11 @@ def _build_decision_prompt() -> str:
         "false positive and prefer needs_more_evidence (a clean closer shot) over\n"
         "a confident verdict; a reporter text describing a real defect that\n"
         "matches the image is the tiebreaker.\n\n"
-        "Tool calls: write one sentence of reasoning in the message content (why\n"
-        "this tool now); it is shown in the live trace.\n\n"
+        "Tool calls: the two read-only results you need are already in the\n"
+        "message, so a tool call is normally one of the actions\n"
+        "(request_additional_evidence, create_draft_work_order,\n"
+        "flag_for_urgent_review). Write one sentence of reasoning in the message\n"
+        "content (why this tool now); it is shown in the live trace.\n\n"
         "Reply with ONLY this JSON object, no prose, no markdown fences:\n\n"
         "{\n"
         '  "reasoning": "<=60 words linking the inputs to the chosen action>",\n'
@@ -4978,10 +4990,9 @@ SEVERITY_SCHEMA = {
     "function": {
         "name": "check_hazard_severity",
         "description": (
-            "Compute transparent operational priority from hazard class, "
-            "YOLO confidence, road type, lane obstruction and recurrence. "
-            "Returns an integer in [0, 100]. Use this once before deciding "
-            "the action. Do NOT invent priority numbers; call this."
+            "Priority 0-100 from hazard class, detector confidence, road type, "
+            "lane blockage and recurrence (transparent formula). The result for "
+            "this submission is already in the message as severity_check."
         ),
         "parameters": {
             "type": "object",
@@ -5055,11 +5066,8 @@ DRAFT_SCHEMA = {
     "function": {
         "name": "create_draft_work_order",
         "description": (
-            "Write a LOCAL DRAFT work order (a work_orders row with "
-            "status='draft'). This does not dispatch anyone, close a road, "
-            "or notify anything outside the system. A human must approve "
-            "the draft before it becomes a real order. Use only for action "
-            "in {urgent, standard}."
+            "Write a local DRAFT work order (status='draft'; a human approves it, "
+            "nothing is dispatched). Only for urgent or standard."
         ),
         "parameters": {
             "type": "object",
@@ -5139,12 +5147,9 @@ FLAG_SCHEMA = {
     "function": {
         "name": "flag_for_urgent_review",
         "description": (
-            "Route the case to a human supervisor for review. Writes an "
-            "approvals row and sends an internal email summary via the "
-            "same channel the approval_gate uses. This does NOT contact "
-            "a contractor, close a road, or publish anything outside the "
-            "system. Use for action='urgent' or when the agent cannot "
-            "ground its decision in retrieved sources."
+            "Route the case to a human supervisor (approvals row plus an internal "
+            "e-mail, the approval gate's channel). For urgent, or when the verdict "
+            "cannot be grounded in retrieved sources."
         ),
         "parameters": {
             "type": "object",
@@ -5810,11 +5815,9 @@ EVIDENCE_SCHEMA = {
     "function": {
         "name": "request_additional_evidence",
         "description": (
-            "Ask the reporter for exactly one specific missing input. "
-            "Writes a row to evidence_requests; the reporter answers it once. "
-            "Use when confidence is in [0.4, 0.6] with no corroboration, "
-            "or when image_quality.blur_score is below the usable threshold. "
-            "Pick ONE missing_field - do not request multiple at once."
+            "Ask the reporter for exactly one missing input (one evidence_requests "
+            "row, answered once). For confidence in [0.4, 0.6] without "
+            "corroboration, or an unusable image."
         ),
         "parameters": {
             "type": "object",
@@ -6005,11 +6008,9 @@ DATASET_SCHEMA = {
     "function": {
         "name": "lookup_dataset_image",
         "description": (
-            "Check whether the submitted photo is one of the catalogued "
-            "reference-dataset images (exact file hash, then perceptual "
-            "hash). Returns the catalogued labels and the model's recorded "
-            "prediction when it is. Read-only; the hashes come from the "
-            "submission, no arguments are needed."
+            "Catalogue lookup of the submitted photo (exact hash, then perceptual "
+            "hash): catalogued labels and the recorded prediction. No arguments; "
+            "the confirmed result is already in the message as dataset_match."
         ),
         "parameters": {
             "type": "object",
@@ -8250,6 +8251,13 @@ def profile_builder_node(state: RoadGuardState) -> dict:
     pc = _clamp_confidence(base_confidence, refined["confidence"])
     needs_more = refined["needs_more_evidence"]
     missing = refined["missing_fields"]
+    # Round 10 (1.11.2026): what the worker's LLM changed against the
+    # deterministic profile it started from; Decision reads the baseline
+    # to tell whether the change moved the rule tree's verdict.
+    llm_delta = _label_delta(
+        {"severity_signal": severity, "perception_confidence": base_confidence, "needs_more_evidence": base_needs_more},
+        {"severity_signal": profile["severity_signal"], "perception_confidence": pc, "needs_more_evidence": needs_more},
+    ) if llm_enabled else {}
 
     handoff = build_perception_handoff(
         profile=profile,
@@ -8269,6 +8277,7 @@ def profile_builder_node(state: RoadGuardState) -> dict:
             "severity": profile["severity_signal"],
             "confidence": pc,
             "llm_used": in_tok > 0,
+            "llm_delta": llm_delta,
         },
     }
     _llm_calls = end_llm_log()
@@ -8297,6 +8306,14 @@ def profile_builder_node(state: RoadGuardState) -> dict:
         "perception_confidence": pc,
         "similar_cases": sim_result.get("cases", []),
         "dataset_match": dataset_hit if dataset_hit.get("found") else None,
+        "worker_baseline": {
+            **(state.get("worker_baseline") or {}),
+            "profile": {
+                "severity_signal": severity,
+                "perception_confidence": base_confidence,
+                "llm_changed": bool(llm_delta),
+            },
+        },
         "trace": [*drain_worker_steps(), trace_entry],
         "iterations": 1,
         "last_speaker": "profile_builder",
@@ -8681,6 +8698,13 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
         coverage = base_coverage
         confidence = base_confidence
 
+    # Round 10 (1.11.2026): what the research LLM changed against the
+    # tool-graded labels; see _worker_impact in Decision.
+    llm_delta = _label_delta(
+        {"coverage": base_coverage, "confidence": base_confidence},
+        {"coverage": coverage, "confidence": confidence},
+    ) if llm_enabled else {}
+
     handoff = build_research_handoff(
         procedures=procedures_safe,
         tool_result_ids=result["tool_result_ids"],
@@ -8695,6 +8719,7 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
         "kind": "handoff_out",
         "content": {
             "to": "decision",
+            "llm_delta": llm_delta,
             "coverage": coverage,
             "n_procedures": len(procedures_safe),
             "tool_result_ids": result["tool_result_ids"],
@@ -8727,6 +8752,14 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
         "procedures": procedures_safe,
         "tool_result_ids": result["tool_result_ids"],
         "research_coverage": coverage,
+        "worker_baseline": {
+            **(state.get("worker_baseline") or {}),
+            "research": {
+                "coverage": base_coverage,
+                "confidence": base_confidence,
+                "llm_changed": bool(llm_delta),
+            },
+        },
         "trace": [*drain_worker_steps(), trace_entry],
         "iterations": 1,
         "last_speaker": "rag_retriever",
@@ -9018,6 +9051,39 @@ def _parse_decision_json(text: str) -> dict | None:
     }
 
 
+def _severity_check_for_prompt(profile: dict, md: dict) -> dict:
+    """check_hazard_severity for this submission, run by the code so the
+    Decision agent reads the result instead of spending a tool round on
+    the call it made in every tool-using pass of run r6 (47 of 47). The
+    tool stays in the offer for the cases the agent still wants it."""
+    try:
+        result = check_hazard_severity(
+            hazard_class=str(profile.get("primary_class") or ""),
+            confidence=float(profile.get("primary_confidence") or 0.0),
+            road_type=str(md.get("road_type") or ""),
+            lane_blocked=str(md.get("lane_blocked") or ""),
+            recurrence_count_30d=int(profile.get("recurrence_count_30d") or 0),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"tool": "check_hazard_severity", "already_run": False, "error": str(exc)[:120]}
+    return {"tool": "check_hazard_severity", "already_run": True, **result}
+
+
+_RULE_HINT_KEYS = ("action", "priority", "rationale", "cited_sources", "missing_evidence")
+
+
+def _compact_rule_hint(rule_hint: dict) -> dict:
+    """The rule tree's verdict as the prompt needs it: the five fields the
+    model reads, the rationale cut to 240 characters. The match-status
+    dict and the flags stay on the full hint for the floors."""
+    out = {k: rule_hint.get(k) for k in _RULE_HINT_KEYS if k in rule_hint}
+    if isinstance(out.get("rationale"), str):
+        out["rationale"] = out["rationale"][:240]
+    if isinstance(out.get("cited_sources"), list):
+        out["cited_sources"] = out["cited_sources"][:3]
+    return out
+
+
 def _decision_messages(state: RoadGuardState, rule_hint: dict) -> list[dict]:
     """System + user messages shared by the panel path and the ReAct path."""
     profile = state.get("hazard_profile") or {}
@@ -9041,7 +9107,8 @@ def _decision_messages(state: RoadGuardState, rule_hint: dict) -> list[dict]:
         "tool_result_ids": tool_result_ids[:3],  # bound prompt size
         "procedures": [
             {
-                "source_url": (p.get("source_url") or "")[:120],
+                # The model cites article_ids; the URL cost tokens and was
+                # never read (round 10).
                 "issuing_body": p.get("issuing_body"),
                 "article_ids": (p.get("article_ids") or [])[:3],
                 "quarantined_summary": p.get("quarantined_summary", {}),
@@ -9069,9 +9136,18 @@ def _decision_messages(state: RoadGuardState, rule_hint: dict) -> list[dict]:
             "describes": intake.get("mentioned") or {},
         } if intake.get("text") else None,
         "evidence_round": int(state.get("evidence_round", 0) or 0),
-        # The catalogued image this photo matched, if any (profile_builder).
-        "dataset_match": _dataset_lookup_summary(state.get("dataset_match")) if state.get("dataset_match") else None,
-        "rule_based_hint": rule_hint,
+        # Round 10 (1.11.2026): the two read-only tools the agent called in
+        # every run arrive with their results in hand, so it does not spend
+        # a ReAct round (50-130 s on the CPU host) re-running them. Both
+        # tools stay in the offer for the cases it still wants them.
+        "severity_check": _severity_check_for_prompt(profile, md),
+        # The catalogued image this photo matched, if any (profile_builder);
+        # the lookup already ran, the summary is its confirmed result.
+        "dataset_match": (
+            {"tool": "lookup_dataset_image", "already_run": True, **_dataset_lookup_summary(state.get("dataset_match"))}
+            if state.get("dataset_match") else None
+        ),
+        "rule_based_hint": _compact_rule_hint(rule_hint),
     }
     return [
         {"role": "system", "content": DECISION_SYSTEM_PROMPT},
@@ -9368,18 +9444,35 @@ def _llm_decide_react(
         return None, 0, 0, info
 
     msg = None
-    for _round in range(DECISION_REACT_MAX_HOPS + 1):
+    nudged = False
+    # One round more than the hop cap. The final round keeps the tool
+    # schemas in the request: dropping them (until round 10, 1.11.2026)
+    # changed the prompt right after the system text, and Ollama
+    # re-evaluated the payload and the history, about 1,000 tokens, on
+    # every final round; with the schemas kept only the new tool result is
+    # new. The model is told the budget is spent; one that still calls a
+    # tool gets the "budget exhausted" result and one last round to answer.
+    for _round in range(DECISION_REACT_MAX_HOPS + 2):
         if _deadline_blocks_hop(_run_deadline()):
             LOGGER.info("decision_react_deadline: run deadline reached after %d hops, rule tree decides", hops)
             info["hops"] = hops
             info["deadline_hit"] = True
             return None, total_in, total_out, info
-        offer = schemas if hops < DECISION_REACT_MAX_HOPS else None
+        if hops >= DECISION_REACT_MAX_HOPS and not nudged:
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"The tool budget for this case is spent ({DECISION_REACT_MAX_HOPS} hops). "
+                    "Reply now with the final JSON object only."
+                ),
+            })
+            nudged = True
         try:
-            msg, in_tok, out_tok = chat(messages, tools=offer, temperature=0.0, use_panel=False)
+            msg, in_tok, out_tok = chat(messages, tools=schemas, temperature=0.0, use_panel=False)
         except Exception as exc:
             LOGGER.warning("decision_react_llm_failed: %s", exc)
             info["hops"] = hops
+            info["llm_failed"] = type(exc).__name__
             return None, total_in, total_out, info
         total_in += in_tok
         total_out += out_tok
@@ -9478,7 +9571,18 @@ def _llm_decide_react(
     info["hops"] = hops
     if msg is None:
         return None, total_in, total_out, info
-    parsed = _grounded_or_none(_parse_decision_json(msg.content or ""), tool_result_ids, state)
+    parsed_json = _parse_decision_json(msg.content or "")
+    parsed = _grounded_or_none(parsed_json, tool_result_ids, state)
+    if parsed is None:
+        # Round 10 (1.11.2026): the trace says what the model answered when
+        # the rule tree had to decide, instead of one generic reason.
+        if msg.tool_calls:
+            info["reply_kind"] = "tool_call_after_budget"
+        elif parsed_json is None:
+            info["reply_kind"] = "unparseable"
+        else:
+            info["reply_kind"] = "ungrounded"
+        info["reply_excerpt"] = (msg.content or "").strip()[:300]
     return parsed, total_in, total_out, info
 
 
@@ -9570,6 +9674,67 @@ def _phrase_evidence_request(
 # ---------------------------------------------------------------------------
 
 
+def _llm_fallback_reason(react_info: dict | None) -> str:
+    """Why the rule tree decided instead of the model: one slug per cause
+    (round 10, 1.11.2026; until then every cause read
+    llm_unavailable_or_unparseable)."""
+    info = react_info or {}
+    if info.get("deadline_hit"):
+        return "run_deadline"
+    if info.get("llm_failed"):
+        return f"llm_call_failed:{info['llm_failed']}"
+    kind = info.get("reply_kind")
+    if kind == "unparseable":
+        return "llm_reply_unparseable"
+    if kind == "ungrounded":
+        return "llm_reply_ungrounded"
+    if kind == "tool_call_after_budget":
+        return "llm_kept_calling_tools"
+    return "llm_unavailable_or_unparseable"
+
+
+def _label_delta(before: dict, after: dict) -> dict:
+    """{field: {before, after}} for every label a worker's LLM changed."""
+    return {
+        k: {"before": before.get(k), "after": after.get(k)}
+        for k in before
+        if before.get(k) != after.get(k)
+    }
+
+
+def _worker_impact(state: RoadGuardState, rule_hint: dict) -> dict | None:
+    """Did the workers' LLM labels move the rule tree's verdict? The rule
+    tree runs again on the deterministic labels the workers started from
+    (state["worker_baseline"], round 10) and the two actions are compared.
+    None when no worker recorded a baseline (LLM off, fast path)."""
+    baseline = state.get("worker_baseline") or {}
+    prof = baseline.get("profile") or {}
+    res = baseline.get("research") or {}
+    if not prof and not res:
+        return None
+    shadow = dict(state)
+    if prof:
+        shadow["hazard_profile"] = {
+            **(state.get("hazard_profile") or {}),
+            "severity_signal": prof.get("severity_signal"),
+        }
+        shadow["perception_confidence"] = prof.get("perception_confidence")
+    if res:
+        shadow["research_coverage"] = res.get("coverage")
+    try:
+        without = _decide_rule_based(shadow)["action"]
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.warning("worker_impact_failed: %s", exc)
+        return None
+    return {
+        "profile_llm_changed": bool(prof.get("llm_changed")),
+        "research_llm_changed": bool(res.get("llm_changed")),
+        "rule_hint_without_worker_llm": without,
+        "rule_hint_with_worker_llm": rule_hint.get("action"),
+        "changed_rule_hint": without != rule_hint.get("action"),
+    }
+
+
 def decision_node(state: RoadGuardState) -> dict:
     """Produce the final decision, grounded in retrieved sources."""
     begin_llm_log()
@@ -9615,6 +9780,7 @@ def decision_node(state: RoadGuardState) -> dict:
             LOGGER.warning("decision_relaxed_lookup_failed: %s", _exc)
 
     rule_hint = _decide_rule_based(state)
+    worker_impact = _worker_impact(state, rule_hint)
 
     # A catalogued dataset image is answered as known_image (or routed to
     # human_review on a catalog-vs-detector contradiction) without any
@@ -9688,9 +9854,7 @@ def decision_node(state: RoadGuardState) -> dict:
                 "missing_evidence": [],
             }
     else:
-        fallback_reason = (
-            "run_deadline" if (react_info or {}).get("deadline_hit") else "llm_unavailable_or_unparseable"
-        )
+        fallback_reason = _llm_fallback_reason(react_info)
         last_error = ""
         for _ in range(MAX_GROUNDING_RETRIES):
             candidate = _decide_rule_based(state)
@@ -9785,6 +9949,12 @@ def decision_node(state: RoadGuardState) -> dict:
         decision["missing_evidence"] = [evidence_request["missing_field"]]
 
     trace_content = {**decision, "source": source}
+    if fallback_reason:
+        # Round 10 (1.11.2026): the reason was on the state and in the log,
+        # not in the stored trace; the formatter already prints it.
+        trace_content["fallback_reason"] = fallback_reason
+    if worker_impact:
+        trace_content["worker_impact"] = worker_impact
     trace_content["cite_support"] = _cite_support_map(decision.get("cited_sources") or [], state)
     if decision["action"] == "known_image":
         trace_content["dataset_match"] = _dataset_lookup_summary(state.get("dataset_match"))
@@ -9822,6 +9992,9 @@ def decision_node(state: RoadGuardState) -> dict:
             "hops": react_info.get("hops", 0),
             "calls": react_info.get("calls", []),
         }
+        for key in ("reply_kind", "reply_excerpt", "llm_failed", "deadline_hit"):
+            if react_info.get(key) is not None:
+                trace_content["react"][key] = react_info[key]
     # 27.10.2026 trace enrichment: snapshot the budget tracker on the
     # final decision so the operator sees how close the run was to the
     # wall-clock / token / iteration caps at verdict time.
@@ -9929,6 +10102,15 @@ def _route_from_supervisor(state: RoadGuardState) -> str:
         if state.get("action") in ("urgent", "human_review"):
             return "approval_gate"
         return "end"
+    # Round 10 (1.11.2026): an evidence pass with the same photo and form
+    # keeps the first pass's profile and passages and goes to Decision.
+    if (
+        state.get("evidence_reuse")
+        and state.get("last_speaker") in ("sanitize", "signal_extractor")
+        and state.get("hazard_profile")
+        and state.get("procedures") is not None
+    ):
+        return "decision"
     next_hop = state.get("next_hop")
     if next_hop in {"profile_builder", "rag_retriever", "decision"}:
         return next_hop
@@ -9990,6 +10172,19 @@ def _await_evidence_node(state: RoadGuardState) -> dict:
         if d is not None:
             delta[k] = d
 
+    # Round 10 (1.11.2026): the same photo with the same form fields gives
+    # the same perception and the same research, so the pass goes straight
+    # to Decision with the new evidence (text, location) and keeps the
+    # profile and the passages of the first pass. A new photo, a changed
+    # class or confidence, or a changed lane or road field re-runs the
+    # workers.
+    same_inputs = (
+        bool(prev_md.get("image_sha256"))
+        and not any(k in delta for k in ("hazard_class", "confidence", "lane_blocked", "sha256_match"))
+        and prev_md.get("road_type") == now_md.get("road_type")
+        and bool(state.get("hazard_profile"))
+        and state.get("procedures") is not None
+    )
     entry = {
         "iter": state.get("iterations", 0) + 1,
         "speaker": "await_evidence",
@@ -9998,9 +10193,11 @@ def _await_evidence_node(state: RoadGuardState) -> dict:
             "evidence_round": int(state.get("evidence_round", 0) or 0) + 1,
             "previous_request": state.get("evidence_request") or {},
             "delta": delta,
+            "reused": ["profile_builder", "rag_retriever"] if same_inputs else [],
         },
     }
     return {
+        "evidence_reuse": same_inputs,
         "budget": BudgetTracker(
             tokens_offset_in=int(state.get("tokens_in", 0) or 0),
             tokens_offset_out=int(state.get("tokens_out", 0) or 0),
@@ -10446,6 +10643,15 @@ def _react_step_lines(lbl: str, c: dict) -> list[str]:
     return out
 
 
+def _llm_delta_lines(delta) -> list[str]:
+    """One line naming what a worker's LLM changed against the deterministic
+    labels (round 10); nothing when the LLM kept them or did not run."""
+    if not isinstance(delta, dict) or not delta:
+        return []
+    parts = [f"{k} {v.get('before')} -> {v.get('after')}" for k, v in delta.items() if isinstance(v, dict)]
+    return [f"{_INDENT}llm changed: " + "  ".join(parts)] if parts else []
+
+
 def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
     speaker = str(entry.get("speaker") or "?")
     kind = str(entry.get("kind") or "?")
@@ -10501,6 +10707,7 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
         )
         if c.get("llm_skipped_reason"):
             out.append(f"{_INDENT}llm skipped: {c['llm_skipped_reason']}")
+        out.extend(_llm_delta_lines(c.get("llm_delta")))
         dl = c.get("dataset_lookup")
         if isinstance(dl, dict):
             if dl.get("found"):
@@ -10554,6 +10761,7 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             out.append(f"{_INDENT}finding: {_short(finding, 220)}")
         if c.get("llm_skipped_reason"):
             out.append(f"{_INDENT}llm skipped: {c['llm_skipped_reason']}")
+        out.extend(_llm_delta_lines(c.get("llm_delta")))
         out.append(f"{_INDENT}handoff -> {c.get('to') or 'decision'}")
     elif speaker == "decision" and kind == "react_step":
         out.extend(_react_step_lines(lbl, c))
@@ -10614,6 +10822,20 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
                 )
         if c.get("fallback_reason"):
             out.append(f"{_INDENT}fallback_reason={c['fallback_reason']}")
+            react = c.get("react") or {}
+            if react.get("reply_excerpt"):
+                out.append(
+                    f"{_INDENT}  model reply ({react.get('reply_kind') or '?'}): "
+                    f"{_short(react['reply_excerpt'], 300)}"
+                )
+        wi = c.get("worker_impact")
+        if isinstance(wi, dict):
+            out.append(
+                f"{_INDENT}worker impact: profile_llm_changed={wi.get('profile_llm_changed')}  "
+                f"research_llm_changed={wi.get('research_llm_changed')}  "
+                f"rule_hint without/with worker LLM: "
+                f"{wi.get('rule_hint_without_worker_llm')}/{wi.get('rule_hint_with_worker_llm')}"
+            )
         # 27.10.2026 trace enrichment: pull the model's uncertainty blob
         # out of rationale (it is stuffed in as "[uncertain: ...]") so the
         # operator sees WHY the model hedged on its own line, not glued to
@@ -10728,6 +10950,11 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
                     parts.append(f"{k}: {delta[k].get('before')} -> {delta[k].get('after')}")
             if parts:
                 out.append(f"{_INDENT}delta: " + "  ".join(parts))
+        if c.get("reused"):
+            out.append(
+                f"{_INDENT}same photo and form fields: {', '.join(c['reused'])} kept from "
+                "the first pass, straight to Decision"
+            )
     elif speaker == "pipeline":
         out.append(f"{lbl} graph failed: {c.get('error')} -> routed to a human")
     elif kind == "llm_call":

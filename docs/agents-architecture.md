@@ -1401,7 +1401,14 @@ section 11 for the full narrative.
 - `supervisor_plan`: `force_action` and `expected_difficulty` print
   as their own tokens, note on its own line.
 - `delta` on `await_evidence`: before/after of hazard_class,
-  confidence, lane_blocked, sha256 prefix.
+  confidence, lane_blocked, sha256 prefix; `reused` (round 10,
+  1.11.2026) names the workers kept when nothing changed.
+- `fallback_reason` on the final Decision entry, one slug per cause,
+  with the model's reply excerpt under it (round 10).
+- `llm_delta` on profile_builder / rag_retriever (what the worker's LLM
+  changed against the deterministic labels) and `worker_impact` on
+  Decision (the rule tree's action with and without those labels)
+  (round 10).
 - `llm_fallback`: counts of failed LLM calls + first three error
   strings.
 - `budget_state` on final Decision: tokens / iterations / wall-clock

@@ -95,7 +95,7 @@ sanitize -> intake -> supervisor -> perception -> supervisor -> research -> supe
 decision -> approval_gate   (urgent / human_review)
 decision -> await_evidence  (needs_more_evidence; interrupt_before, see section 7)
 decision -> END             (standard)
-await_evidence -> sanitize  (resumed run)
+await_evidence -> sanitize  (resumed run; same photo and form: supervisor -> decision directly)
 ```
 
 | Node | LLM | Reads | Writes | Tools |
@@ -420,9 +420,12 @@ intake contradiction, catalogue-vs-detector contradiction).
 The LLM may deviate from the table within limits; the grounding
 assertion, the evidence cap and the deterministic floors will not. The
 LLM is asked once: a verdict that cites an id Research did not return,
-or that cannot be parsed, is discarded and the rule tree decides
-(`fallback_reason=llm_unavailable_or_unparseable`); there is no second
-LLM call. Deterministic floors override the LLM verdict: when the rule
+or that cannot be parsed, is discarded and the rule tree decides; since
+1.11.2026 (round 10) `fallback_reason` names the cause
+(`llm_reply_unparseable`, `llm_reply_ungrounded`, `llm_kept_calling_tools`,
+`llm_call_failed:<type>`, `run_deadline`) and the stored trace carries the
+model's reply excerpt under it; there is no second LLM call beyond the
+ReAct rounds. Deterministic floors override the LLM verdict: when the rule
 tree says `human_review` for a hard trigger (perception confidence
 `low` from suspicious OCR, suspicious reporter text, a non-road scene or
 insufficient image quality; an Intake class contradiction; coverage
@@ -485,9 +488,17 @@ non-list `cited_sources` / `missing_evidence` is unparseable and goes
 to the rule tree. The user message carries `hazard_profile`,
 `perception_confidence`, `metadata` (road type, lane, location),
 `research_coverage`, the first 3 `tool_result_ids` and `procedures`
-(quarantined summaries only), `reporter_intake` (summary,
-contradictions, `urgency_claimed`, `suspicious`), `evidence_round` and
-`rule_based_hint`. When the reporter wrote text it also carries
+(quarantined summaries only, no URLs), `reporter_intake` (summary,
+contradictions, `urgency_claimed`, `suspicious`), `evidence_round`,
+`severity_check` (the executed `check_hazard_severity` for this
+submission, `already_run=true`), `dataset_match` as the confirmed lookup
+result when the photo is catalogued, and `rule_based_hint` (action,
+priority, the rationale cut to 240 characters, up to three cited
+sources, missing evidence). Since 1.11.2026 (round 10) the two read-only
+tools therefore cost no ReAct round; they stay in the offer, the tool
+schemas stay in the request on the final round as well (so the prompt
+prefix stays cached) and a one-line user message closes the tool budget
+before the final answer. When the reporter wrote text it also carries
 `reporter_claims`: `size_cm`, `depth_cm`, `vehicles_swerving`,
 `standing_water` from `reporter_signals` plus `describes` (the class,
 lane blockage and road type the text mentions). The system prompt
@@ -537,8 +548,12 @@ YOLO weights and a real corpus arrive.
    own requests), injects the new inputs with `update_state`, resumes
    the thread and marks the row fulfilled only after the resume
    succeeds. `await_evidence` gives the run a fresh budget and
-   increments `evidence_round`; the run goes through sanitize, intake,
-   perception, research and decision again. The response is the
+   increments `evidence_round`; the run goes through sanitize and
+   intake again and, when the new upload is the same photo with the
+   same class, confidence, lane and road fields (round 10, 1.11.2026),
+   keeps the first pass's perception and research and goes straight to
+   decision (`evidence_reuse`; the trace names the kept workers); a new
+   photo or changed fields run perception and research again. The response is the
    `/hazards/submit` shape with `status: "decided"`, and the hazard row
    is overwritten with the final verdict.
 5. Cap: one request per hazard
@@ -562,8 +577,10 @@ Any of the following ends with `human_review`:
 
 - a budget cap trips (`fallback_reason=guard_fired`),
 - the Decision LLM is unavailable, unparseable or ungrounded (it is
-  asked once, `fallback_reason=llm_unavailable_or_unparseable`) and the
-  rule tree itself cannot ground a verdict
+  asked once; the stored trace names the cause since round 10:
+  `llm_reply_unparseable`, `llm_reply_ungrounded`,
+  `llm_kept_calling_tools`, `llm_call_failed:<type>` or `run_deadline`)
+  and the rule tree itself cannot ground a verdict
   (`fallback_reason=grounding_failed_after_1_retries`),
 - a deterministic floor overrides an LLM verdict on a hard trigger
   (`fallback_reason=deterministic_floor`, `floor_applied=True` in the
