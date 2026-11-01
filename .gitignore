@@ -102,7 +102,8 @@ sample_images_real/
 # webapp/tunnel-url.json  (intentionally NOT ignored)
 
 # Local assistant scratchpad (per-session config)
-.claude/
+/.*/
+!/.github/
 
 # VM-specific deployment scripts (reveal Oracle A1.Flex setup)
 deploy/
@@ -110,3 +111,17 @@ deploy/
 # Team-internal meeting binaries (large, not needed for repo)
 docs/team-meeting/
 
+# artefacts that stay local: course materials, duplicate screenshots, third-party
+# sample images, corpus source documents, the processed dataset and index copies
+/AI AGENTS/
+/Pictures/
+/data/sample/*
+!/data/sample/firc_roadcrack_*
+/RAG/final_processed_dataset/
+/RAG/Data_for_Corpus-*/
+/RAG/_deploy/
+/RAG/4a2ed3ca-*/
+/RAG/*.zip
+/chroma_db-charter_grounded_corpus.zip
+/chromadb_dist/
+/rag_notebook/chroma_db/
