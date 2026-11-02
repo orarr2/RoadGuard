@@ -3585,6 +3585,29 @@ _WORKER_FINAL_KEYS = {
 }
 
 
+# Round 18 (2.11.2026): read-only tool names a worker may call. A reply
+# shape coming through one of these is clearly a misroute, not a final
+# answer: in r11 hz_8b3da7a17132 lookup_similar_cases got the final JSON.
+_WORKER_LOOKUP_PREFIXES = (
+    "lookup_", "query_", "inspect_", "extract_", "check_", "broaden_", "recall_",
+)
+
+
+def _worker_tool_call_is_other_tools_reply(
+    agent_name: str, called_name: str, args: dict | None, registry: dict
+) -> bool:
+    """Round 18: True when a lookup tool got a final-answer JSON as its
+    arguments. The current tool's own final-answer shape is handled by
+    _worker_final_in_tool_call (round 11 path); this helper fires only on
+    read-only tools, where a final JSON cannot be the legitimate input."""
+    if not isinstance(args, dict) or not args:
+        return False
+    if not any(called_name.startswith(p) for p in _WORKER_LOOKUP_PREFIXES):
+        return False
+    this_schema = (registry.get(called_name) or (None, None))[1]
+    return _worker_final_in_tool_call(agent_name, args, this_schema)
+
+
 def _worker_final_in_tool_call(agent_name: str, args: dict | None, schema: dict | None) -> bool:
     keys = _WORKER_FINAL_KEYS.get(agent_name) or ()
     if not isinstance(args, dict) or not keys:
@@ -3764,6 +3787,20 @@ def _react_worker_rounds(
                 result = {"ok": False, "error": "arguments were not a JSON object"}
             elif name not in tool_registry:
                 result = {"ok": False, "error": f"unknown tool {name!r}"}
+            elif _worker_tool_call_is_other_tools_reply(
+                agent_name, name, parsed_args, tool_registry
+            ):
+                # Round 18: the arguments carry the final-answer shape of a
+                # DIFFERENT tool (r11 hz_8b3da7a17132). Not a reply, not a
+                # tool call: recorded as a failed tool call and the loop
+                # keeps going so the model may answer as plain JSON next.
+                result = {
+                    "ok": False,
+                    "error": (
+                        "arguments look like another tool's final answer; "
+                        "reply with the final JSON content, not as a tool call"
+                    ),
+                }
             elif _worker_final_in_tool_call(agent_name, parsed_args, tool_registry[name][1]):
                 # Round 11: the reply JSON arrived as a tool call; the
                 # arguments are the reply, nothing runs.
@@ -3817,6 +3854,10 @@ def _react_worker_rounds(
                 "ok": bool(result.get("ok", False)),
                 "executed": not cap_hit and parsed_args is not None and not misrouted_now,
                 "reply_in_tool_call": misrouted_now,
+                # Round 18: the error string is surfaced so the autonomy
+                # record and tests can tell cross-tool rejects apart from
+                # a real tool failure (both have ok=False).
+                "error": None if result.get("ok") else str(result.get("error") or "")[:400],
             })
             step = {
                 "iter": state.get("iterations", 0) + 1,
@@ -7864,6 +7905,53 @@ def _extract_by_keywords(text: str) -> dict:
     }
 
 
+# Round 18 (2.11.2026): a reporter who says "No other photo is available" is
+# not describing a hazard. In r11 the signal extractor turned that single line
+# into a D40 pothole with partial lane blockage and swerving vehicles. Any
+# reporter text matching one of these phrases goes through _extract_by_keywords
+# (null for every field) and the LLM is never called.
+_NO_NEW_INFO_RE = re.compile(
+    r"\b(?:no\s+other\s+photo|this\s+is\s+the\s+only\s+(?:picture|photo|image|shot|one)|"
+    r"no\s+(?:more|further|additional)\s+(?:info|information|photo|photos|images|pictures|details)|"
+    r"nothing\s+(?:else|more|further)\s+to\s+(?:add|say|report|share)|"
+    r"all\s+I\s+have|only\s+(?:one|this)\s+(?:photo|picture|image)|"
+    r"cannot\s+(?:take|provide|supply|send)\s+(?:another|more|a\s+different))\b",
+    re.IGNORECASE,
+)
+
+
+def _text_is_no_new_info(text: str) -> bool:
+    """True when the reporter's text only says there is no new evidence."""
+    return bool(text) and bool(_NO_NEW_INFO_RE.search(text))
+
+
+def _verify_llm_claims(parsed: dict, text: str) -> dict:
+    """Round 18: drop any field the LLM returned that the text does not say.
+
+    The keyword tables are the ground truth; a hazard class, lane, road or
+    urgency claim survives only when the deterministic extractor would have
+    found it in the same text. Reporter signals are already verified by
+    _verified_signals, which runs after this."""
+    rule_based = _extract_by_keywords(text) if text else {
+        "mentioned": {"hazard_class": None, "lane_blocked": None, "road_type": None},
+        "urgency_claimed": False,
+    }
+    rule_mentioned = rule_based["mentioned"]
+    kept = dict(parsed.get("mentioned") or {})
+    dropped: list[str] = []
+    for key in ("hazard_class", "lane_blocked", "road_type"):
+        if kept.get(key) and kept[key] != rule_mentioned.get(key):
+            dropped.append(key)
+            kept[key] = None
+    parsed["mentioned"] = {k: kept.get(k) for k in ("hazard_class", "lane_blocked", "road_type")}
+    if parsed.get("urgency_claimed") and not rule_based.get("urgency_claimed"):
+        dropped.append("urgency_claimed")
+        parsed["urgency_claimed"] = False
+    if dropped:
+        parsed["dropped_unsupported"] = dropped
+    return parsed
+
+
 def _parse_intake_json(text: str) -> dict | None:
     stripped = (text or "").strip()
     if stripped.startswith("```"):
@@ -7995,6 +8083,18 @@ def signal_extractor_node(state: RoadGuardState) -> dict:
     yolo = state.get("yolo_output") or {}
     text = (md.get("reporter_text") or "").strip()
     suspicious = bool(md.get("reporter_text_suspicious"))
+    # Round 18 (2.11.2026): a resumed pass with the original photo re-sent
+    # under a note (evidence_declined) has nothing new for the extractor to
+    # read; in r11 the second-pass call ran 90 s for 0 tokens. The first
+    # pass's intake has already been checkpointed; skip the LLM entirely.
+    skip_reason: str | None = None
+    if state.get("evidence_declined"):
+        skip_reason = "evidence_declined"
+    elif _text_is_no_new_info(text):
+        # The text says "no other photo is available" and nothing else;
+        # the keyword extractor would return null for every field, and the
+        # LLM has nothing to find there. See r11 hz_ca2415101a88.
+        skip_reason = "no_new_info"
 
     intake: dict = {
         "text": text,
@@ -8008,7 +8108,8 @@ def signal_extractor_node(state: RoadGuardState) -> dict:
     signals = _empty_signals()
     in_tok = out_tok = 0
     autonomy: dict | None = None
-    if text:
+    dropped: list[str] = []
+    if text and skip_reason is None:
         extracted = None
         if not suspicious:
             # Flagged text is already headed for human_review; the LLM
@@ -8018,7 +8119,19 @@ def signal_extractor_node(state: RoadGuardState) -> dict:
             extracted = _extract_by_keywords(text)
             intake["source"] = "rules"
         else:
-            intake["source"] = "llm"
+            # Round 18: drop any claim the LLM made that the text does not
+            # support (r11 hz_ca2415101a88: "no other photo is available"
+            # became D40 + partial lane + urgency). Keyword rules are the
+            # ground truth; the LLM may at most agree with them.
+            extracted = _verify_llm_claims(extracted, text)
+            dropped = extracted.pop("dropped_unsupported", [])
+            intake["source"] = "llm_strict" if dropped else "llm"
+        signals = extracted.pop("reporter_signals", None) or signals
+        intake.update(extracted)
+        intake["contradictions"] = _contradictions(intake["mentioned"], yolo, md)
+    elif text:
+        extracted = _extract_by_keywords(text)
+        intake["source"] = f"skipped:{skip_reason}"
         signals = extracted.pop("reporter_signals", None) or signals
         intake.update(extracted)
         intake["contradictions"] = _contradictions(intake["mentioned"], yolo, md)
@@ -8037,6 +8150,10 @@ def signal_extractor_node(state: RoadGuardState) -> dict:
             "reporter_signals": signals,
             "suspicious": suspicious,
             "llm_used": in_tok > 0,
+            # Round 18: fields the LLM claimed and the text did not support,
+            # and the skip reason when the LLM was not called at all.
+            **({"dropped_unsupported": dropped} if dropped else {}),
+            **({"skip_reason": skip_reason} if skip_reason else {}),
         },
     }
     if autonomy is not None:
@@ -8081,6 +8198,65 @@ def signal_extractor_node(state: RoadGuardState) -> dict:
 
 
 _VALID_SEVERITY = {"minor", "moderate", "severe"}
+# Round 18 (2.11.2026): the LLM may lower severity (minor evidence found)
+# but never raise it; raising requires numeric evidence the Python gates own.
+_SEVERITY_RANK = {"minor": 0, "moderate": 1, "severe": 2}
+# Numeric claims the perception rationale is allowed to state; anything
+# off the actual inputs is replaced by the deterministic rationale.
+_AREA_CLAIM_RE = re.compile(r"area_ratio\s*(?:>|>=|is|=|of|about|at)?\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
+_CONF_CLAIM_RE = re.compile(r"confidence\s*(?:>|>=|is|=|of|about|at)?\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
+_LANE_CLAIM_RE = re.compile(r"\b(?:partial(?:ly)?|full(?:y)?)?\s*lane\s*(?:blockage|block\w*)\b", re.IGNORECASE)
+# Round 18 (2.11.2026): a rationale that calls the case urgent must be
+# backed by passages that spoke of urgency; otherwise it is the model's
+# wording and the fact-check replaces it.
+_URGENCY_WORDS_RE = re.compile(
+    r"\b(urgent(?:ly)?|immediate(?:ly)?|without delay|high[- ]priority|high[- ]risk|"
+    r"emergency|cat ?1|category 1|dispatch (?:now|at once|immediately))\b",
+    re.IGNORECASE,
+)
+
+
+def _verify_perception_rationale(
+    rationale: str, yolo: dict, iq: dict, md: dict
+) -> tuple[str, list[str]]:
+    """Round 18: return (clean_rationale, problems). The LLM's severity rationale
+    is checked against the actual numbers from yolo/iq/md; a claim about a
+    confidence threshold, an area_ratio or a lane blockage that the inputs do
+    not back is flagged. Returns the input unchanged with an empty list when
+    every claim is grounded."""
+    if not isinstance(rationale, str) or not rationale:
+        return rationale or "", []
+    problems: list[str] = []
+    try:
+        actual_conf = float(yolo.get("top1_confidence") or 0.0)
+    except (TypeError, ValueError):
+        actual_conf = 0.0
+    detections = yolo.get("detections") or []
+    try:
+        actual_area = max(
+            (float(d.get("area_ratio") or 0.0) for d in detections if isinstance(d, dict)),
+            default=0.0,
+        )
+    except (TypeError, ValueError):
+        actual_area = 0.0
+    lane = str(md.get("lane_blocked") or "none")
+    for m in _CONF_CLAIM_RE.finditer(rationale):
+        try:
+            claimed = float(m.group(1))
+        except ValueError:
+            continue
+        if claimed > actual_conf + 0.02:
+            problems.append(f"confidence_claim_{claimed:.2f}_vs_actual_{actual_conf:.2f}")
+    for m in _AREA_CLAIM_RE.finditer(rationale):
+        try:
+            claimed = float(m.group(1))
+        except ValueError:
+            continue
+        if claimed > actual_area + 0.005:
+            problems.append(f"area_ratio_claim_{claimed:.3f}_vs_actual_{actual_area:.3f}")
+    if lane == "none" and _LANE_CLAIM_RE.search(rationale):
+        problems.append("lane_blockage_claim_but_form_says_none")
+    return rationale, problems
 _VALID_CONFIDENCE = {"high", "medium", "low"}
 _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
@@ -8299,13 +8475,44 @@ def _llm_refine(
     if not isinstance(missing, list):
         missing = base_missing
 
+    # Round 18 (2.11.2026): numeric gates for severity live in Python. The
+    # LLM may keep or lower the deterministic severity; raising it requires
+    # evidence that only the Python rule tree owns (lane blockage, area
+    # ratio, confidence floor). An upgrade is blocked and the autonomy
+    # record names it; the model's would-have-said value stays in the trace.
+    base_sev = str(base_profile.get("severity_signal") or "minor")
+    requested_sev = str(parsed["severity_signal"])
+    final_sev = requested_sev
+    blocked_upgrade = False
+    if _SEVERITY_RANK.get(requested_sev, 0) > _SEVERITY_RANK.get(base_sev, 0):
+        final_sev = base_sev
+        blocked_upgrade = True
+    # Round 18: the rationale is validated against the actual numbers; a
+    # claim the inputs do not back makes the deterministic one win.
+    rationale_text, rationale_problems = _verify_perception_rationale(
+        str(parsed.get("severity_rationale") or ""), yolo, iq, md
+    )
+    if rationale_problems:
+        rationale_text = (
+            f"{base_profile.get('severity_rationale') or ''} "
+            f"(LLM rationale flagged: {','.join(rationale_problems)})"
+        )
     refined = {
-        "severity_signal": parsed["severity_signal"],
-        "severity_rationale": str(parsed.get("severity_rationale") or "")[:200],
+        "severity_signal": final_sev,
+        "severity_rationale": rationale_text[:200],
         "confidence": parsed["confidence"],
         "needs_more_evidence": bool(parsed.get("needs_more_evidence", base_needs_more)),
         "missing_fields": [str(m) for m in missing][:5],
     }
+    if blocked_upgrade or rationale_problems:
+        if autonomy is None:
+            autonomy = {"mode": "deterministic", "violations": [], "tools_used": []}
+        if blocked_upgrade:
+            autonomy.setdefault("violations", []).append(
+                f"severity_blocked_upgrade:{requested_sev}_to_{final_sev}"
+            )
+        for p in rationale_problems:
+            autonomy.setdefault("violations", []).append(f"rationale_claim:{p}")
     if autonomy is not None:
         refined["autonomy"] = autonomy
     return refined, in_tok, out_tok
@@ -9447,10 +9654,15 @@ def _decision_messages(state: RoadGuardState, rule_hint: dict) -> list[dict]:
         "procedures": [
             {
                 # The model cites article_ids; the URL cost tokens and was
-                # never read (round 10).
+                # never read (round 10). Round 18 adds the date and the
+                # URL slug so the model can tell when a passage is outdated.
                 "issuing_body": p.get("issuing_body"),
                 "article_ids": (p.get("article_ids") or [])[:3],
                 "quarantined_summary": p.get("quarantined_summary", {}),
+                "source": {
+                    "url": p.get("source_url") or "",
+                    "date": p.get("date") or "",
+                },
             }
             for p in procedures[:3]  # Decision only needs the top 3
         ],
@@ -10326,6 +10538,11 @@ def _verify_decision_rationale(decision: dict, state: dict) -> dict:
         detail = state.get("research_coverage_detail") or {}
         if detail and not detail.get("repair_window") and _TIME_WINDOW_RE.search(text):
             found.append("repair_window_not_in_sources")
+        # Round 18 (2.11.2026): urgency words follow the same rule. In r11
+        # the model called a routine case "urgent dispatch recommended"
+        # while the retrieved standards contained no urgency wording.
+        if detail and not detail.get("urgency") and _URGENCY_WORDS_RE.search(text):
+            found.append("urgency_not_in_sources")
         return found
 
     # Round 13: each text is checked on its own, so the text that failed is
@@ -10595,6 +10812,7 @@ def decision_node(state: RoadGuardState) -> dict:
     # waiting on the local model for a verdict that is already decided
     # ties up a concurrency slot for 60-120 s per upload.
     declined_decision: dict | None = None
+    catalog_sealed = False
     if state.get("evidence_declined"):
         # Round 17: the reporter re-sent the original photo with a note; no
         # new evidence, no second model pass, a human decides.
@@ -10612,9 +10830,14 @@ def decision_node(state: RoadGuardState) -> dict:
             "missing_evidence": [],
         }
     elif state.get("dataset_match") and rule_hint["action"] in ("known_image", "human_review"):
+        # Round 18 (2.11.2026): a catalogued image seals the verdict without
+        # calling the LLM; the fallback_reason label was misleading in r11
+        # (43 of 94 cases carried llm_unavailable_or_unparseable although
+        # Decision never called the model). Marked as catalog_match instead.
         llm_decision = None
         in_tok = out_tok = 0
         react_info = None
+        catalog_sealed = True
     else:
         react_info = None
         if _react_enabled():
@@ -10680,6 +10903,33 @@ def decision_node(state: RoadGuardState) -> dict:
     elif declined_decision is not None:
         decision = declined_decision
         fallback_reason = "evidence_declined"
+    elif catalog_sealed:
+        # Round 18: the catalog match is the authoritative verdict; no LLM
+        # call to label as a fallback. source=catalog_match on the trace line.
+        source = "catalog_match"
+        last_error = ""
+        for _ in range(MAX_GROUNDING_RETRIES):
+            candidate = _decide_rule_based(state)
+            try:
+                assert_decision_grounded(
+                    cited_sources=candidate["cited_sources"],
+                    tool_result_ids=tool_result_ids,
+                    action=candidate["action"],
+                )
+                decision = candidate
+                break
+            except HandoffAssertionError as e:
+                last_error = str(e)
+                continue
+        else:
+            fallback_reason = f"grounding_failed_after_{MAX_GROUNDING_RETRIES}_retries"
+            decision = {
+                "action": "human_review",
+                "rationale": f"grounding failed after {MAX_GROUNDING_RETRIES} retries: {last_error}",
+                "priority": 50,
+                "cited_sources": [],
+                "missing_evidence": [],
+            }
     else:
         fallback_reason = _llm_fallback_reason(react_info)
         last_error = ""

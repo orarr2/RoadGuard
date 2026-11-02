@@ -120,13 +120,16 @@ def test_profile_agent_without_quality_tool_gets_it_run_by_the_code(monkeypatch)
     assert "rule_based_hint" not in seen["user_payload"]
     assert seen["user_payload"]["metadata"]["location"] == "Allenby 42"
     assert "recall_agent_notes" in seen["tool_registry"]
-    # The agent's reading stands (iq={} reads as a usable frame); the
-    # skipped tool was run by the code and the violation is on record.
-    assert refined["severity_signal"] == "severe" and refined["confidence"] == "high"
+    # The agent read iq={} as usable and the skipped tool was run by the
+    # code. Round 18: the LLM may not raise severity, so the "severe" it
+    # returned is clamped to the deterministic "moderate" and the violation
+    # is on record alongside the required-not-called one.
+    assert refined["severity_signal"] == "moderate" and refined["confidence"] == "high"
     assert "fallback_reason" not in refined
     assert refined["autonomy"]["auto_ran"] == ["inspect_image_quality"]
     assert refined["autonomy"]["quality_verdict"] == "high"
     assert "required_not_called:inspect_image_quality" in refined["autonomy"]["violations"]
+    assert any("severity_blocked_upgrade:severe_to_moderate" in v for v in refined["autonomy"]["violations"])
 
 
 def test_profile_agent_confidence_is_capped_by_a_low_quality_verdict(monkeypatch):
@@ -142,6 +145,9 @@ def test_profile_agent_confidence_is_capped_by_a_low_quality_verdict(monkeypatch
     assert refined["autonomy"]["quality_verdict"] == "low"
     assert refined["confidence"] == "low"
     assert "confidence_capped_by_quality_tool" in refined["autonomy"]["violations"]
+    # Round 18: severity upgrade from the LLM is blocked at the moderate base.
+    assert refined["severity_signal"] == "moderate"
+    assert any("severity_blocked_upgrade" in v for v in refined["autonomy"]["violations"])
 
 
 def test_profile_agent_with_quality_tool_is_accepted_and_recurrence_checked(monkeypatch):
@@ -149,8 +155,11 @@ def test_profile_agent_with_quality_tool_is_accepted_and_recurrence_checked(monk
            "needs_more_evidence": False, "missing_fields": [], "is_recurring_location": True,
            "tools_used": ["inspect_image_quality"]}
     refined, _ = _refine(monkeypatch, raw, {"inspect_image_quality": {"ok": True, "quality_verdict": "high", "concerns": []}})
-    assert refined["severity_signal"] == "severe"
-    assert refined["autonomy"]["violations"] == ["recurrence_claim_contradicts_lookup"]
+    # Round 18: severity upgrade is blocked at the base; the recurrence
+    # claim contradicting the lookup still ends up in violations.
+    assert refined["severity_signal"] == "moderate"
+    assert "recurrence_claim_contradicts_lookup" in refined["autonomy"]["violations"]
+    assert any("severity_blocked_upgrade:severe_to_moderate" in v for v in refined["autonomy"]["violations"])
 
 
 def _rag_state():

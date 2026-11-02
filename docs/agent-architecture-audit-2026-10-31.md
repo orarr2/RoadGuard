@@ -425,3 +425,21 @@ Run r10 (build e01c0de, Benny's corpus) was stopped at 25 of 94 on the owner's w
 
 Suite after round 17: 267 tests. Deployed for run r11 after the wipe.
 
+
+
+## 26. Round 18 (2.11.2026, morning): the owner's r11 review
+
+Run r11 (build 8c92552, Benny's corpus) finished 94 of 94 overnight (3 h 16 min; 40 standard, 29 known_image, 25 human_review, 0 needs_more_evidence; submit-to-verdict median 118 s, p90 185, max 316). The full trace went to the owner, who named six items. All six were built. His main concern was that the LLM still invents facts about the input: a reporter who writes "no other photo is available" became a D40 pothole with partial lane blockage and swerving vehicles; the profile builder raised severity to severe citing "partial lane blockage, area_ratio>=0.05, confidence>=0.6" on a case where lane was none, area was 0.02 and confidence was 0.54.
+
+| # | His finding | Change (round 18) | Test |
+|---|---|---|---|
+| A | signal extractor invented hazard class, lane and urgency from a "no new info" text | `_NO_NEW_INFO_RE` catches "no other photo", "nothing else to add" and the like (text goes through the keyword extractor, LLM is not called); `_verify_llm_claims` drops any mentioned field or urgency the keyword tables did not find; the trace entry carries `dropped_unsupported` and `skip_reason` | `tests/test_round18_integrity.py` |
+| B | profile builder raised severity on numeric claims the inputs did not back | `_SEVERITY_RANK` blocks any LLM upgrade (minor → severe clamped to minor); `_verify_perception_rationale` flags claims about `confidence>=X`, `area_ratio>=X` or lane blockage that the actual numbers do not back; the deterministic rationale wins and the autonomy record carries `severity_blocked_upgrade:*` and `rationale_claim:*` | same file; `tests/test_worker_autonomy.py` |
+| C | a tool-call-as-reply through a lookup tool was accepted as the agent's answer | `_worker_tool_call_is_other_tools_reply` fires only on tools whose names start with the lookup prefixes (`lookup_`, `query_`, `inspect_`, `extract_`, `check_`, `broaden_`, `recall_`); the call records `ok=False` with the error "arguments look like another tool's final answer" and the model is given one more round | same file; `tests/test_round11_reliability.py`; `tests/test_round16_labels.py` |
+| D | RAG passage previews lacked source metadata and the model called cases "urgent" when the standards did not | the Decision payload's `procedures` block carries `source: {url, date}` next to the article ids; the fact-check gains `urgency_not_in_sources`, matching the existing `repair_window_not_in_sources` logic | same file |
+| E | 43 of 94 r11 cases carried `fallback_reason=llm_unavailable_or_unparseable` on known_image, although Decision never called the LLM | the catalog-sealed branch sets `source=catalog_match` and leaves `fallback_reason` unset; the Decision line now reads `source=catalog_match` on the trace instead of a false fallback | same file |
+| F | on an evidence-declined pass the signal extractor still spent 90 s on a 0-token LLM call | the extractor now sets `skip_reason=evidence_declined` and skips the LLM entirely; the keyword extractor still runs for the deterministic path | same file |
+
+Suite after round 18: 295 tests.
+
+**Why the signal extractor LLM is NOT removed outright.** The owner's analysis of r11 asked for state integrity, not for the LLM's removal. Keeping it with strict verification (drop any claim the keyword tables cannot support) catches the invented fields the owner saw in r11 while leaving legitimate extractions (a text that does say "pothole on main road with partial blockage") untouched.

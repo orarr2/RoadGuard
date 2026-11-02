@@ -16,7 +16,10 @@ def _call(name, args, call_id="c1"):
     return {"id": call_id, "function": {"name": name, "arguments": json.dumps(args)}}
 
 
-def test_worker_reply_in_a_tool_envelope_is_a_reply_not_a_failed_tool(monkeypatch):
+def test_worker_reply_through_a_lookup_tool_is_retried_once(monkeypatch):
+    """Round 18 (2.11.2026): a lookup tool cannot carry the final answer;
+    the first tool-call reply is rejected and the retry round's plain
+    content is accepted. Supersedes the round 16 reply-in-envelope test."""
     ran = []
 
     def similar(location: str, hazard_class: str, state: dict | None = None) -> dict:
@@ -24,24 +27,23 @@ def test_worker_reply_in_a_tool_envelope_is_a_reply_not_a_failed_tool(monkeypatc
         return {"ok": True, "count": 0, "cases": [], "is_recurring_location": False}
 
     registry = {"lookup_similar_cases": (similar, ra.PERCEPTION_WORKER_TOOLS["lookup_similar_cases"][1])}
-    reply = {"severity_signal": "minor", "severity_rationale": "D40", "confidence": "low", "needs_more_evidence": False, "missing_fields": []}
-    monkeypatch.setattr(ra, "chat", lambda messages, tools=None, temperature=0.0, use_panel=False, provider_override=None, **kw: (_msg(tool_calls=[_call("lookup_similar_cases", reply)]), 10, 5))
+    reply = {"severity_signal": "minor", "severity_rationale": "D40", "confidence": "low",
+             "needs_more_evidence": False, "missing_fields": []}
+    replies = iter([
+        _msg(tool_calls=[_call("lookup_similar_cases", reply)]),
+        _msg(content=json.dumps(reply)),
+    ])
+    monkeypatch.setattr(ra, "chat", lambda messages, tools=None, temperature=0.0, use_panel=False, provider_override=None, **kw: (next(replies), 10, 5))
     parsed, _, _, info = ra._llm_react_worker(
         agent_name="profile_builder", system_prompt="s", user_payload={}, tool_registry=registry,
         state={"hazard_id": "hz_t", "metadata": {}}, provider_override=None, max_hops=2, time_cap_s=90.0,
     )
     assert parsed == reply and ran == []
-    call = info["calls"][0]
-    assert call["executed"] is False and call["reply_in_tool_call"] is True
-    assert info["steps"][0]["content"]["reply_in_tool_call"] is True
-    assert isinstance(info["time_used_s"], float) and info["time_cap_s"] == 90.0
+    first = info["calls"][0]
+    assert first["ok"] is False  # round 18: executed as a failed tool call (validation failed before run)
+    assert "look like another tool" in (first.get("error") or "")
     rec = ra._autonomy_record(parsed, info, required=("inspect_image_quality",))
-    assert rec["failed_tools"] == [] and "tool_call_failed:lookup_similar_cases" not in rec["violations"]
-    assert rec["final_in_tool_call"] is True and rec["time_cap_s"] == 90.0 and rec["cut_by_cap"] is False
-    step_text = "\n".join(ra._entry_lines(info["steps"][0], []))
-    assert "status: reply (JSON arrived as a tool call; used as the agent's reply, no tool ran)" in step_text
-    assert "error:" not in step_text and "failed" not in step_text
-
+    assert "tool_call_failed:lookup_similar_cases" in rec["violations"]
 
 def test_result_lines_carry_tool_failures_and_reply_via():
     prof = {"speaker": "profile_builder", "kind": "handoff_out", "content": {
