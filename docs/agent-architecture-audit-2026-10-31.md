@@ -477,3 +477,28 @@ Run r13 (build 3317422, Benny's new 4,663-chunk corpus) was stopped at 16 of 94 
 Suite after round 20: 318 tests.
 
 **Why the phash neighbour is not just annotated.** Round 19 added a fact-check that flagged a pic_id citation in the model's text, with a strong note in the payload that the pic_id "MUST NOT be cited". In r13 the model still cited it. Hiding the identifying details is the only way to be sure the model cannot copy them: without a pic_id in the prompt, there is no pic_id to copy.
+
+
+## 29. Round 21 (3.11.2026, late night): the owner's r13 review, enforcement edition
+
+Run r14 (build 88c83ef, round 20 code) was stopped at 21 of 94 so the fixes
+the owner named could land before the next full run. His read of r13 and
+r14 was not that the system failed to DETECT mistakes, but that it still let
+them AFFECT the final verdict and the operator-facing trace.
+
+| # | His finding | Change (round 21) | Test |
+|---|---|---|---|
+| A | r13 hz_770ac7c30461 (live D20, phash neighbour D40): verdict STANDARD; hz_995e3102af69 (live D40, phash D20): STANDARD. The hidden-payload fix of round 20 removed the labels from the model's view, but the rule tree still let STANDARD through | `_decide_rule_based` gains a floor: a phash match whose catalogue classes do not include the live detector's class is routed to `human_review` with `floor_reason=phash_class_mismatch`, regardless of the LLM path. The catalogue pic_id is cited, the rationale names the disagreement | `tests/test_round21_integrity.py` |
+| B | the operator trace printed `model rationale: ...` and `model assessment: ...` under the FAIL line; the owner saw this as "the system shows the user the text it decided to discard" | the formatter prints only the deterministic sentence and one tail saying "model text kept on rationale_check for the audit"; the rejected text stays in the stored `rationale_check.model_rationale` / `.model_assessment` for the auditor, out of the operator's view | same file; `tests/test_round11_reliability.py` |
+| C | profiles downgraded severity because "no past reports" or "small area_ratio" alone; the owner's rule is that a downgrade needs a positive indicator of low severity | `_llm_refine` blocks any downgrade whose rationale does not name a positive low-severity signal (small cm value, "surface crack", "no spalling", "healed", etc.); the autonomy record carries `severity_blocked_downgrade:X_to_Y` | same file; `tests/test_round18_integrity.py` |
+| D | the operator did not see in words what the retrieved standards failed to answer | `_deterministic_rationale` on insufficient_coverage appends "standards did not answer: <missing>" so the sentence shown to the operator always carries that fact | same file |
+
+Suite after round 21: 326 tests.
+
+**Why the phash floor lives in the rule tree.** Round 20 hid the phash
+neighbour's labels from the Decision prompt; the model cannot cite what it
+cannot see. But the Decision model is only one of two paths: the rule tree
+runs in parallel and makes the final verdict when the model fails
+grounding or is skipped. In r13 the rule tree happily picked STANDARD on
+a phash neighbour with a contradictory label. Round 21 closes that gap at
+the tree level, so both paths route to human_review.

@@ -167,16 +167,19 @@ def test_deterministic_rationale_is_built_from_the_inputs():
 
 
 def test_trace_lines_show_the_rationale_check():
+    """Round 21 (3.11.2026): the operator trace shows the FAIL line and the
+    deterministic sentence, but no longer the rejected model text (kept on
+    rationale_check.model_rationale / model_assessment for the audit only)."""
     failed = {"speaker": "decision", "kind": "final", "content": {
         "action": "standard", "priority": 45, "source": "llm_react", "rationale": "routine repair queue for D40 ...", "cited_sources": [],
         "rationale_check": {"ok": False, "problems": ["reporter_claims_without_text"], "model_rationale": "The reporter's claims are consistent"}}}
     text = "\n".join(ra._entry_lines(failed, []))
-    assert "rationale check: FAIL (reporter_claims_without_text); deterministic sentence shown" in text
-    assert "model rationale: The reporter's claims are consistent" in text
+    assert "rationale check: FAIL (reporter_claims_without_text); deterministic sentence shown (model text kept on rationale_check for the audit)" in text
+    assert "model rationale:" not in text
     both = {"speaker": "decision", "kind": "final", "content": {
         "action": "standard", "priority": 45, "source": "llm_react", "rationale": "deterministic", "cited_sources": [],
         "rationale_check": {"ok": False, "problems": ["reporter_claims_without_text"], "model_assessment": "The reporter's claims are unverified"}}}
-    assert "model assessment: The reporter's claims are unverified" in "\n".join(ra._entry_lines(both, []))
+    assert "model assessment:" not in "\n".join(ra._entry_lines(both, []))
     ok = {"speaker": "decision", "kind": "final", "content": {"action": "standard", "priority": 45, "source": "llm_react",
                                                               "rationale": "fine", "cited_sources": [], "rationale_check": {"ok": True, "problems": []}}}
     assert "rationale check: ok" in "\n".join(ra._entry_lines(ok, []))

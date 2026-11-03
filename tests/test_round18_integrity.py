@@ -144,13 +144,23 @@ def test_severity_upgrade_from_llm_is_blocked_at_the_base(monkeypatch):
     assert any("severity_blocked_upgrade:severe_to_minor" in v for v in refined["autonomy"].get("violations", []))
 
 
-def test_severity_downgrade_from_llm_is_accepted(monkeypatch):
-    raw = {"severity_signal": "minor", "severity_rationale": "D40 pothole, routine triage",
-           "confidence": "medium", "needs_more_evidence": False, "missing_fields": []}
-    refined, _, _ = _refine_with_llm(monkeypatch, raw, base_sev="moderate")
+def test_severity_downgrade_from_llm_needs_a_positive_signal(monkeypatch):
+    """Round 21: a severity downgrade from the LLM is accepted only when the
+    rationale names a positive low-severity cue (small size, surface crack,
+    etc.); without that, the deterministic base severity stands."""
+    with_signal = {"severity_signal": "minor",
+                   "severity_rationale": "D40 small defect, surface crack only, routine",
+                   "confidence": "medium", "needs_more_evidence": False, "missing_fields": []}
+    refined, _, _ = _refine_with_llm(monkeypatch, with_signal, base_sev="moderate")
     assert refined["severity_signal"] == "minor"
-    # Round 18: no block fires on a downgrade, so autonomy is unset here
-    assert "severity_blocked_upgrade" not in str(refined.get("autonomy") or {})
+    assert "severity_blocked_downgrade" not in str(refined.get("autonomy") or {})
+
+    without_signal = {"severity_signal": "minor",
+                      "severity_rationale": "D40 pothole, routine triage",
+                      "confidence": "medium", "needs_more_evidence": False, "missing_fields": []}
+    refined2, _, _ = _refine_with_llm(monkeypatch, without_signal, base_sev="moderate")
+    assert refined2["severity_signal"] == "moderate"
+    assert any("severity_blocked_downgrade:minor_to_moderate" in v for v in refined2["autonomy"]["violations"])
 
 
 def test_rationale_confidence_claim_above_actual_is_flagged():

@@ -8497,9 +8497,26 @@ def _llm_refine(
     requested_sev = str(parsed["severity_signal"])
     final_sev = requested_sev
     blocked_upgrade = False
+    blocked_downgrade = False
     if _SEVERITY_RANK.get(requested_sev, 0) > _SEVERITY_RANK.get(base_sev, 0):
         final_sev = base_sev
         blocked_upgrade = True
+    elif _SEVERITY_RANK.get(requested_sev, 0) < _SEVERITY_RANK.get(base_sev, 0):
+        # Round 21 (3.11.2026): a downgrade needs a positive signal, not
+        # just "no prior reports" or "low area_ratio". The owner saw
+        # profiles downgrade on absence of history. The LLM must point to
+        # a measurable low-severity cue in its rationale (small cm value,
+        # healed edge, surface crack only) or we keep the base severity.
+        rationale_low = str(parsed.get("severity_rationale") or "").lower()
+        positive_signals = (
+            "small ", "superficial", "shallow", "surface crack", "no spalling",
+            "healed", "edge intact", "narrow crack", "light severity",
+            "< 1 cm", "< 2 cm", "under 2 cm", "under 1 cm",
+        )
+        has_signal = any(w in rationale_low for w in positive_signals)
+        if not has_signal:
+            final_sev = base_sev
+            blocked_downgrade = True
     # Round 18: the rationale is validated against the actual numbers; a
     # claim the inputs do not back makes the deterministic one win.
     rationale_text, rationale_problems = _verify_perception_rationale(
@@ -8517,12 +8534,16 @@ def _llm_refine(
         "needs_more_evidence": bool(parsed.get("needs_more_evidence", base_needs_more)),
         "missing_fields": [str(m) for m in missing][:5],
     }
-    if blocked_upgrade or rationale_problems:
+    if blocked_upgrade or blocked_downgrade or rationale_problems:
         if autonomy is None:
             autonomy = {"mode": "deterministic", "violations": [], "tools_used": []}
         if blocked_upgrade:
             autonomy.setdefault("violations", []).append(
                 f"severity_blocked_upgrade:{requested_sev}_to_{final_sev}"
+            )
+        if blocked_downgrade:
+            autonomy.setdefault("violations", []).append(
+                f"severity_blocked_downgrade:{requested_sev}_to_{final_sev}"
             )
         for p in rationale_problems:
             autonomy.setdefault("violations", []).append(f"rationale_claim:{p}")
@@ -9393,6 +9414,45 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
         _live_cls, _live_conf = _detector_prediction_from_state(state)
         _sev = str((state.get("hazard_profile") or {}).get("severity_signal") or "")
         image_status = _image_match_status(match, _live_cls, _sev, _live_conf)
+        # Round 21 (3.11.2026): a phash neighbour whose catalogue labels
+        # disagree with the live detector's class is NOT standard material.
+        # In r13 hz_770ac7c30461 (live D20, catalogue D40) and
+        # hz_995e3102af69 (live D40, catalogue D20) the verdict was
+        # standard; the owner's rule is "approximate similarity cannot
+        # validate classification". Routed to a human.
+        _catalog_classes = _catalog_classes_set(_summary.get("classes") or "")
+        if (
+            str(_summary.get("match") or "") == "phash"
+            and _live_cls is not None
+            and _catalog_classes
+            and _live_cls not in _catalog_classes
+        ):
+            severity_tool = DECISION_TOOLS["check_hazard_severity"][0](
+                hazard_class=(state.get("hazard_profile") or {}).get("primary_class") or "",
+                confidence=float((state.get("hazard_profile") or {}).get("primary_confidence") or 0.0),
+                road_type=(state.get("metadata") or {}).get("road_type") or "main",
+                lane_blocked=(state.get("metadata") or {}).get("lane_blocked") or "none",
+                recurrence_count_30d=(state.get("hazard_profile") or {}).get("recurrence_count_30d", 0),
+            )
+            return {
+                "action": "human_review",
+                "rationale": (
+                    f"phash similar photo (pic_id={_summary.get('pic_id')}, "
+                    f"distance {match.get('distance')}) with catalogue labels "
+                    f"{sorted(_catalog_classes)} disagrees with the live detector's "
+                    f"{_live_cls}; approximate similarity cannot validate the class."
+                )[:500],
+                "priority": int(severity_tool.get("priority") or 50),
+                "cited_sources": image_match_cite,
+                "missing_evidence": [],
+                "floor_applied": True,
+                "floor_reason": "phash_class_mismatch",
+                "floor_trigger": (
+                    f"catalog_classes={sorted(_catalog_classes)} vs "
+                    f"live_class={_live_cls} (phash distance={match.get('distance')})"
+                ),
+                "image_match_status": image_status,
+            }
     profile = state.get("hazard_profile") or {}
     md = state.get("metadata") or {}
     tool_result_ids = state.get("tool_result_ids") or []
@@ -10694,6 +10754,12 @@ def _deterministic_rationale(decision: dict, state: dict) -> str:
         detail = state.get("research_coverage_detail") or {}
         if detail.get("sufficiency"):
             cov += f", {detail['sufficiency']}"
+            # Round 21 (3.11.2026): the operator always sees in words what
+            # the standards did NOT answer, so no assessment carries an
+            # unverifiable repair window or urgency note by omission.
+            missing = detail.get("missing") or []
+            if detail.get("sufficiency") == "insufficient_coverage" and missing:
+                cov += f" (standards did not answer: {','.join(missing)})"
         bits.append(cov)
     intake = state.get("reporter_intake") or {}
     bits.append("reporter text present" if intake.get("text") else "no reporter text")
@@ -12250,7 +12316,10 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
                 else:
                     out.append(f"{_INDENT}rationale check: ok")
             else:
-                tail = "deterministic sentence shown, model text below"
+                # Round 21 (3.11.2026): the operator reads ONE clean
+                # sentence. The model's rejected text is kept on the
+                # stored rationale_check for the audit, not printed here.
+                tail = "deterministic sentence shown (model text kept on rationale_check for the audit)"
                 if corr:
                     tail = f"correction round {corr.get('status')}; " + tail
                 enforcement = rc.get("enforcement")
@@ -12261,13 +12330,14 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
                     )
                 elif enforcement == "kept":
                     tail += "; verdict kept (not more severe than the rule tree)"
+                if rc.get("state_scrubbed"):
+                    tail += f"; state_scrubbed={','.join(rc['state_scrubbed'])}"
                 out.append(
                     f"{_INDENT}rationale check: FAIL ({', '.join(rc.get('problems') or [])}); {tail}"
                 )
-                if rc.get("model_rationale"):
-                    out.append(f"{_INDENT}  model rationale: {_short(rc['model_rationale'], 400)}")
-                if rc.get("model_assessment"):
-                    out.append(f"{_INDENT}  model assessment: {_short(rc['model_assessment'], 400)}")
+                # Round 21: the operator trace does not print the rejected
+                # model text; it stays on rc['model_rationale'] and
+                # rc['model_assessment'] for the auditor.
         cited = [str(x) for x in (c.get("cited_sources") or [])]
         out.append(f"{_INDENT}cited_sources={cited}")
         # 27.10.2026 trace enrichment: per-source grounding breakdown so
