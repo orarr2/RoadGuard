@@ -7484,8 +7484,16 @@ def _maybe_run_supervisor_agent(state: dict) -> dict:
         return {}
     yolo = state.get("yolo_output") or {}
     md = state.get("metadata") or {}
+    # Round 20 (3.11.2026): the supervisor's assess_input_complexity tool
+    # requires `hazard_class` by its signature; the payload used the key
+    # `hazard_class_detected`, so the tool failed every call ("hazard_class
+    # is required") and the supervisor read "no action needed, hazard
+    # class not provided" (r13 hz_0973521216da and other cases). Both
+    # keys are kept — the note check uses hazard_class_detected elsewhere.
+    hazard_class_value = yolo.get("top1_class")
     payload = {
-        "hazard_class_detected": yolo.get("top1_class"),
+        "hazard_class": hazard_class_value,
+        "hazard_class_detected": hazard_class_value,
         "detector_confidence": yolo.get("top1_confidence"),
         # Round 17: the band from the policy thresholds, so the note does
         # not re-grade the number.
@@ -9598,21 +9606,23 @@ def _catalogue_context_for_prompt(match: dict | None) -> dict:
         similarity_pct = max(0, 100 - int(round(float(distance) * 100 / 64))) if distance is not None else None
     except (TypeError, ValueError):
         similarity_pct = None
+    # Round 20 (3.11.2026): phash neighbours are hidden from the Decision
+    # prompt entirely. The LLM cannot copy a pic_id it never saw, nor cite
+    # the neighbour's class or prediction as evidence about this photo.
+    # The rule tree and the trace still see the match (they are not fed
+    # into the model). The payload tells the model only the fact that an
+    # approximate match exists, so it knows to prefer human_review on
+    # contradictory detections without any identifying detail.
     return {
         "dataset_match": None,
         "similar_catalogue_photo": {
             "note": (
-                "a DIFFERENT catalogued photo that looks alike (perceptual hash). "
-                "Its labels describe THAT photo, not this one; its pic_id MUST NOT "
-                "be cited as evidence about this photo's class or verdict. For an "
-                "approximate match route to human_review when the live detector and "
-                "its labels disagree."
+                "An approximate (perceptual-hash) match to a different "
+                "catalogued photo exists. Its labels, pic_id and recorded "
+                "prediction are intentionally HIDDEN from you to prevent "
+                "copying them as evidence about this photo. On a "
+                "contradictory detection prefer human_review."
             ),
-            "pic_id": summary.get("pic_id"),
-            "phash_distance": distance,
-            "similarity_pct": similarity_pct,
-            "its_labels": summary.get("classes"),
-            "its_recorded_prediction": summary.get("model_prediction"),
         },
     }
 
@@ -10589,6 +10599,35 @@ def _verify_decision_rationale(decision: dict, state: dict) -> dict:
     }
 
 
+def _scrub_state_on_fact_check_failure(state: dict, problems: list[str]) -> list[str]:
+    """Round 20 (3.11.2026): when a fact-check problem names an input the
+    inputs do not actually carry, clear the related state so no downstream
+    agent reads it back as truth. Returns the keys cleared, for the trace."""
+    cleared: list[str] = []
+    intake = state.get("reporter_intake") or {}
+    signals = state.get("reporter_signals") or {}
+    for p in problems or []:
+        if p == "reporter_claims_without_text":
+            if intake.get("mentioned"):
+                intake["mentioned"] = {"hazard_class": None, "lane_blocked": None, "road_type": None}
+                cleared.append("reporter_intake.mentioned")
+            if intake.get("urgency_claimed"):
+                intake["urgency_claimed"] = False
+                cleared.append("reporter_intake.urgency_claimed")
+            if any(v is not None for v in signals.values()):
+                for k in signals:
+                    signals[k] = None
+                cleared.append("reporter_signals")
+        elif p == "lane_blockage_not_in_form":
+            if (intake.get("mentioned") or {}).get("lane_blocked"):
+                intake["mentioned"]["lane_blocked"] = None
+                cleared.append("reporter_intake.mentioned.lane_blocked")
+    if cleared:
+        state["reporter_intake"] = intake
+        state["reporter_signals"] = signals
+    return cleared
+
+
 def _removed_claims_note(problems: list[str]) -> str:
     """Round 19: a one-line note the operator sees under the deterministic
     sentence, naming the kinds of claim the fact-check removed from the
@@ -11102,6 +11141,11 @@ def decision_node(state: RoadGuardState) -> dict:
                     rationale_check["corrected"] = True
             rationale_check["correction"] = correction
             if not rationale_check["ok"]:
+                # Round 20: scrub the state fields the failed claims were
+                # about, so no downstream agent reads them back as truth.
+                scrubbed = _scrub_state_on_fact_check_failure(state, rationale_check["problems"])
+                if scrubbed:
+                    rationale_check["state_scrubbed"] = scrubbed
                 sentence = _deterministic_rationale(decision, state)
                 # Round 19 (3.11.2026): the operator sees the clean sentence
                 # and the one-line note of what the fact-check removed; the
@@ -12404,8 +12448,18 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             line += f"  time={float(auto['time_used_s']):.0f}s/{float(cap):.0f}s" if cap else f"  time={float(auto['time_used_s']):.0f}s"
             if auto.get("cut_by_cap"):
                 line += " (cut by cap)"
-        if auto.get("source"):
-            line += f"  source={auto['source']}"
+        # Round 20 (3.11.2026): the autonomy source is always visible: a line
+        # that reads auto_ran=X without an agent-called hop is a
+        # deterministic fallback, not autonomy; /stats/agents separates the
+        # two channels on this label.
+        source_tag = auto.get("source")
+        if not source_tag:
+            if int(auto.get("hops") or 0) > 0 and auto.get("tools_used"):
+                source_tag = "agent_choice"
+            elif auto.get("auto_ran"):
+                source_tag = "deterministic_fallback"
+        if source_tag:
+            line += f"  source={source_tag}"
         line += f"  violations={violations}"
         out.append(line)
     ts = entry.get("ts")

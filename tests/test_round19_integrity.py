@@ -69,7 +69,8 @@ def test_similar_catalogue_photo_payload_names_the_constraint_explicitly():
                                             "pic_id": 2417, "classes": "D20",
                                             "model_prediction": {"top1_class": "D20"}})
     note = ctx["similar_catalogue_photo"]["note"]
-    assert "MUST NOT be cited" in note and "pic_id" in note
+    # Round 20: the payload hides the pic_id entirely; the note says so.
+    assert "HIDDEN" in note and "pic_id" in note
     assert "human_review" in note
 
 

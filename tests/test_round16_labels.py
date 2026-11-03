@@ -55,7 +55,7 @@ def test_result_lines_carry_tool_failures_and_reply_via():
     lines = ra._entry_lines(prof, [])
     assert lines[0].endswith("llm_used=True  tool_failures=1  reply_via=tool_call")
     auto = [l for l in lines if "autonomy:" in l][0]
-    assert "agent_called=inspect_image_quality  hops=2  failed=recall_agent_notes  reply_via=tool_call  time=44s/90s  violations=tool_call_failed:recall_agent_notes" in auto
+    assert "agent_called=inspect_image_quality  hops=2  failed=recall_agent_notes  reply_via=tool_call  time=44s/90s  source=agent_choice  violations=tool_call_failed:recall_agent_notes" in auto
     assert "tools=" not in auto
 
     cut = {"speaker": "rag_retriever", "kind": "handoff_out", "content": {
@@ -68,7 +68,8 @@ def test_result_lines_carry_tool_failures_and_reply_via():
     # is the topic axis; sufficient reflects whether the questions are answered).
     assert "topic=direct_match  sufficient=no  answers=repair_window,traffic_control  missing=urgency,safety_risk  llm_used=True" in lines2[0]
     auto2 = [l for l in lines2 if "autonomy:" in l][0]
-    assert "agent_called=none  hops=0  auto_ran=query_repair_standards  fallback=deterministic_query (3 passages)  time=90s/90s (cut by cap)  violations=" in auto2
+    # Round 20: auto_ran without an agent-called hop prints source=deterministic_fallback.
+    assert "agent_called=none  hops=0  auto_ran=query_repair_standards  fallback=deterministic_query (3 passages)  time=90s/90s (cut by cap)  source=deterministic_fallback  violations=" in auto2
 
     dec = {"speaker": "decision", "kind": "final", "content": {
         "action": "standard", "priority": 45, "source": "llm_react", "rationale": "r", "cited_sources": [],

@@ -88,7 +88,8 @@ def test_regression_3_phash_neighbor_pic_id_cannot_be_cited_as_evidence():
     assert any(p.startswith("phash_neighbor_cited_as_evidence:pic_id=10179") for p in rc["problems"])
     # The payload itself names the rule in words, as a defence in depth.
     ctx = ra._catalogue_context_for_prompt(state["dataset_match"])
-    assert "MUST NOT be cited" in ctx["similar_catalogue_photo"]["note"]
+    # Round 20: payload hides the pic_id entirely instead of just forbidding it.
+    assert "HIDDEN" in ctx["similar_catalogue_photo"]["note"]
 
 
 # ---------------------------------------------------------------- 4. sha256 identity with a contradicting catalog label → human_review

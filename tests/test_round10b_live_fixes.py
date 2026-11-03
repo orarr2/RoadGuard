@@ -90,12 +90,15 @@ def _match(kind, distance):
 
 
 def test_a_similar_photo_is_not_presented_as_the_catalogued_photo():
+    """Round 20 (3.11.2026): phash neighbours are hidden from the Decision
+    prompt entirely. The payload tells the model only that an approximate
+    match exists, without the pic_id, labels or recorded prediction."""
     payload = json.loads(ra._decision_messages({**_BASE, "dataset_match": _match("phash", 15)}, _HINT)[1]["content"])
     assert payload["dataset_match"] is None
     sim = payload["similar_catalogue_photo"]
-    assert sim["pic_id"] == 1024 and sim["phash_distance"] == 15 and sim["similarity_pct"] == 77
-    assert sim["its_labels"] == "D10" and sim["its_recorded_prediction"] == "D10 0.76"
-    assert "DIFFERENT" in sim["note"]
+    assert "pic_id" not in sim and "its_labels" not in sim
+    assert "its_recorded_prediction" not in sim and "phash_distance" not in sim
+    assert "HIDDEN" in sim["note"] and "approximate" in sim["note"].lower()
 
     same = json.loads(ra._decision_messages({**_BASE, "dataset_match": _match("sha256", 0)}, _HINT)[1]["content"])
     assert same["similar_catalogue_photo"] is None

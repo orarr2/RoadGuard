@@ -294,7 +294,8 @@ def test_trace_and_stats_show_autonomy():
                          "autonomy": {"mode": "autonomous", "tools_used": ["inspect_image_quality"], "declared_tools": [],
                                       "hops": 1, "violations": ["recurrence_claim_contradicts_lookup"]}}}
     lines = ra.format_trace_lines("hz1", [entry], metadata={"class": "D40"}, verdict={"action": "standard", "priority": 10}, status="open")
-    assert any("autonomy: agent_called=inspect_image_quality  hops=1  violations=recurrence_claim_contradicts_lookup" in ln for ln in lines)
+    # Round 20: the autonomy line carries source=agent_choice when hops>0.
+    assert any("autonomy: agent_called=inspect_image_quality  hops=1  source=agent_choice  violations=recurrence_claim_contradicts_lookup" in ln for ln in lines)
     agg = api._aggregate_agent_metrics([{"agent_trace_json": json.dumps([entry]), "class": "D40"}])
     # Round 11 (1.11.2026): tools the agent called, tools the contract ran
     # for it and failed calls are counted apart.

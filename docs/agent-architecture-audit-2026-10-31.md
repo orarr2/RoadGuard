@@ -461,3 +461,19 @@ Separately, Benny uploaded his second corpus on 3.11 morning: `english_vector_co
 | F | regression tests for the five scenarios from the owner's review | `tests/test_round19_regression.py`: profiler cannot claim confidence above actual; LLM severity upgrade blocked; phash neighbour pic_id citation flagged; sha256 identity with contradicting label routed to human_review; `insufficient_coverage` blocks repair-window and urgency claims | `tests/test_round19_regression.py` |
 
 Suite after round 19: 309 tests.
+
+
+## 28. Round 20 (3.11.2026, night): the owner's r13 review
+
+Run r13 (build 3317422, Benny's new 4,663-chunk corpus) was stopped at 16 of 94 on the owner's word after he read the live trace and named four items. His main concern: phash neighbour labels and pic_id were still in the Decision prompt, so the model could cite them even when it had no sha256 identity; and the Supervisor tool failed on every call because the payload used `hazard_class_detected` while the tool required `hazard_class`.
+
+| # | His finding | Change (round 20) | Test |
+|---|---|---|---|
+| A | the Decision prompt still contained the phash neighbour's labels, pic_id and recorded prediction, so the model could copy them as evidence (r13 hz_8d9a063b403e: live D20 but the neighbour was D40 and the verdict stayed STANDARD) | `_catalogue_context_for_prompt` on a phash match now delivers ONLY a `note` block; pic_id, phash_distance, its_labels, its_recorded_prediction and similarity_pct are hidden. The LLM cannot cite what it does not see. The rule tree and the trace still see the full match. | `tests/test_round20_integrity.py`; `tests/test_round10b_live_fixes.py` |
+| B | the Supervisor tool failed every call because the payload used `hazard_class_detected` and the tool required `hazard_class` (r13 hz_0973521216da: `invalid arguments: hazard_class is required`, then the supervisor read "no action needed, hazard class not provided") | the payload now carries both `hazard_class` (for the tool) and `hazard_class_detected` (back-compat with the note check) | same file |
+| C | a claim the fact-check removed from the model's rationale could still reach a downstream agent through the `state` | `_scrub_state_on_fact_check_failure` clears `reporter_intake.mentioned`, `reporter_intake.urgency_claimed` and `reporter_signals` on `reporter_claims_without_text`; clears `reporter_intake.mentioned.lane_blocked` on `lane_blockage_not_in_form`. The rationale_check carries `state_scrubbed` so the operator sees which fields were cleared. | same file |
+| D | autonomy metrics mixed `agent_called=X` and `agent_called=none  auto_ran=X`, which looked like autonomy even when it was a deterministic fallback | the autonomy line always carries `source=` — `agent_choice` when the hop count is positive and the agent chose a tool, `deterministic_fallback` when only `auto_ran` ran, or an explicit source the caller set (e.g. `agent_retrieval` on the RAG path) | same file; `tests/test_round16_labels.py`; `tests/test_worker_autonomy.py` |
+
+Suite after round 20: 318 tests.
+
+**Why the phash neighbour is not just annotated.** Round 19 added a fact-check that flagged a pic_id citation in the model's text, with a strong note in the payload that the pic_id "MUST NOT be cited". In r13 the model still cited it. Hiding the identifying details is the only way to be sure the model cannot copy them: without a pic_id in the prompt, there is no pic_id to copy.
