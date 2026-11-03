@@ -443,3 +443,21 @@ Run r11 (build 8c92552, Benny's corpus) finished 94 of 94 overnight (3 h 16 min;
 Suite after round 18: 295 tests.
 
 **Why the signal extractor LLM is NOT removed outright.** The owner's analysis of r11 asked for state integrity, not for the LLM's removal. Keeping it with strict verification (drop any claim the keyword tables cannot support) catches the invented fields the owner saw in r11 while leaving legitimate extractions (a text that does say "pothole on main road with partial blockage") untouched.
+
+
+## 27. Round 19 (3.11.2026, night): the owner's r12 review
+
+Run r12 (build 32a8a7c, Benny's 3,409-chunk corpus) finished 94 of 94 overnight (3 h 16 min; 36 standard, 32 known_image, 26 human_review, 0 needs_more_evidence; submit-to-verdict median 112 s, p90 166, max 328; 6-second improvement in the median over r11 and 19 in p90). The round 18 safeguards were present and visible: 43 catalog_match decisions (fallback label was wrong on 43 of 94 in r11 and is now source=catalog_match); 11 evidence_declined signal-extractor skips (~16 minutes saved); 9 severity_blocked_upgrade violations recorded; 18 correction rounds, one enforced to the rule tree. The owner then named six items from r12.
+
+Separately, Benny uploaded his second corpus on 3.11 morning: `english_vector_corpus_backup.json` 4,663 chunks (SHA256 c781b3d5bf807662381a0c0014fcca98334ca9d8bbb0b85d63fd5d941e1f0abe) plus `extracted_corpus_backup.json` 1,705 pre-chunk source entries, `Evaluation/groundedness_eval.py` + `benchmark_25_questions.json`, `SRC/rag_pipeline.py` and `Notebooks/01_roadguard_rag_pipeline_end_to_end.ipynb`. The 4,663-chunk corpus replaced the 3,409 one on the VM at 20:36 local; direct chroma queries confirm the four D classes return relevant content.
+
+| # | His finding | Change (round 19) | Test |
+|---|---|---|---|
+| A | r12 hz_472b131e8248: a phash neighbour pic_id=10179 cited as "cataloged D00 crack is consistent" | `_PIC_ID_CITATION_RE` + a new fact-check `phash_neighbor_cited_as_evidence:pic_id=<n>` fires when the model's text names a pic_id and the match is NOT sha256; the Decision payload's `similar_catalogue_photo.note` strengthens the rule in words ("its pic_id MUST NOT be cited as evidence about this photo's class or verdict") | `tests/test_round19_integrity.py`; `tests/test_round19_regression.py` |
+| B | the Validator flagged but did not clean (hz_ace919c8055a: STANDARD stayed with the model's unsupported `reporter_claims`) | `_removed_claims_note` names the kinds of claim removed from the model's text; the final `decision["rationale"]` and `decision["assessment"]` carry both the deterministic sentence and the note, so the operator reads what was dropped and why | same file |
+| C | `direct_match` wording read as "the standards answer the operational questions" | the RAG trace line now reads `topic=<direct_match> sufficient=<yes\|no>  answers=... missing=...`; the `coverage` state key is unchanged (back-compat), the trace just surfaces both axes | same file; `tests/test_round16_labels.py` |
+| D | Benny's corpus only populates `source` (document filename), not `source_url`, `issuing_body`, `date` | the Decision payload's `procedures[*].source` dict now carries `name: <filename>` next to `url` and `date`; the operator sees the document name even when url/date are empty | same file |
+| E | 3 of 94 r12 cases wrote "sec-4.3" in the rationale, which is the fewshot example citation copied as a real id | both `_RESEARCH_FEWSHOT` and `_DECISION_FEWSHOT` use `ex-id-00` as the example id; a note under each example says "cite only tool_result_ids from THIS case". The grounding check already rejected `sec-4.3` out of context, this prevents the copy | same file |
+| F | regression tests for the five scenarios from the owner's review | `tests/test_round19_regression.py`: profiler cannot claim confidence above actual; LLM severity upgrade blocked; phash neighbour pic_id citation flagged; sha256 identity with contradicting label routed to human_review; `insufficient_coverage` blocks repair-window and urgency claims | `tests/test_round19_regression.py` |
+
+Suite after round 19: 309 tests.

@@ -4286,14 +4286,14 @@ Output:
 _RESEARCH_FEWSHOT = """\
 EXAMPLE
 Input (truncated): hazard primary_class=D40 severity=severe road_type=main;
-                   quarantined_summaries=[{id: sec-4.3, hazard_type: pothole,
+                   quarantined_summaries=[{id: ex-id-00, hazard_type: pothole,
                    repair_window_hours: 24, severity_tier: urgent}].
 Output:
 {
-  "reasoning": "The retrieved standard sec-4.3 matches both hazard_class (pothole/D40) and road_type (main). Both axes covered - direct_match. Confidence high because one high-quality passage.",
+  "reasoning": "The retrieved standard ex-id-00 matches both hazard_class (pothole/D40) and road_type (main). Both axes covered - direct_match. Confidence high because one high-quality passage.",
   "coverage": "direct_match",
   "confidence": "high",
-  "key_findings": ["sec-4.3 says pothole on main road is a 24h repair window"]
+  "key_findings": ["ex-id-00 says pothole on main road is a 24h repair window"]
 }
 """
 
@@ -4302,17 +4302,17 @@ _DECISION_FEWSHOT = """\
 EXAMPLE
 Input (truncated): hazard_profile.primary_class=D40 severity=severe;
                    perception_confidence=high;
-                   research_handoff.coverage=direct_match tool_result_ids=["sec-4.3"];
+                   research_handoff.coverage=direct_match tool_result_ids=["ex-id-00"];
                    reporter_claims={size_cm: 40, depth_cm: 8, vehicles_swerving: true}.
 Output:
 {
-  "reasoning": "D40 on main road with lane blockage and high perception confidence - matches urgent rule. Research provides sec-4.3 which supports the 24h repair window. Grounded citation available, so I can take urgent.",
+  "reasoning": "D40 on main road with lane blockage and high perception confidence - matches urgent rule. Research provides ex-id-00 which supports the 24h repair window. Grounded citation available, so I can take urgent.",
   "action": "urgent",
-  "rationale": "D40 pothole blocking main road; sec-4.3 mandates 24h repair window",
+  "rationale": "D40 pothole blocking main road; ex-id-00 mandates 24h repair window",
   "priority": 90,
-  "cited_sources": ["sec-4.3"],
+  "cited_sources": ["ex-id-00"],
   "missing_evidence": [],
-  "assessment": "The detector and the form agree on a pothole in the driving path of a main road, and sec-4.3 sets a 24h repair window. The reporter's 40 cm by 8 cm and swerving vehicles are unverified but consistent with the lane blockage. On site, confirm the depth and whether the edge is undercut before dispatch."
+  "assessment": "The detector and the form agree on a pothole in the driving path of a main road, and ex-id-00 sets a 24h repair window. The reporter's 40 cm by 8 cm and swerving vehicles are unverified but consistent with the lane blockage. On site, confirm the depth and whether the edge is undercut before dispatch."
 }
 """
 
@@ -5105,6 +5105,11 @@ class RagClient:
                     "source_url": meta.get("source_url", ""),
                     "issuing_body": meta.get("issuing_body", ""),
                     "date": meta.get("publication_date", ""),
+                    # Round 19 (3.11.2026): Benny's new corpus carries only
+                    # the source document filename on `source`; the Decision
+                    # payload shows it so the operator sees which standard
+                    # the passage came from.
+                    "source": meta.get("source", ""),
                     "hazard_types": [meta.get("hazard_class", "")],
                     "road_types": [meta.get("road_type") or "any"],
                     "article_ids": [str(_id)],
@@ -9136,6 +9141,7 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
                 "source_url": p.get("source_url"),
                 "issuing_body": p.get("issuing_body"),
                 "date": p.get("date"),
+                "source": p.get("source", ""),
                 "article_ids": p.get("article_ids", []),
                 "quarantined_summary": quarantined,
                 "relevance": p.get("relevance") or {},
@@ -9596,8 +9602,11 @@ def _catalogue_context_for_prompt(match: dict | None) -> dict:
         "dataset_match": None,
         "similar_catalogue_photo": {
             "note": (
-                "a DIFFERENT catalogued photo that looks alike (perceptual hash); "
-                "its labels describe that photo, not this one"
+                "a DIFFERENT catalogued photo that looks alike (perceptual hash). "
+                "Its labels describe THAT photo, not this one; its pic_id MUST NOT "
+                "be cited as evidence about this photo's class or verdict. For an "
+                "approximate match route to human_review when the live detector and "
+                "its labels disagree."
             ),
             "pic_id": summary.get("pic_id"),
             "phash_distance": distance,
@@ -9656,10 +9665,15 @@ def _decision_messages(state: RoadGuardState, rule_hint: dict) -> list[dict]:
                 # The model cites article_ids; the URL cost tokens and was
                 # never read (round 10). Round 18 adds the date and the
                 # URL slug so the model can tell when a passage is outdated.
+                # Round 19 (3.11.2026): Benny's corpus only carries a source
+                # document filename; surface it here so the model can name
+                # the document in its assessment, instead of only an opaque
+                # article_id. The filename comes through on `source.name`.
                 "issuing_body": p.get("issuing_body"),
                 "article_ids": (p.get("article_ids") or [])[:3],
                 "quarantined_summary": p.get("quarantined_summary", {}),
                 "source": {
+                    "name": (p.get("source") or p.get("source_name") or "")[:120],
                     "url": p.get("source_url") or "",
                     "date": p.get("date") or "",
                 },
@@ -10386,6 +10400,11 @@ _NO_REPORTER_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 _CATALOG_WORDS_RE = re.compile(r"\bcatalog(?:ue)?(?:d|ed)?\b", re.IGNORECASE)
+# Round 19 (3.11.2026): a phash neighbour pic_id in the model's text is a
+# citation of a DIFFERENT photo as evidence about this one. In r12
+# hz_472b131e8248 the rationale read "cataloged D00 crack is consistent"
+# on a phash neighbour, and the Decision cited pic_id in cited_sources.
+_PIC_ID_CITATION_RE = re.compile(r"\bpic[_\s]?id\s*[=:]\s*(\d+)", re.IGNORECASE)
 _LANE_BLOCKED_RE = re.compile(
     r"\b(lane (?:is )?(?:partially |fully )?blocked|blocking (?:the |a )?lane|blocks (?:the |a )?lane|"
     r"partial(?:ly)? block\w*|full(?:y)? block\w*|lane blockage|affects the vehicle path|in the (?:driving|vehicle) path)\b",
@@ -10511,6 +10530,17 @@ def _verify_decision_rationale(decision: dict, state: dict) -> dict:
             found.append("known_image_claim_without_sha256_match")
         elif _CATALOG_WORDS_RE.search(text) and not match:
             found.append("catalogue_claim_without_match")
+        # Round 19: a pic_id in the model's text is evidence about the
+        # catalogued image, not about this photo; only sha256 identity may
+        # carry a pic_id through to a verdict. In r12 hz_472b131e8248 the
+        # model wrote "pic_id=10179" as a supporting citation on a phash
+        # neighbour whose catalog label differed from the live detection.
+        if match and str(match.get("match") or "") != "sha256":
+            for m in _PIC_ID_CITATION_RE.finditer(text):
+                cited = m.group(1)
+                if str(cited) == str(match.get("pic_id") or ""):
+                    found.append(f"phash_neighbor_cited_as_evidence:pic_id={cited}")
+                    break
         foreign = sorted({c for c in _CLASS_CODE_RE.findall(text) if c not in allowed})
         if foreign:
             found.append("class_not_in_inputs:" + ",".join(foreign))
@@ -10557,6 +10587,44 @@ def _verify_decision_rationale(decision: dict, state: dict) -> dict:
         "rationale_problems": rationale_problems,
         "assessment_problems": assessment_problems,
     }
+
+
+def _removed_claims_note(problems: list[str]) -> str:
+    """Round 19: a one-line note the operator sees under the deterministic
+    sentence, naming the kinds of claim the fact-check removed from the
+    model's text."""
+    kinds: list[str] = []
+    for p in problems or []:
+        if p.startswith("phash_neighbor_cited_as_evidence"):
+            kinds.append("a phash-neighbour pic_id as evidence")
+        elif p == "reporter_claims_without_text":
+            kinds.append("claims attributed to a reporter who sent no text")
+        elif p == "lane_blockage_not_in_form":
+            kinds.append("a lane blockage the form does not state")
+        elif p.startswith("lane_free_claim_but_form_says_"):
+            kinds.append("a lane-free claim that contradicts the form")
+        elif p == "known_image_claim_without_sha256_match":
+            kinds.append("a known-image claim without a sha256 match")
+        elif p == "catalogue_claim_without_match":
+            kinds.append("a catalogue claim without any match")
+        elif p == "repair_window_not_in_sources":
+            kinds.append("a repair window the retrieved standards do not state")
+        elif p == "urgency_not_in_sources":
+            kinds.append("an urgency the retrieved standards do not state")
+        elif p.startswith("class_not_in_inputs:"):
+            kinds.append("class codes not present in the inputs")
+        elif p.startswith("class_name_mismatch:"):
+            kinds.append("a code paired with another class's name")
+        elif p.startswith("severity_text_"):
+            kinds.append("severity wording that contradicts the profile")
+        elif p.startswith("confidence_word_"):
+            kinds.append("a confidence band that contradicts the number")
+    if not kinds:
+        return ""
+    # Keep unique order of first appearance.
+    seen: set[str] = set()
+    uniq = [k for k in kinds if not (k in seen or seen.add(k))]
+    return "(note: the fact-check removed from the model's text " + "; ".join(uniq[:4]) + ".)"
 
 
 def _deterministic_rationale(decision: dict, state: dict) -> str:
@@ -10659,6 +10727,7 @@ _PROBLEM_SENTENCES = {
     "lane_blockage_not_in_form": "the form says lane_blocked=none and no input states a lane blockage",
     "known_image_claim_without_sha256_match": "this photo is not a catalogued file (no sha256 match)",
     "catalogue_claim_without_match": "no catalogue match exists for this photo",
+    "phash_neighbor_cited_as_evidence": "the catalogued pic_id is a DIFFERENT photo found by perceptual-hash similarity; it is not evidence about this photo's class or verdict",
     "repair_window_not_in_sources": "the retrieved standards state no repair window or deadline; do not state one",
     "severity_text_minor_vs_profile_severe": "the profile's severity_signal is severe; your text says the opposite",
     "severity_text_severe_vs_profile_minor": "the profile's severity_signal is minor; your text says severe",
@@ -10670,6 +10739,9 @@ def _problem_sentences(problems: list[str], state: dict) -> list[str]:
     profile = state.get("hazard_profile") or {}
     out: list[str] = []
     for p in problems:
+        if p.startswith("phash_neighbor_cited_as_evidence"):
+            out.append(_PROBLEM_SENTENCES["phash_neighbor_cited_as_evidence"])
+            continue
         if p in _PROBLEM_SENTENCES:
             out.append(_PROBLEM_SENTENCES[p])
         elif p.startswith("lane_free_claim_but_form_says_"):
@@ -11031,12 +11103,16 @@ def decision_node(state: RoadGuardState) -> dict:
             rationale_check["correction"] = correction
             if not rationale_check["ok"]:
                 sentence = _deterministic_rationale(decision, state)
+                # Round 19 (3.11.2026): the operator sees the clean sentence
+                # and the one-line note of what the fact-check removed; the
+                # whole model text stays on rationale_check for the audit.
+                removed_note = _removed_claims_note(rationale_check["problems"])
                 if rationale_check.get("rationale_problems"):
                     rationale_check["model_rationale"] = str(decision.get("rationale") or "")[:500]
-                    decision["rationale"] = sentence
+                    decision["rationale"] = (sentence + " " + removed_note).strip()[:500]
                 if rationale_check.get("assessment_problems"):
                     rationale_check["model_assessment"] = str(decision.get("assessment") or "")[:500]
-                    decision["assessment"] = sentence
+                    decision["assessment"] = (sentence + " " + removed_note).strip()[:400]
                 enforcement = _enforce_unverified(decision, rule_hint)
                 rationale_check["enforcement"] = enforcement["kind"]
                 rationale_check["enforcement_why"] = enforcement["why"]
@@ -11965,9 +12041,14 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
                 f"  answers={','.join(dc.get('answered') or []) or 'none'}"
                 f"  missing={','.join(dc.get('missing') or []) or 'none'}"
             ) + (f"  sufficiency={dc['sufficiency']}" if dc.get("sufficiency") else "")
+        # Round 19 (3.11.2026): topic and sufficient are two separate axes;
+        # the operator sees both on the trace line so direct_match does not
+        # read as "the standards answer the operational questions".
+        sufficient_word = "yes" if (dc or {}).get("sufficiency") == "sufficient_coverage" else "no"
         out.append(
             f"{lbl} query_repair_standards -> {c.get('n_procedures', len(ids))} passages  "
-            f"coverage={c.get('coverage')}{cov_bits}  llm_used={c.get('llm_used')}" + _worker_flags(c)
+            f"topic={c.get('coverage')}  sufficient={sufficient_word}{cov_bits}  "
+            f"llm_used={c.get('llm_used')}" + _worker_flags(c)
         )
         # 27.10.2026 trace enrichment: show what was actually asked and what
         # came back. _short limits grew to 400+ so a passage preview up to

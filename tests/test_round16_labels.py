@@ -64,7 +64,9 @@ def test_result_lines_carry_tool_failures_and_reply_via():
         "autonomy": {"tools_used": [], "hops": 0, "auto_ran": ["query_repair_standards"], "fallback": "deterministic_query (3 passages)",
                      "time_used_s": 90.4, "time_cap_s": 90.0, "cut_by_cap": True, "violations": ["required_not_called:query_repair_standards", "time_cap"]}}}
     lines2 = ra._entry_lines(cut, ["a1"])
-    assert "coverage=direct_match  answers=repair_window,traffic_control  missing=urgency,safety_risk  llm_used=True" in lines2[0]
+    # Round 19: the RAG line now shows topic/sufficient apart (direct_match
+    # is the topic axis; sufficient reflects whether the questions are answered).
+    assert "topic=direct_match  sufficient=no  answers=repair_window,traffic_control  missing=urgency,safety_risk  llm_used=True" in lines2[0]
     auto2 = [l for l in lines2 if "autonomy:" in l][0]
     assert "agent_called=none  hops=0  auto_ran=query_repair_standards  fallback=deterministic_query (3 passages)  time=90s/90s (cut by cap)  violations=" in auto2
 
