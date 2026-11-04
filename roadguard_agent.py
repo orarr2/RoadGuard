@@ -699,6 +699,12 @@ class Database:
         # that carries that verdict, keep the old `agree` column for
         # back-compat.
         ("agent_feedback", "verdict", "TEXT NOT NULL DEFAULT ''"),
+        # Round 23 iter 5 (4.11.2026): a row grades ONE axis of the
+        # agent's call. kind='hazard' for the identification vote
+        # (agree/disagree/not_relevant), kind='priority' for the
+        # urgency vote (ok/too_low/too_high). The default stays 'hazard'
+        # so older rows continue to read as hazard feedback.
+        ("agent_feedback", "kind", "TEXT NOT NULL DEFAULT 'hazard'"),
     )
 
     def _migrate_columns(self) -> None:

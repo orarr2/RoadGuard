@@ -3730,14 +3730,21 @@ def create_app() -> FastAPI:
                 hid = html.escape(c['id'])
                 cls_code = (id_to_class.get(c["id"]) or "").upper() or "OTHER"
                 hazard_label = html.escape(_hazard_label(id_to_class.get(c["id"], "")))
-                # Round 23 iter 4 (4.11.2026): the 'your vote' pill cell
-                # is removed - the clicked button picks up the active
-                # style instead, which is the same signal with one fewer
-                # column.
-                action_cell = (
-                    f"<button class='fb-btn fb-agree' data-id='{hid}' data-verdict='agree' title='Worker agrees with the agent'>Agree</button>"
-                    f"<button class='fb-btn fb-disagree' data-id='{hid}' data-verdict='disagree' title='Worker disagrees with the agent'>Disagree</button>"
-                    f"<button class='fb-btn fb-nr' data-id='{hid}' data-verdict='not_relevant' title='Image is not a hazard / noise / other'>Not relevant</button>"
+                # Round 23 iter 5 (4.11.2026): per-row feedback has TWO
+                # axes - identification (hazard: agree/disagree/not
+                # relevant) and urgency (priority: ok / too low / too
+                # high). Each axis's clicked button picks up the active-*
+                # class so the active vote per axis is visible without
+                # a separate column.
+                hazard_cell = (
+                    f"<button class='fb-btn fb-agree' data-id='{hid}' data-kind='hazard' data-verdict='agree' title='Hazard was correctly identified'>Agree</button>"
+                    f"<button class='fb-btn fb-disagree' data-id='{hid}' data-kind='hazard' data-verdict='disagree' title='Hazard identification is wrong'>Disagree</button>"
+                    f"<button class='fb-btn fb-nr' data-id='{hid}' data-kind='hazard' data-verdict='not_relevant' title='Image is not a hazard / noise / other'>Not relevant</button>"
+                )
+                priority_cell = (
+                    f"<button class='fb-btn fb-pri-ok' data-id='{hid}' data-kind='priority' data-verdict='ok' title='Priority is right'>OK</button>"
+                    f"<button class='fb-btn fb-pri-lo' data-id='{hid}' data-kind='priority' data-verdict='too_low' title='Priority should be higher'>Too low</button>"
+                    f"<button class='fb-btn fb-pri-hi' data-id='{hid}' data-kind='priority' data-verdict='too_high' title='Priority should be lower'>Too high</button>"
                 )
                 score_text = f"{c['score']:.2f}" if c.get("score") is not None else "-"
                 rows_html_parts.append(
@@ -3748,7 +3755,8 @@ def create_app() -> FastAPI:
                     f"<td class='td-score'>{score_text}</td>"
                     f"<td class='{cls}'>{d}</td>"
                     f"<td>{c['priority'] or ''}</td>"
-                    f"<td class='td-act' data-hid='{hid}'>{action_cell}</td>"
+                    f"<td class='td-act' data-hid='{hid}' data-kind='hazard'>{hazard_cell}</td>"
+                    f"<td class='td-act' data-hid='{hid}' data-kind='priority'>{priority_cell}</td>"
                     f"<td>{html.escape(c['location'])[:60]}</td>"
                     f"<td>{ts}</td>"
                     f"</tr>"
@@ -3777,7 +3785,8 @@ def create_app() -> FastAPI:
                 "<th title='Hazard type the agents identified in the image'>hazard the agents saw</th>"
                 "<th title='YOLO live confidence (0-1)'>score</th>"
                 "<th>decision</th><th>priority</th>"
-                "<th>worker feedback</th>"
+                "<th title='Was the agent right about the hazard?'>hazard feedback</th>"
+                "<th title='Was the agent right about the urgency / priority?'>priority feedback</th>"
                 "<th>location</th><th>time</th></tr></thead>"
                 f"<tbody id='rows'>{rows_html}</tbody>"
                 "</table>"
@@ -3858,8 +3867,8 @@ def create_app() -> FastAPI:
             f"</header>"
             f"<nav class='tabs' id='tabs'>"
             f"<button class='tab-btn active' data-tab='cases'>Cases ({len(rows)})</button>"
-            f"<button class='tab-btn' data-tab='priority'>Priority</button>"
             f"<button class='tab-btn' data-tab='agentvalue'>Agent value</button>"
+            f"<button class='tab-btn' data-tab='dclasses'>D Classes</button>"
             f"<button class='tab-btn' data-tab='ruletree'>Rule tree</button>"
             f"</nav>"
         )
@@ -3941,10 +3950,15 @@ def create_app() -> FastAPI:
         .fb-btn.fb-agree{color:#166534;border-color:#86efac}
         .fb-btn.fb-disagree{color:#991b1b;border-color:#fecaca}
         .fb-btn.fb-nr{color:#6b7280;border-color:#d1d5db}
+        .fb-btn.fb-pri-ok{color:#166534;border-color:#86efac}
+        .fb-btn.fb-pri-lo{color:#92400e;border-color:#fde68a}
+        .fb-btn.fb-pri-hi{color:#1e3a8a;border-color:#93c5fd}
         .fb-btn:hover{background:#f9fafb}
-        .fb-btn.active-agree{background:#dcfce7;color:#166534;border-color:#86efac}
+        .fb-btn.active-agree,.fb-btn.active-ok{background:#dcfce7;color:#166534;border-color:#86efac}
         .fb-btn.active-disagree{background:#fee2e2;color:#991b1b;border-color:#fecaca}
-        .fb-btn.active-nr{background:#f3f4f6;color:#1f2937;border-color:#d1d5db}
+        .fb-btn.active-nr,.fb-btn.active-not_relevant{background:#f3f4f6;color:#1f2937;border-color:#d1d5db}
+        .fb-btn.active-too_low{background:#fef3c7;color:#92400e;border-color:#fde68a}
+        .fb-btn.active-too_high{background:#dbeafe;color:#1e3a8a;border-color:#93c5fd}
         .fb-btn.flash-ok{animation:flash-ok-anim 0.6s ease-out}
         @keyframes flash-ok-anim{0%{box-shadow:0 0 0 0 rgba(34,197,94,0.6)}100%{box-shadow:0 0 0 6px rgba(34,197,94,0)}}
         .fb-btn.flash-err{animation:flash-err-anim 0.6s ease-out}
@@ -3956,24 +3970,17 @@ def create_app() -> FastAPI:
         .cls-chip:hover{background:#f9fafb}
         .cls-chip.active{background:#0ea5e9;color:#fff;border-color:#0ea5e9}
         .cls-chip .cls-n{opacity:0.75;font-weight:500}
-        /* Priority tab */
-        .pri-wrap{max-width:1180px}
-        .pri-h{margin:0 0 6px;font-size:16px;font-weight:700;color:#111827}
-        .pri-sub{color:#6b7280;font-size:13px;margin:0 0 18px}
-        .pri-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
-        .pri-card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:14px}
-        .pri-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;border-bottom:1px solid #f1f5f9;padding-bottom:8px}
-        .pri-ttl{font-weight:700;font-size:13px}
-        .pri-ttl.urgent{color:#b91c1c}
-        .pri-ttl.human{color:#1d4ed8}
-        .pri-ttl.standard{color:#047857}
-        .pri-ttl.evi{color:#b45309}
-        .pri-cnt{font-size:11px;color:#6b7280;font-family:ui-monospace,monospace}
-        .pri-row{display:grid;grid-template-columns:90px 36px 1fr 100px;gap:6px;align-items:center;padding:4px 0;font-size:12px;border-bottom:1px solid #f8fafc}
-        .pri-row:last-child{border-bottom:0}
-        .pri-pri{font-family:ui-monospace,monospace;color:#374151;font-weight:700}
-        .pri-haz{font-family:ui-monospace,monospace;color:#1f2937}
-        .pri-empty{color:#9ca3af;font-size:12px;padding:8px 0;font-style:italic}
+        /* D Classes tab */
+        .dc-wrap{max-width:100%}
+        .dc-h{margin:0 0 6px;font-size:16px;font-weight:700;color:#111827}
+        .dc-sub{color:#6b7280;font-size:13px;margin:0 0 18px}
+        .dc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+        .dc-card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:6px}
+        .dc-code{font-family:ui-monospace,monospace;font-size:12px;color:#6b7280;font-weight:700}
+        .dc-name{font-size:14px;font-weight:700;color:#111827}
+        .dc-img{width:100%;height:170px;object-fit:cover;border-radius:6px;background:#f3f4f6}
+        .dc-img-missing{display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:12px;font-style:italic}
+        .dc-desc{font-size:12px;color:#374151;line-height:1.4}
         /* Agent value tab */
         .av-wrap{max-width:1100px}
         .av-h{margin:0 0 10px;font-size:16px;font-weight:700;color:#111827}
@@ -4000,14 +4007,26 @@ def create_app() -> FastAPI:
         .ag-metric{display:flex;justify-content:space-between;font-size:12px}
         .ag-m-k{color:#374151}
         .ag-m-v{font-family:ui-monospace,monospace;font-weight:700;color:#111827}
-        /* Round 23 iter 4: rule tree canvas scales to the viewport
-           and scrolls horizontally when the tree overflows (viewBox
-           is 1800x1150, so on narrow screens it scrolls). */
+        /* Round 23 iter 5 (4.11.2026): rule tree canvas scrolls
+           horizontally with explicit left / right arrows. The canvas
+           breaks out of the tab-pane padding (negative margins of 20px
+           both sides) so the scroll region covers the full viewport
+           width and the right-hand leaves do not clip against the
+           pane's own padding. */
         .rt-wrap{max-width:100%}
         .rt-h{margin:0 0 6px;font-size:16px;font-weight:700;color:#111827}
-        .rt-sub{color:#6b7280;font-size:13px;margin:0 0 18px}
-        .rt-canvas{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;overflow-x:auto;overflow-y:hidden}
-        .rt-svg{min-width:1200px;width:100%;height:auto;display:block}
+        .rt-sub{color:#6b7280;font-size:13px;margin:0 0 10px}
+        .rt-scrollbar-wrap{display:flex;gap:8px;align-items:center;margin-bottom:8px;position:sticky;left:0}
+        .rt-scroll-btn{appearance:none;background:#fff;border:1px solid #d1d5db;border-radius:8px;padding:6px 14px;font-size:16px;font-weight:700;cursor:pointer;color:#1f2937;min-width:48px}
+        .rt-scroll-btn:hover{background:#f3f4f6}
+        .rt-scroll-btn:active{background:#e5e7eb}
+        .rt-scroll-hint{font-size:11px;color:#6b7280;margin-left:4px}
+        .rt-canvas{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;overflow-x:scroll;overflow-y:hidden;scroll-behavior:smooth;margin-right:-20px;margin-left:0}
+        .rt-canvas::-webkit-scrollbar{height:14px}
+        .rt-canvas::-webkit-scrollbar-track{background:#f3f4f6;border-radius:7px}
+        .rt-canvas::-webkit-scrollbar-thumb{background:#9ca3af;border-radius:7px;border:2px solid #f3f4f6}
+        .rt-canvas::-webkit-scrollbar-thumb:hover{background:#6b7280}
+        .rt-svg{min-width:2000px;width:2000px;height:auto;display:block}
         """
 
         script = """
@@ -4052,22 +4071,41 @@ def create_app() -> FastAPI:
         // HTTP non-2xx flashes the button red and does NOT update the
         // 'your vote' pill, so the worker sees his click did NOT save.
         function urlBase() { return location.pathname.replace(/\\/digest.*/, ''); }
-        // Round 23 iter 4 (4.11.2026): the per-case verdict now shows
-        // only through the active-* class on the clicked button; the
-        // separate pill cell has been removed.
-        function markVote(hid, verdict) {
-          document.querySelectorAll(".td-act[data-hid='" + hid + "'] .fb-btn").forEach(b => {
-            b.classList.remove('active-agree','active-disagree','active-nr');
+        const ACTIVE_CLASSES = ['active-agree','active-disagree','active-nr','active-not_relevant','active-ok','active-too_low','active-too_high'];
+        // Round 23 iter 5 (4.11.2026): mark the verdict per (hazard, kind)
+        // axis so hazard feedback and priority feedback are visible
+        // together.
+        function markVote(hid, kind, verdict) {
+          const sel = ".td-act[data-hid='" + hid + "'][data-kind='" + kind + "'] .fb-btn";
+          document.querySelectorAll(sel).forEach(b => {
+            ACTIVE_CLASSES.forEach(c => b.classList.remove(c));
             if (b.dataset.verdict === verdict) {
-              b.classList.add('active-' + (verdict === 'not_relevant' ? 'nr' : verdict));
+              b.classList.add('active-' + verdict);
             }
           });
         }
-        function clearVote(hid) {
-          document.querySelectorAll(".td-act[data-hid='" + hid + "'] .fb-btn").forEach(b => {
-            b.classList.remove('active-agree','active-disagree','active-nr');
+        function clearVote(hid, kind) {
+          const sel = ".td-act[data-hid='" + hid + "'][data-kind='" + kind + "'] .fb-btn";
+          document.querySelectorAll(sel).forEach(b => {
+            ACTIVE_CLASSES.forEach(c => b.classList.remove(c));
           });
         }
+        // Round 23 iter 5: Rule tree pan arrows. Clicking the chevron
+        // buttons scrolls the canvas by ~85% of its visible width so
+        // two clicks typically cover the whole tree.
+        function bindRuleTreeScroll() {
+          const canvas = document.getElementById('rt-canvas');
+          const l = document.getElementById('rt-scroll-left');
+          const r = document.getElementById('rt-scroll-right');
+          if (!canvas || !l || !r) return;
+          l.addEventListener('click', () => {
+            canvas.scrollBy({left: -Math.round(canvas.clientWidth * 0.85), behavior: 'smooth'});
+          });
+          r.addEventListener('click', () => {
+            canvas.scrollBy({left: Math.round(canvas.clientWidth * 0.85), behavior: 'smooth'});
+          });
+        }
+        bindRuleTreeScroll();
         // Round 23 iter 4: class-filter chips above the Cases table.
         function bindClassChips() {
           const chips = document.querySelectorAll('.cls-chip');
@@ -4096,27 +4134,26 @@ def create_app() -> FastAPI:
             btn.addEventListener('click', async (ev) => {
               ev.stopPropagation();
               const hid = btn.dataset.id;
+              const kind = btn.dataset.kind || 'hazard';
               const verdict = btn.dataset.verdict || 'agree';
               try {
                 const r = await fetch(urlBase() + '/agent_feedback/' + encodeURIComponent(hid), {
                   method: 'POST',
                   headers: {'content-type': 'application/json'},
-                  body: JSON.stringify({verdict: verdict, note: ''}),
+                  body: JSON.stringify({kind: kind, verdict: verdict, note: ''}),
                 });
                 if (!r.ok) { throw new Error('http ' + r.status); }
                 btn.classList.remove('flash-err');
                 btn.offsetWidth; // reflow to retrigger animation
                 btn.classList.add('flash-ok');
                 setTimeout(() => btn.classList.remove('flash-ok'), 700);
-                markVote(hid, verdict);
+                markVote(hid, kind, verdict);
                 refreshAgentValue();
               } catch (e) {
                 btn.classList.remove('flash-ok');
                 btn.offsetWidth;
                 btn.classList.add('flash-err');
                 setTimeout(() => btn.classList.remove('flash-err'), 700);
-                // Leave the active-* state as it was so the worker sees
-                // the click did NOT save.
               }
             });
           });
@@ -4133,9 +4170,11 @@ def create_app() -> FastAPI:
             const byH = d.by_hazard || {};
             document.querySelectorAll('.td-act[data-hid]').forEach(td => {
               const hid = td.dataset.hid;
-              const v = byH[hid];
-              if (v && v.verdict) markVote(hid, v.verdict);
-              else clearVote(hid);
+              const kind = td.dataset.kind || 'hazard';
+              const entry = byH[hid];
+              const v = entry && entry[kind];
+              if (v && v.verdict) markVote(hid, kind, v.verdict);
+              else clearVote(hid, kind);
             });
           } catch (e) { /* silent */ }
         }
@@ -4147,16 +4186,18 @@ def create_app() -> FastAPI:
             const base = location.pathname.replace(/\\/digest.*/, '');
             const d = await fetch(base + '/stats/feedback?window_hours=24', {cache:'no-store'})
                       .then(r => r.json());
-            const total = d.total_cases_voted || 0;
-            function setCard(idv, idt, n) {
+            const hz = d.hazard || {agree:0, disagree:0, not_relevant:0, total_cases_voted:0};
+            const pri = d.priority || {ok:0, too_low:0, too_high:0, total_cases_voted:0};
+            const hzTotal = hz.total_cases_voted || 0;
+            function setCard(idv, idt, n, total, kind) {
               const v = document.getElementById(idv);
               const t = document.getElementById(idt);
               if (v) v.textContent = String(n);
-              if (t) t.textContent = total ? (n + ' of ' + total + ' cases voted') : 'no votes yet';
+              if (t) t.textContent = total ? (n + ' of ' + total + ' cases voted') : 'no ' + kind + ' votes yet';
             }
-            setCard('av-agree-v', 'av-agree-t', d.agree || 0);
-            setCard('av-dis-v',   'av-dis-t',   d.disagree || 0);
-            setCard('av-nr-v',    'av-nr-t',    d.not_relevant || 0);
+            setCard('av-agree-v', 'av-agree-t', hz.agree || 0, hzTotal, 'hazard');
+            setCard('av-dis-v',   'av-dis-t',   hz.disagree || 0, hzTotal, 'hazard');
+            setCard('av-nr-v',    'av-nr-t',    hz.not_relevant || 0, hzTotal, 'hazard');
             function renderList(id, items, empty) {
               const list = document.getElementById(id);
               if (!list) return;
@@ -4202,51 +4243,58 @@ def create_app() -> FastAPI:
         setInterval(refreshAgentValue, 30000);
         """.replace("__CASES__", cases_json)
 
-        # Round 23 iter 4 (4.11.2026): the Priority tab buckets the cases
-        # by the priority number the agents assigned. The owner reads
-        # it as 'how urgent did the agents call each case', in contrast
-        # to the Cases table's sorting by time. Buckets: Urgent (>=80),
-        # High (60-79), Medium (40-59), Low (<40).
-        PRI_BUCKETS = [
-            ("Urgent (>=80)", "urgent", 80, 1000),
-            ("High (60-79)",  "human",   60, 79),
-            ("Medium (40-59)", "standard", 40, 59),
-            ("Low (<40)",     "evi",      0,  39),
-        ]
-        bucket_cards: list[str] = []
-        for label, ccls, lo, hi in PRI_BUCKETS:
-            in_bucket = [c for c in cases if c.get("priority") is not None
-                         and lo <= int(c["priority"]) <= hi]
-            card_rows = ""
-            for c in in_bucket[:30]:
-                hid_short = html.escape(c["id"][:12])
-                hz = html.escape(_hazard_label(id_to_class.get(c["id"], "")))
-                dec = html.escape(c["decision"])
-                dcls = _css_for(c["decision"])
-                card_rows += (
-                    f"<div class='pri-row'>"
-                    f"<code>{hid_short}</code>"
-                    f"<span class='pri-pri'>p{c['priority']}</span>"
-                    f"<span class='pri-haz'>{hz}</span>"
-                    f"<span class='{dcls}'>{dec}</span>"
-                    f"</div>"
-                )
-            if not in_bucket:
-                card_rows = "<div class='pri-empty'>no cases in this band</div>"
-            bucket_cards.append(
-                f"<div class='pri-card'>"
-                f"<div class='pri-head'><span class='pri-ttl {ccls}'>{html.escape(label)}</span>"
-                f"<span class='pri-cnt'>{len(in_bucket)} cases</span></div>"
-                f"<div class='pri-body'>{card_rows}</div>"
+        # Round 23 iter 5 (4.11.2026): the D Classes tab. The owner
+        # asked for a reference grid - one clean exemplar per class
+        # (D00 / D10 / D20 / D40) with name and image, grid layout, no
+        # scroll. The exemplar pic_ids are picked by looking up the
+        # catalog for a single-class labelled sample of each class.
+        with sqlite3.connect("/var/lib/roadguard/roadguard.db") as _dc_con:
+            def _exemplar(cls_code: str) -> int | None:
+                r = _dc_con.execute(
+                    "SELECT pic_id FROM dataset_images WHERE classes = ? AND n_labels = 1 "
+                    "ORDER BY pic_id LIMIT 1",
+                    (cls_code,),
+                ).fetchone()
+                return int(r[0]) if r else None
+            _dc_pics = {c: _exemplar(c) for c in ("D00", "D10", "D20", "D40")}
+        _DC_DESCRIPTIONS = {
+            "D00": ("D00 Longitudinal crack",
+                    "A single crack running along the direction of travel. "
+                    "Often appears near the wheel path or lane line."),
+            "D10": ("D10 Transverse crack",
+                    "A crack running across the direction of travel, roughly "
+                    "perpendicular to the road axis."),
+            "D20": ("D20 Alligator crack",
+                    "A network of interconnected cracks forming irregular polygons, "
+                    "resembling alligator skin. Indicates structural fatigue."),
+            "D40": ("D40 Pothole",
+                    "A bowl-shaped depression in the surface. Varies in diameter "
+                    "and depth; may have sharp or broken edges."),
+        }
+        dc_cards: list[str] = []
+        for code in ("D00", "D10", "D20", "D40"):
+            name, desc = _DC_DESCRIPTIONS[code]
+            pic_id = _dc_pics.get(code)
+            img_html = (
+                f"<img class='dc-img' src='/roadguard/catalog_image/{pic_id}' "
+                f"alt='{name}' onerror=\"this.style.display='none';\">"
+                if pic_id else
+                "<div class='dc-img dc-img-missing'>no exemplar in catalog</div>"
+            )
+            dc_cards.append(
+                f"<div class='dc-card'>"
+                f"<div class='dc-code'>{html.escape(code)}</div>"
+                f"<div class='dc-name'>{html.escape(name)}</div>"
+                f"{img_html}"
+                f"<div class='dc-desc'>{html.escape(desc)}</div>"
                 f"</div>"
             )
-        priority_html = (
-            "<div class='pri-wrap'>"
-            "<h3 class='pri-h'>Priority the agents assigned</h3>"
-            "<p class='pri-sub'>Priority bands drive how fast a case moves to a worker. "
-            "The agent's priority number is what the owner should look at together with the class label, "
-            "not just the decision tag.</p>"
-            f"<div class='pri-grid'>{''.join(bucket_cards)}</div>"
+        d_classes_html = (
+            "<div class='dc-wrap'>"
+            "<h3 class='dc-h'>D-class reference</h3>"
+            "<p class='dc-sub'>Four examples from the labelled catalog, one per class. "
+            "Use as a side-by-side reference when voting on the hazard the agents saw.</p>"
+            f"<div class='dc-grid'>{''.join(dc_cards)}</div>"
             "</div>"
         )
 
@@ -4352,8 +4400,13 @@ def create_app() -> FastAPI:
         rule_tree_html = """
         <div class='rt-wrap'>
           <h3 class='rt-h'>Rule tree the agent is compared against</h3>
-          <p class='rt-sub'>Deterministic baseline. Every agent verdict is scored against the leaf this tree would have picked. Scroll right to see the full depth.</p>
-          <div class='rt-canvas'>
+          <p class='rt-sub'>Deterministic baseline. Every agent verdict is scored against the leaf this tree would have picked. Use the arrows below to pan the whole tree left / right.</p>
+          <div class='rt-scrollbar-wrap'>
+            <button class='rt-scroll-btn' id='rt-scroll-left' aria-label='scroll left'>&larr;</button>
+            <button class='rt-scroll-btn' id='rt-scroll-right' aria-label='scroll right'>&rarr;</button>
+            <span class='rt-scroll-hint'>tree is wider than the screen; use the arrows or drag the scrollbar</span>
+          </div>
+          <div class='rt-canvas' id='rt-canvas'>
             <svg viewBox='0 0 1800 1150' xmlns='http://www.w3.org/2000/svg' class='rt-svg' preserveAspectRatio='xMinYMin meet'>
               <style>
                 .rt-svg .n rect{fill:#fff;stroke:#334155;stroke-width:1.5;rx:8;ry:8}
@@ -4560,8 +4613,8 @@ def create_app() -> FastAPI:
             "<div class='d-empty'>Pick a case on the left.</div>"
             "</aside>"
             "</div></section>"
-            f"<section id='pane-priority' class='tab-pane'>{priority_html}</section>"
             f"<section id='pane-agentvalue' class='tab-pane'>{agent_value_html}</section>"
+            f"<section id='pane-dclasses' class='tab-pane'>{d_classes_html}</section>"
             f"<section id='pane-ruletree' class='tab-pane'>{rule_tree_html}</section>"
             f"<script>{script}</script>"
             "</body></html>"
@@ -4660,13 +4713,19 @@ def create_app() -> FastAPI:
         }
 
     _VALID_VERDICTS = {"agree", "disagree", "not_relevant"}
+    # Round 23 iter 5 (4.11.2026): a feedback row grades ONE axis. The
+    # hazard axis uses agree/disagree/not_relevant (did the agent
+    # identify the hazard?); the priority axis uses ok/too_low/too_high
+    # (was the agent's urgency level right?). The POST writes both the
+    # legacy `agree` flag and the new `kind`+`verdict`.
+    _VALID_PRIORITY_VERDICTS = {"ok", "too_low", "too_high"}
 
     @app.get("/agent_feedback/by_hazard")
     def get_agent_feedback_by_hazard(request: Request, window_hours: int = 24) -> dict:
-        """Round 23 (4.11.2026) iter 3: latest worker verdict per hazard
-        in the window, keyed by hazard_id. The digest JS reads this on
-        page load so a case the worker already voted on shows its vote
-        and lets the worker CHANGE it (undo / re-vote).
+        """Round 23 iter 5 (4.11.2026): latest verdict per hazard FOR
+        EACH kind (hazard, priority). The digest JS reads this on page
+        load so a case the worker voted on - hazard side, priority side
+        or both - shows its latest marks and lets the worker change them.
         """
         if not _is_private_host(request):
             raise HTTPException(status_code=404, detail="not found")
@@ -4680,26 +4739,25 @@ def create_app() -> FastAPI:
         con.row_factory = _sqlite3.Row
         cutoff = time.time() - hrs * 3600
         try:
-            # Latest row per hazard_id (SQLite row_number through a
-            # window function is available from 3.25; the server runs
-            # a newer one).
             rows = con.execute(
                 "WITH ranked AS ("
-                "  SELECT hazard_id, verdict, agree, note, created_at, "
-                "         ROW_NUMBER() OVER (PARTITION BY hazard_id ORDER BY created_at DESC) rn "
+                "  SELECT hazard_id, kind, verdict, agree, note, created_at, "
+                "         ROW_NUMBER() OVER (PARTITION BY hazard_id, kind ORDER BY created_at DESC) rn "
                 "  FROM agent_feedback WHERE created_at >= ?"
-                ") SELECT hazard_id, verdict, agree, note, created_at FROM ranked WHERE rn = 1",
+                ") SELECT hazard_id, kind, verdict, agree, note, created_at "
+                "FROM ranked WHERE rn = 1",
                 (cutoff,),
             ).fetchall()
         finally:
             con.close()
-        out = {}
+        out: dict = {}
         for r in rows:
             v = (r["verdict"] or "").strip().lower() if "verdict" in r.keys() else ""
             if not v:
                 v = "agree" if r["agree"] else "disagree"
-            out[r["hazard_id"]] = {"verdict": v, "note": r["note"] or "",
-                                   "at": r["created_at"]}
+            k = (r["kind"] or "hazard").strip().lower() if "kind" in r.keys() else "hazard"
+            entry = out.setdefault(r["hazard_id"], {})
+            entry[k] = {"verdict": v, "note": r["note"] or "", "at": r["created_at"]}
         return {"window_hours": hrs, "by_hazard": out}
 
     @app.post("/agent_feedback/{hazard_id}")
@@ -4716,13 +4774,21 @@ def create_app() -> FastAPI:
         if not _is_private_host(request):
             raise HTTPException(status_code=404, detail="not found")
         verdict = str(body.get("verdict") or "").strip().lower()
+        kind = str(body.get("kind") or "hazard").strip().lower()
+        if kind not in {"hazard", "priority"}:
+            raise HTTPException(status_code=400,
+                                detail="kind_must_be_hazard_or_priority")
         if not verdict:
-            # back-compat: {"agree": true/false}
+            # back-compat: {"agree": true/false} is always hazard
             if "agree" in body:
                 verdict = "agree" if bool(body.get("agree")) else "disagree"
-        if verdict not in _VALID_VERDICTS:
-            raise HTTPException(status_code=400,
-                                detail="verdict_must_be_agree_disagree_or_not_relevant")
+                kind = "hazard"
+        valid = _VALID_VERDICTS if kind == "hazard" else _VALID_PRIORITY_VERDICTS
+        if verdict not in valid:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"verdict_must_be_one_of_{'_'.join(sorted(valid))}")
+            )
         note = str(body.get("note") or "")[:400]
         import sqlite3 as _sqlite3
         import uuid as _uuid
@@ -4732,16 +4798,19 @@ def create_app() -> FastAPI:
         try:
             fid = "fb_" + _uuid.uuid4().hex[:12]
             con.execute(
-                "INSERT INTO agent_feedback (id, hazard_id, created_at, worker_id, agree, verdict, note) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (fid, hazard_id, time.time(), "", 1 if verdict == "agree" else 0, verdict, note),
+                "INSERT INTO agent_feedback (id, hazard_id, created_at, worker_id, agree, verdict, note, kind) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (fid, hazard_id, time.time(), "", 1 if verdict == "agree" else 0, verdict, note, kind),
             )
             con.commit()
             row = con.execute(
                 "SELECT "
-                "  SUM(CASE WHEN verdict = 'agree' THEN 1 ELSE 0 END) AS agree_n, "
-                "  SUM(CASE WHEN verdict = 'disagree' THEN 1 ELSE 0 END) AS disagree_n, "
-                "  SUM(CASE WHEN verdict = 'not_relevant' THEN 1 ELSE 0 END) AS nr_n, "
+                "  SUM(CASE WHEN kind='hazard' AND verdict='agree' THEN 1 ELSE 0 END) AS haz_agree, "
+                "  SUM(CASE WHEN kind='hazard' AND verdict='disagree' THEN 1 ELSE 0 END) AS haz_disagree, "
+                "  SUM(CASE WHEN kind='hazard' AND verdict='not_relevant' THEN 1 ELSE 0 END) AS haz_nr, "
+                "  SUM(CASE WHEN kind='priority' AND verdict='ok' THEN 1 ELSE 0 END) AS pri_ok, "
+                "  SUM(CASE WHEN kind='priority' AND verdict='too_low' THEN 1 ELSE 0 END) AS pri_lo, "
+                "  SUM(CASE WHEN kind='priority' AND verdict='too_high' THEN 1 ELSE 0 END) AS pri_hi, "
                 "  COUNT(*) AS total "
                 "FROM agent_feedback WHERE hazard_id = ?",
                 (hazard_id,),
@@ -4751,10 +4820,18 @@ def create_app() -> FastAPI:
         return {
             "id": fid,
             "hazard_id": hazard_id,
+            "kind": kind,
             "verdict": verdict,
-            "agree_total": int(row["agree_n"] or 0),
-            "disagree_total": int(row["disagree_n"] or 0),
-            "not_relevant_total": int(row["nr_n"] or 0),
+            "hazard": {
+                "agree": int(row["haz_agree"] or 0),
+                "disagree": int(row["haz_disagree"] or 0),
+                "not_relevant": int(row["haz_nr"] or 0),
+            },
+            "priority": {
+                "ok": int(row["pri_ok"] or 0),
+                "too_low": int(row["pri_lo"] or 0),
+                "too_high": int(row["pri_hi"] or 0),
+            },
             "feedback_total": int(row["total"] or 0),
         }
 
@@ -4779,18 +4856,17 @@ def create_app() -> FastAPI:
         con.row_factory = _sqlite3.Row
         cutoff = time.time() - hrs * 3600
         try:
-            # Only the LATEST feedback row per hazard counts; earlier
-            # votes on the same case are history for the audit, not for
-            # the KPI cards.
+            # Round 23 iter 5: latest row per (hazard, kind). Hazard and
+            # priority are counted on their own axes.
             rows = con.execute(
                 "WITH ranked AS ("
-                "  SELECT f.hazard_id, f.agree, f.verdict, f.note, f.created_at, "
+                "  SELECT f.hazard_id, f.kind, f.agree, f.verdict, f.note, f.created_at, "
                 "         h.class, h.agent_decision, "
-                "         ROW_NUMBER() OVER (PARTITION BY f.hazard_id ORDER BY f.created_at DESC) rn "
+                "         ROW_NUMBER() OVER (PARTITION BY f.hazard_id, f.kind ORDER BY f.created_at DESC) rn "
                 "  FROM agent_feedback f "
                 "  LEFT JOIN hazards h ON h.id = f.hazard_id "
                 "  WHERE f.created_at >= ?"
-                ") SELECT hazard_id, agree, verdict, note, class, agent_decision "
+                ") SELECT hazard_id, kind, agree, verdict, note, class, agent_decision "
                 "FROM ranked WHERE rn = 1 "
                 "ORDER BY hazard_id",
                 (cutoff,),
@@ -4802,29 +4878,81 @@ def create_app() -> FastAPI:
             if v:
                 return v
             return "agree" if r["agree"] else "disagree"
-        counters = {"agree": 0, "disagree": 0, "not_relevant": 0}
+        hazard_counters = {"agree": 0, "disagree": 0, "not_relevant": 0}
+        priority_counters = {"ok": 0, "too_low": 0, "too_high": 0}
+        hazard_cases = set()
+        priority_cases = set()
         disagrees: list[dict] = []
         not_relevant: list[dict] = []
+        pri_wrong: list[dict] = []
         for r in rows:
             v = _verdict(r)
-            counters[v] = counters.get(v, 0) + 1
-            if v == "disagree":
-                disagrees.append({"hazard_id": r["hazard_id"], "class": r["class"],
-                                  "decision": r["agent_decision"], "note": r["note"]})
-            elif v == "not_relevant":
-                not_relevant.append({"hazard_id": r["hazard_id"], "class": r["class"],
-                                     "decision": r["agent_decision"], "note": r["note"]})
-        total_cases = len(rows)
+            kind = (r["kind"] or "hazard").strip().lower() if "kind" in r.keys() else "hazard"
+            if kind == "hazard":
+                hazard_cases.add(r["hazard_id"])
+                hazard_counters[v] = hazard_counters.get(v, 0) + 1
+                if v == "disagree":
+                    disagrees.append({"hazard_id": r["hazard_id"], "class": r["class"],
+                                      "decision": r["agent_decision"], "note": r["note"]})
+                elif v == "not_relevant":
+                    not_relevant.append({"hazard_id": r["hazard_id"], "class": r["class"],
+                                         "decision": r["agent_decision"], "note": r["note"]})
+            else:
+                priority_cases.add(r["hazard_id"])
+                priority_counters[v] = priority_counters.get(v, 0) + 1
+                if v != "ok":
+                    pri_wrong.append({"hazard_id": r["hazard_id"], "class": r["class"],
+                                      "decision": r["agent_decision"], "note": r["note"], "verdict": v})
         return {
             "window_hours": hrs,
-            "total_cases_voted": total_cases,
-            "agree": counters["agree"],
-            "disagree": counters["disagree"],
-            "not_relevant": counters["not_relevant"],
-            "agreement_rate": round(100.0 * counters["agree"] / total_cases, 1) if total_cases else 0.0,
+            "hazard": {
+                "total_cases_voted": len(hazard_cases),
+                "agree": hazard_counters["agree"],
+                "disagree": hazard_counters["disagree"],
+                "not_relevant": hazard_counters["not_relevant"],
+                "agreement_rate": round(100.0 * hazard_counters["agree"] / len(hazard_cases), 1) if hazard_cases else 0.0,
+            },
+            "priority": {
+                "total_cases_voted": len(priority_cases),
+                "ok": priority_counters["ok"],
+                "too_low": priority_counters["too_low"],
+                "too_high": priority_counters["too_high"],
+                "agreement_rate": round(100.0 * priority_counters["ok"] / len(priority_cases), 1) if priority_cases else 0.0,
+            },
             "disagrees": disagrees,
             "not_relevants": not_relevant,
+            "priority_wrong": pri_wrong,
         }
+
+    _CATALOG_IMAGE_ROOT = "/var/lib/roadguard/dataset/extracted/road_damage_detect"
+
+    @app.get("/catalog_image/{pic_id}")
+    def catalog_image(pic_id: int, request: Request):
+        """Round 23 iter 5 (4.11.2026): serve one image from the labelled
+        catalog so the D Classes tab can show reference exemplars next
+        to the worker's live Cases. Private host only, same as the rest
+        of the operator surface.
+        """
+        if not _is_private_host(request):
+            raise HTTPException(status_code=404, detail="not found")
+        from pathlib import Path as _Path
+        from fastapi.responses import FileResponse as _FileResponse
+        settings = get_settings()
+        import sqlite3 as _sqlite3
+        con = _sqlite3.connect(settings.roadguard_db_path)
+        try:
+            row = con.execute(
+                "SELECT rel_path FROM dataset_images WHERE pic_id = ?",
+                (int(pic_id),),
+            ).fetchone()
+        finally:
+            con.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="catalog_image_not_found")
+        p = _Path(_CATALOG_IMAGE_ROOT) / row[0]
+        if not p.is_file():
+            raise HTTPException(status_code=404, detail="catalog_image_file_missing")
+        return _FileResponse(str(p), media_type="image/jpeg")
 
     @app.get("/stats/kpi")
     def stats_kpi(request: Request, window_hours: int = 24) -> dict:
