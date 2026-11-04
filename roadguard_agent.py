@@ -7725,6 +7725,15 @@ def sanitize_node(state: RoadGuardState) -> dict:
     }
     if catalog_hit:
         update["dataset_match"] = catalog_hit
+    # Round 24 (4.11.2026): snapshot the four immutable inputs
+    # (yolo class + confidence, form road_type + lane_blocked) so any
+    # agent downstream can be checked for drift against them. Captured
+    # with the inputs as they land in state, after sanitize cleaned the
+    # metadata, before any worker had a chance to touch them.
+    update["_immutable_inputs"] = _immutable_inputs_of({
+        "yolo_output": _yolo,
+        "metadata": md,
+    })
     return update
 
 
@@ -8815,6 +8824,26 @@ def profile_builder_node(state: RoadGuardState) -> dict:
     if refined.get("autonomy"):
         trace_entry["content"]["autonomy"] = refined["autonomy"]
     trace_entry["content"]["dataset_lookup"] = _dataset_lookup_summary(dataset_hit)
+    # Round 24 (4.11.2026) P0-C: the immutable YOLO / form inputs stay
+    # as they entered sanitize. If any agent has tried to overwrite one
+    # of them, the drift list lands on the trace and the state is
+    # restored to the snapshot before the next agent runs.
+    drift = _immutable_inputs_drift(state)
+    if drift:
+        trace_entry["content"]["immutable_inputs_drift"] = drift
+        snap = state.get("_immutable_inputs") or {}
+        yolo2 = dict(state.get("yolo_output") or {})
+        md2 = dict(state.get("metadata") or {})
+        if "top1_class" in drift:
+            yolo2["top1_class"] = snap["top1_class"]
+        if "top1_confidence" in drift:
+            yolo2["top1_confidence"] = snap["top1_confidence"]
+        if "road_type" in drift:
+            md2["road_type"] = snap["road_type"]
+        if "lane_blocked" in drift:
+            md2["lane_blocked"] = snap["lane_blocked"]
+        state["yolo_output"] = yolo2
+        state["metadata"] = md2
 
     update: dict = {
         "hazard_profile": profile,
@@ -10706,10 +10735,19 @@ def _verify_decision_rationale(decision: dict, state: dict) -> dict:
 def _scrub_state_on_fact_check_failure(state: dict, problems: list[str]) -> list[str]:
     """Round 20 (3.11.2026): when a fact-check problem names an input the
     inputs do not actually carry, clear the related state so no downstream
-    agent reads it back as truth. Returns the keys cleared, for the trace."""
+    agent reads it back as truth. Returns the keys cleared, for the trace.
+
+    Round 24 (4.11.2026): also strip phash-driven labels from
+    ``dataset_match`` on ``phash_neighbor_cited_as_evidence`` so the
+    rule tree, work_order builder and approval email all read the same
+    neutralised block. The phash match itself (match / distance / pic_id)
+    stays for the audit; only the attributes that could influence a
+    verdict (classes, model_prediction, stored_confidence) are blanked.
+    """
     cleared: list[str] = []
     intake = state.get("reporter_intake") or {}
     signals = state.get("reporter_signals") or {}
+    match = state.get("dataset_match") or {}
     for p in problems or []:
         if p == "reporter_claims_without_text":
             if intake.get("mentioned"):
@@ -10726,10 +10764,96 @@ def _scrub_state_on_fact_check_failure(state: dict, problems: list[str]) -> list
             if (intake.get("mentioned") or {}).get("lane_blocked"):
                 intake["mentioned"]["lane_blocked"] = None
                 cleared.append("reporter_intake.mentioned.lane_blocked")
+        elif p.startswith("phash_neighbor_cited_as_evidence") and isinstance(match, dict):
+            # Round 24: phash-neighbour labels are evidence about a
+            # DIFFERENT photo. Once the model tried to cite them, we
+            # neutralise them so no downstream reader (rule tree,
+            # work_order, approval email) can use them either.
+            touched = False
+            if match.get("classes"):
+                match["classes"] = ""
+                touched = True
+            if match.get("model_prediction"):
+                match["model_prediction"] = None
+                touched = True
+            if match.get("stored_confidence") is not None:
+                match["stored_confidence"] = None
+                touched = True
+            if touched:
+                cleared.append("dataset_match.phash_labels")
     if cleared:
         state["reporter_intake"] = intake
         state["reporter_signals"] = signals
+        if isinstance(match, dict):
+            state["dataset_match"] = match
     return cleared
+
+
+# ---------------------------------------------------------------------------
+# Round 24 (4.11.2026): P0-A + P0-C helpers
+# ---------------------------------------------------------------------------
+# P0-A: PHASH never participates in evidence. _strip_phash_cited_sources
+# removes any cited_sources id that references the phash neighbour's
+# pic_id, so even when the LLM slipped one past the fact-check, the
+# approval row and the work_order see no phash-sourced id.
+# P0-C: YOLO + reporter-form inputs are immutable. _immutable_inputs_of
+# captures the four values every agent must treat as read-only
+# (yolo.top1_class, yolo.top1_confidence, md.lane_blocked, md.road_type)
+# so a validator or a drift check can compare against the original
+# values any time, with no agent able to overwrite them in state.
+
+
+def _strip_phash_cited_sources(decision: dict, state: dict) -> list[str]:
+    """Return the cited_sources with every phash-neighbour reference
+    removed. A pic_id from a non-sha256 match is never a valid citation
+    for this photo (see round 19's _PIC_ID_CITATION_RE); the deterministic
+    sentence stands on its own without it."""
+    match = state.get("dataset_match") or {}
+    cited = list(decision.get("cited_sources") or [])
+    if not cited:
+        return []
+    if str(match.get("match") or "") == "sha256":
+        return cited
+    pic_id = str(match.get("pic_id") or "")
+    if not pic_id:
+        return cited
+    out = []
+    for s in cited:
+        s_str = str(s)
+        if _PIC_ID_CITATION_RE.search(s_str) or pic_id in s_str:
+            continue
+        out.append(s)
+    return out
+
+
+def _immutable_inputs_of(state: dict) -> dict:
+    """Round 24 (4.11.2026): the four values every agent reads but may
+    not rewrite - the YOLO detector's live class and confidence, and the
+    reporter form's road type and lane_blocked. Captured at ingress on
+    ``state['_immutable_inputs']`` so a late-pipeline check can prove
+    nothing drifted."""
+    yolo = state.get("yolo_output") or {}
+    md = state.get("metadata") or {}
+    return {
+        "top1_class": str(yolo.get("top1_class") or ""),
+        "top1_confidence": yolo.get("top1_confidence"),
+        "road_type": str(md.get("road_type") or ""),
+        "lane_blocked": str(md.get("lane_blocked") or "none"),
+    }
+
+
+def _immutable_inputs_drift(state: dict) -> list[str]:
+    """Round 24: compare the live yolo_output + metadata against the
+    snapshot captured at ingress; return the keys that drifted."""
+    snap = state.get("_immutable_inputs")
+    if not isinstance(snap, dict):
+        return []
+    now = _immutable_inputs_of(state)
+    drifted = []
+    for k, v in snap.items():
+        if now.get(k) != v:
+            drifted.append(k)
+    return drifted
 
 
 def _removed_claims_note(problems: list[str]) -> str:
@@ -11256,6 +11380,22 @@ def decision_node(state: RoadGuardState) -> dict:
                 scrubbed = _scrub_state_on_fact_check_failure(state, rationale_check["problems"])
                 if scrubbed:
                     rationale_check["state_scrubbed"] = scrubbed
+                # Round 24 (4.11.2026) P0-A: on phash_neighbor_cited_as_
+                # evidence the model's cited_sources list is cleaned of
+                # any id that referenced the phash neighbour, so the
+                # work_order and the approval row cannot carry that id.
+                any_phash_prob = any(
+                    p.startswith("phash_neighbor_cited_as_evidence")
+                    for p in (rationale_check.get("problems") or [])
+                )
+                if any_phash_prob:
+                    before = list(decision.get("cited_sources") or [])
+                    after = _strip_phash_cited_sources(decision, state)
+                    if after != before:
+                        rationale_check.setdefault("state_scrubbed", []).append(
+                            "decision.cited_sources.phash"
+                        )
+                        decision["cited_sources"] = after
                 sentence = _deterministic_rationale(decision, state)
                 # Round 19 (3.11.2026): the operator sees the clean sentence
                 # and the one-line note of what the fact-check removed; the
@@ -11267,6 +11407,13 @@ def decision_node(state: RoadGuardState) -> dict:
                 if rationale_check.get("assessment_problems"):
                     rationale_check["model_assessment"] = str(decision.get("assessment") or "")[:500]
                     decision["assessment"] = (sentence + " " + removed_note).strip()[:400]
+                # Round 24 (4.11.2026) P0-B: mark explicitly that the
+                # model's text was rejected and the deterministic
+                # sentence is the ONLY active text downstream readers
+                # (approval email, work_order, supervisor digest) may
+                # use. The model's original stays on rationale_check
+                # for the audit, flagged as not-for-display.
+                rationale_check["rejected_text_hard_blocked"] = True
                 enforcement = _enforce_unverified(decision, rule_hint)
                 rationale_check["enforcement"] = enforcement["kind"]
                 rationale_check["enforcement_why"] = enforcement["why"]
