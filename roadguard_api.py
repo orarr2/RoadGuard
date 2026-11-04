@@ -2532,10 +2532,29 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
                   "cost_commercial_equivalent_usd": 0.0}
     advantage_over_tree_ids: list[str] = []
     for row in rows or []:
+        # Round 23 (4.11.2026): a test-fixture row (or a hazards row from a
+        # DB that has not run the agent_value_json migration yet) may lack
+        # this column entirely; fall back to building the summary from the
+        # trace, so the aggregate stays correct and never raises KeyError.
+        raw = ""
         try:
-            av = json.loads(
-                (row["agent_value_json"] if hasattr(row, "__getitem__") else "") or "{}"
-            )
+            keys = row.keys() if hasattr(row, "keys") else []
+            if "agent_value_json" in keys:
+                raw = row["agent_value_json"] or ""
+        except Exception:
+            raw = ""
+        if not raw:
+            try:
+                tj = row["agent_trace_json"] if "agent_trace_json" in (row.keys() if hasattr(row, "keys") else []) else "[]"
+            except Exception:
+                tj = "[]"
+            try:
+                from roadguard_agent import _build_agent_value_summary_json
+                raw = _build_agent_value_summary_json(tj or "[]") or ""
+            except Exception:
+                raw = ""
+        try:
+            av = json.loads(raw or "{}")
         except (TypeError, ValueError):
             continue
         if not isinstance(av, dict):
