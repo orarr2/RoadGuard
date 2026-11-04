@@ -3510,7 +3510,7 @@ def create_app() -> FastAPI:
         con = sqlite3.connect("/var/lib/roadguard/roadguard.db")
         con.row_factory = sqlite3.Row
         rows = con.execute(
-            "SELECT id, agent_decision, priority, agent_rationale, reported_at, location, "
+            "SELECT id, class, agent_decision, priority, agent_rationale, reported_at, location, "
             "status, cited_sources_json, agent_trace_json, agent_value_json "
             "FROM hazards WHERE reported_at >= ? ORDER BY reported_at DESC",
             (cutoff_epoch,),
