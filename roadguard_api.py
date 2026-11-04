@@ -2223,6 +2223,29 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
     fallback_by_agent: dict[str, dict[str, int]] = {}
     fast_path_skips: dict[str, int] = {}
     autonomy: dict[str, dict[str, int]] = {}
+    # Round 22 (4.11.2026): per-run agent value counters. Each hazard
+    # contributes at most one increment to each bucket here, built from
+    # the same Decision final entry that _build_agent_value_summary reads
+    # (worker_impact + rationale_check + floor). Rates are computed
+    # client-side against total_hazards, exactly like the other blocks.
+    agent_value = {
+        "runs": 0,                           # hazards with a Decision final
+        "has_worker_impact": 0,              # at least one worker baseline was captured
+        "changed_rule_hint": 0,              # worker LLMs moved the tree's verdict
+        "profile_llm_changed": 0,            # Profile Builder's LLM moved the tree
+        "research_llm_changed": 0,           # RAG's LLM moved the tree
+        "decision_llm_react": 0,             # Decision used ReAct (count by source tag)
+        "decision_rule_based": 0,            # Decision ran rule_based only
+        "decision_catalog_match": 0,         # sha256 catalogue match short-circuit
+        "floor_applied": 0,                  # a deterministic floor fired
+        "enforcement_rule_tree_verdict": 0,  # Decision LLM overridden (too severe)
+        "enforcement_kept": 0,               # LLM verdict kept over the fact-check
+        "rule_tree_eq_final": 0,             # the rule tree already matched the final
+        "llm_more_severe_than_tree": 0,      # LLM proposed > tree (regardless of enforcement)
+        "llm_less_severe_than_tree": 0,      # LLM proposed < tree (floors tend to win)
+    }
+    _SEV_RANK = {"standard": 1, "known_image": 1, "needs_more_evidence": 2,
+                 "human_review": 3, "urgent": 4}
     for row in rows or []:
         try:
             trace = json.loads((row["agent_trace_json"] if hasattr(row, "__getitem__") else getattr(row, "agent_trace_json", None)) or "[]")
@@ -2289,6 +2312,52 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
                     counters["decision"]["grounding_failed"] += 1
                 if c.get("floor_applied"):
                     counters["decision"]["contradiction_floor"] += 1
+                # Round 22 (4.11.2026): agent value aggregate - per-case
+                # flags pulled from the same Decision final entry.
+                agent_value["runs"] += 1
+                source = str(c.get("source") or "")
+                if source == "llm_react":
+                    agent_value["decision_llm_react"] += 1
+                elif source == "rule_based":
+                    agent_value["decision_rule_based"] += 1
+                elif source == "catalog_match":
+                    agent_value["decision_catalog_match"] += 1
+                wi = c.get("worker_impact")
+                final_action = action
+                rt_action = final_action
+                if isinstance(wi, dict):
+                    agent_value["has_worker_impact"] += 1
+                    if wi.get("changed_rule_hint"):
+                        agent_value["changed_rule_hint"] += 1
+                    if wi.get("profile_llm_changed"):
+                        agent_value["profile_llm_changed"] += 1
+                    if wi.get("research_llm_changed"):
+                        agent_value["research_llm_changed"] += 1
+                    rt_action = str(wi.get("rule_hint_without_worker_llm") or final_action)
+                if rt_action == final_action:
+                    agent_value["rule_tree_eq_final"] += 1
+                ov = c.get("overridden_llm_verdict")
+                llm_action = None
+                if isinstance(ov, dict) and ov.get("action"):
+                    llm_action = str(ov.get("action") or "")
+                elif source == "llm_react":
+                    llm_action = final_action
+                if llm_action:
+                    rt_rank = _SEV_RANK.get(rt_action, 1)
+                    llm_rank = _SEV_RANK.get(llm_action, 1)
+                    if llm_rank > rt_rank:
+                        agent_value["llm_more_severe_than_tree"] += 1
+                    elif llm_rank < rt_rank:
+                        agent_value["llm_less_severe_than_tree"] += 1
+                if c.get("floor_applied"):
+                    agent_value["floor_applied"] += 1
+                rc = c.get("rationale_check")
+                if isinstance(rc, dict):
+                    enf = str(rc.get("enforcement") or "")
+                    if enf == "rule_tree_verdict":
+                        agent_value["enforcement_rule_tree_verdict"] += 1
+                    elif enf == "kept":
+                        agent_value["enforcement_kept"] += 1
             llm_s = c.get("llm") or {}
             if isinstance(llm_s, dict) and llm_s.get("failed_calls", 0) > 0:
                 had_fallback = True
@@ -2338,6 +2407,7 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
         "llm_fallback_by_agent": fallback_by_agent,
         "fast_path_skips": fast_path_skips,
         "autonomy": autonomy,
+        "agent_value": agent_value,
     }
 
 
@@ -3241,6 +3311,34 @@ def create_app() -> FastAPI:
             counts[k if k in counts else "other"] += 1
         approvals_pending = con.execute("SELECT COUNT(*) FROM approvals WHERE status='pending'").fetchone()[0]
         evidence_open = con.execute("SELECT COUNT(*) FROM evidence_requests WHERE status='pending'").fetchone()[0]
+        # Round 22 (4.11.2026): agent value snapshot for the KPI strip -
+        # how often the workers' LLM moved the rule tree, per the same
+        # per-case summary written to hazards.agent_value_json.
+        av_rows = con.execute(
+            "SELECT agent_value_json FROM hazards WHERE reported_at >= ? AND agent_value_json != ''",
+            (cutoff_epoch,),
+        ).fetchall()
+        av_counts = {"runs": 0, "changed_rule_hint": 0,
+                     "profile_llm_changed": 0, "research_llm_changed": 0,
+                     "enforcement_rule_tree_verdict": 0, "floor_applied": 0}
+        for r in av_rows:
+            try:
+                avj = json.loads(r["agent_value_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(avj, dict):
+                continue
+            av_counts["runs"] += 1
+            if avj.get("changed_rule_hint"):
+                av_counts["changed_rule_hint"] += 1
+            if avj.get("profile_llm_changed"):
+                av_counts["profile_llm_changed"] += 1
+            if avj.get("research_llm_changed"):
+                av_counts["research_llm_changed"] += 1
+            if avj.get("enforcement") == "rule_tree_verdict":
+                av_counts["enforcement_rule_tree_verdict"] += 1
+            if avj.get("floor_applied"):
+                av_counts["floor_applied"] += 1
 
         # #11: hazard clusters. Group hazards of the same class at the same
         # free-text location within the window; anything with 3+ reports is
@@ -3321,6 +3419,18 @@ def create_app() -> FastAPI:
             f"<div class='kpi'><div class='kpi-v'>{counts['known_image']}</div><div class='kpi-l'>Known image</div></div>"
             f"<div class='kpi'><div class='kpi-v'>{approvals_pending}</div><div class='kpi-l'>Approvals pending</div></div>"
             f"<div class='kpi'><div class='kpi-v'>{evidence_open}</div><div class='kpi-l'>Awaiting photo</div></div>"
+            "</div>"
+            # Round 22 (4.11.2026): a second row for the agent value KPIs -
+            # kept separate from the queue tiles so the operator can read
+            # "the agent moved X of N rule tree verdicts this window" on
+            # its own, and the queue strip stays unchanged.
+            "<div class='kpi-strip av-strip' style='margin-top:6px'>"
+            f"<div class='kpi'><div class='kpi-v'>{av_counts['runs']}</div><div class='kpi-l'>Runs with agent value</div></div>"
+            f"<div class='kpi human'><div class='kpi-v'>{av_counts['changed_rule_hint']}</div><div class='kpi-l'>LLM changed the rule tree</div></div>"
+            f"<div class='kpi'><div class='kpi-v'>{av_counts['profile_llm_changed']}</div><div class='kpi-l'>Profile LLM moved it</div></div>"
+            f"<div class='kpi'><div class='kpi-v'>{av_counts['research_llm_changed']}</div><div class='kpi-l'>RAG LLM moved it</div></div>"
+            f"<div class='kpi'><div class='kpi-v'>{av_counts['floor_applied']}</div><div class='kpi-l'>Floor applied</div></div>"
+            f"<div class='kpi'><div class='kpi-v'>{av_counts['enforcement_rule_tree_verdict']}</div><div class='kpi-l'>LLM overridden by tree</div></div>"
             "</div>"
         )
 

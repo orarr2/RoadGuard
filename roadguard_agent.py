@@ -385,6 +385,7 @@ CREATE TABLE IF NOT EXISTS hazards (
     cited_sources_json  TEXT NOT NULL DEFAULT '[]',
     reporter_text       TEXT NOT NULL DEFAULT '',   -- free text typed by the reporter; the API stores the sanitised copy, never the raw text
     agent_assessment    TEXT NOT NULL DEFAULT '',   -- Decision model text for the supervisor (labelled as such); never sent to the reporter
+    agent_value_json    TEXT NOT NULL DEFAULT '',   -- round 22 (4.11.2026): compact per-case 'did the agent change what the rule tree would have said' summary read by /stats/agents and the trace footer
     FOREIGN KEY(user_id) REFERENCES users(id)
 );
 
@@ -587,6 +588,7 @@ class Hazard:
     cited_sources_json: str = "[]"
     reporter_text: str = ""
     agent_assessment: str = ""
+    agent_value_json: str = ""   # round 22 (4.11.2026): see _build_agent_value_summary
 
 
 @dataclass
@@ -669,6 +671,11 @@ class Database:
         ("users", "google_sub", "TEXT"),
         ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
         ("users", "is_internal", "INTEGER NOT NULL DEFAULT 0"),
+        # Round 22 (4.11.2026): agent value per case - a flat column with
+        # rule_tree_action / llm_action / final_action and change flags,
+        # so SELECT COUNT(*) WHERE json_extract(agent_value_json, '$.changed_rule_hint') = 1
+        # answers "how often did the LLM change the rule tree's verdict" in one hop.
+        ("hazards", "agent_value_json", "TEXT NOT NULL DEFAULT ''"),
     )
 
     def _migrate_columns(self) -> None:
@@ -825,6 +832,11 @@ class Database:
     # ----- Hazards ---------------------------------------------------------
 
     def create_hazard(self, hazard: Hazard) -> None:
+        # Round 22 (4.11.2026): if the caller did not pre-compute
+        # agent_value_json we derive it from the stored trace so the DB
+        # column is populated for every row written to hazards, old code
+        # paths included (eval scripts, replays).
+        av = hazard.agent_value_json or _build_agent_value_summary_json(hazard.agent_trace_json)
         self._conn.execute(
             """
             INSERT INTO hazards (
@@ -832,8 +844,8 @@ class Database:
                 lane_blocked, location, bboxes_json,
                 priority, agent_decision, agent_rationale,
                 agent_trace_json, status, work_order_id, cited_sources_json,
-                reporter_text, agent_assessment
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reporter_text, agent_assessment, agent_value_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 hazard.id,
@@ -854,6 +866,7 @@ class Database:
                 hazard.cited_sources_json,
                 hazard.reporter_text or "",
                 hazard.agent_assessment or "",
+                av,
             ),
         )
 
@@ -869,16 +882,22 @@ class Database:
         status: str,
         work_order_id: str | None,
         agent_assessment: str = "",
+        agent_value_json: str | None = None,
     ) -> bool:
         """Overwrite the verdict columns after a resumed run (evidence
         round trip). Returns True when the row existed."""
+        # Round 22 (4.11.2026): derive from the final trace when the caller
+        # did not pre-compute it, so an update that resets the verdict also
+        # refreshes the queryable agent_value column.
+        av = agent_value_json if agent_value_json is not None else _build_agent_value_summary_json(agent_trace_json)
         cur = self._conn.execute(
             """
             UPDATE hazards
                SET priority = ?, agent_decision = ?, agent_rationale = ?,
                    agent_trace_json = ?, cited_sources_json = ?, status = ?,
                    work_order_id = COALESCE(?, work_order_id),
-                   agent_assessment = ?
+                   agent_assessment = ?,
+                   agent_value_json = ?
              WHERE id = ?
             """,
             (
@@ -890,6 +909,7 @@ class Database:
                 status,
                 work_order_id,
                 agent_assessment or "",
+                av,
                 hazard_id,
             ),
         )
@@ -1634,6 +1654,7 @@ class Database:
             cited_sources_json=row["cited_sources_json"] or "[]",
             reporter_text=row["reporter_text"] or "",
             agent_assessment=row["agent_assessment"] or "",
+            agent_value_json=(row["agent_value_json"] if "agent_value_json" in row.keys() else "") or "",
         )
 
 
@@ -12541,6 +12562,112 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Round 22 (4.11.2026): agent value per case
+# ---------------------------------------------------------------------------
+# The LLM / agent work only earns its compute when its verdict differs from
+# what the deterministic rule tree alone would have produced AND that
+# difference is in the right direction. This block exposes the per-case
+# comparison as:
+#   * a compact JSON written to hazards.agent_value_json (queryable column)
+#   * one line appended to format_trace_lines' footer (operator trace)
+#   * the aggregate counters the API's /stats/agents panel adds up
+# Reads only the trace that the agent already produces; adds no new state
+# and is safe to run against runs from earlier rounds (missing fields come
+# back None/False).
+
+
+def _build_agent_value_summary(trace: list[dict] | None) -> dict | None:
+    """Per-case 'did the agent change the rule tree's verdict' summary.
+
+    Returns None when the trace carries no Decision final (queued /
+    processing / broken run). Otherwise returns a flat dict keyed as:
+        rule_tree_action                - what the rule tree alone would
+                                          have produced (no worker LLMs);
+                                          falls back to final_action when
+                                          the Decision ran through a path
+                                          that captures no worker baseline
+                                          (catalog_match, LLM off).
+        rule_tree_with_worker_action    - the rule_hint Decision received
+                                          (= rule tree after worker LLMs
+                                          moved the signals).
+        llm_proposed_action             - the Decision LLM's verdict before
+                                          any floor; None when Decision ran
+                                          rule_based or a floor did not fire.
+        final_action                    - the row's agent_decision.
+        changed_rule_hint               - worker LLMs changed the rule tree's
+                                          verdict (True/False/None).
+        profile_llm_changed             - the profile worker's LLM labels
+                                          moved the rule tree.
+        research_llm_changed            - the RAG worker's LLM coverage moved
+                                          the rule tree.
+        decision_source                 - rule_based | llm_react |
+                                          catalog_match | None.
+        floor_applied                   - a deterministic floor fired on
+                                          top of (or instead of) the LLM.
+        floor_reason                    - the floor's short slug.
+        enforcement                     - "rule_tree_verdict" (LLM overridden
+                                          because it was more severe),
+                                          "kept" (LLM verdict stood even
+                                          though the fact-check flagged it),
+                                          or None.
+    """
+    if not isinstance(trace, list):
+        return None
+    final = None
+    for e in trace:
+        if isinstance(e, dict) and e.get("speaker") == "decision" and e.get("kind") == "final":
+            final = e.get("content") if isinstance(e.get("content"), dict) else None
+    if not isinstance(final, dict):
+        return None
+    wi = final.get("worker_impact") if isinstance(final.get("worker_impact"), dict) else {}
+    rc = final.get("rationale_check") if isinstance(final.get("rationale_check"), dict) else {}
+    ov = final.get("overridden_llm_verdict") if isinstance(final.get("overridden_llm_verdict"), dict) else {}
+    final_action = final.get("action")
+    rule_tree_action = wi.get("rule_hint_without_worker_llm") or final_action
+    rule_tree_with_worker_action = wi.get("rule_hint_with_worker_llm") or final_action
+    source = final.get("source")
+    if ov.get("action"):
+        llm_proposed = ov.get("action")
+    elif source == "llm_react":
+        llm_proposed = final_action
+    else:
+        llm_proposed = None
+    enforcement = rc.get("enforcement") if isinstance(rc, dict) else None
+    return {
+        "rule_tree_action": rule_tree_action,
+        "rule_tree_with_worker_action": rule_tree_with_worker_action,
+        "llm_proposed_action": llm_proposed,
+        "final_action": final_action,
+        "changed_rule_hint": bool(wi.get("changed_rule_hint")) if wi else None,
+        "profile_llm_changed": bool(wi.get("profile_llm_changed")) if wi else None,
+        "research_llm_changed": bool(wi.get("research_llm_changed")) if wi else None,
+        "decision_source": source,
+        "floor_applied": bool(final.get("floor_applied")),
+        "floor_reason": final.get("floor_reason") or None,
+        "enforcement": enforcement,
+    }
+
+
+def _build_agent_value_summary_json(trace_json: str | None) -> str:
+    """Thin wrapper the DB layer calls: trace string -> summary JSON string.
+
+    Empty string when the trace is empty, malformed, or carries no
+    Decision final; so hazards.agent_value_json is always a safe value
+    (blank or a JSON object) and json_extract never raises on read.
+    """
+    if not trace_json:
+        return ""
+    try:
+        trace = json.loads(trace_json)
+    except (TypeError, ValueError):
+        return ""
+    summary = _build_agent_value_summary(trace if isinstance(trace, list) else [])
+    if not summary:
+        return ""
+    return json.dumps(summary, separators=(",", ":"))
+
+
 def format_trace_lines(
     hazard_id: str,
     trace: list[dict] | None,
@@ -12609,6 +12736,36 @@ def format_trace_lines(
             if waiting >= 0.5:
                 line += f"  waiting_evidence={waiting:.0f}"
             lines.append(line)
+        # Round 22 (4.11.2026): agent value footer. Reader-level answer to
+        # "did the agent earn its compute on this case" without diving into
+        # the trace: tree-only verdict, worker-moved rule hint, LLM's
+        # proposed verdict and the final one, plus the enforcement tag.
+        av = _build_agent_value_summary(trace or [])
+        if av:
+            rt = av.get("rule_tree_action") or "n/a"
+            rtw = av.get("rule_tree_with_worker_action") or "n/a"
+            llm = av.get("llm_proposed_action") or "-"
+            fin = av.get("final_action") or "n/a"
+            parts = [
+                f"rule_tree={rt}",
+                f"with_workers={rtw}",
+                f"llm={llm}",
+                f"final={fin}",
+            ]
+            flags: list[str] = []
+            if av.get("changed_rule_hint"):
+                flags.append("changed_rule_hint")
+            if av.get("profile_llm_changed"):
+                flags.append("profile_llm_changed")
+            if av.get("research_llm_changed"):
+                flags.append("research_llm_changed")
+            if av.get("floor_applied"):
+                fr = av.get("floor_reason") or "unnamed"
+                flags.append(f"floor:{fr}")
+            if av.get("enforcement"):
+                flags.append(f"enforcement:{av['enforcement']}")
+            tail = (f"  flags={','.join(flags)}" if flags else "")
+            lines.append(f"{_INDENT}agent value: " + "  ".join(parts) + tail)
     return lines
 
 
