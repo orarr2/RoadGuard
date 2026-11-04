@@ -564,17 +564,32 @@ button {
 }
 button:hover { background: var(--brand-1); color: #ffffff; border-color: var(--brand-1); }
 button:active { transform: scale(0.97); }
+/* Round 23 (4.11.2026) layout fix: the flow diagram spans the row, and
+   the four side panels (Current hazard + KPI + Run cost + Agent
+   advantage) sit side-by-side in a single row BELOW it, so the operator
+   does not scroll a three-section sidebar on every visit. Collapses to
+   two columns on tablets and one on phones. */
 main {
   display: grid;
-  grid-template-columns: 1fr 340px;
+  grid-template-columns: 1fr;
   gap: 14px;
   padding: 14px;
   max-width: 1600px;
   margin: 0 auto;
 }
-@media (max-width: 900px) {
-  main { grid-template-columns: 1fr; }
+aside {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
 }
+@media (max-width: 1100px) {
+  aside { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  aside { grid-template-columns: 1fr; }
+}
+aside .panel { margin-top: 0 !important; }
 .flow-container {
   background: var(--card);
   border: 1px solid var(--border);
@@ -3496,7 +3511,7 @@ def create_app() -> FastAPI:
         con.row_factory = sqlite3.Row
         rows = con.execute(
             "SELECT id, agent_decision, priority, agent_rationale, reported_at, location, "
-            "status, cited_sources_json, agent_trace_json "
+            "status, cited_sources_json, agent_trace_json, agent_value_json "
             "FROM hazards WHERE reported_at >= ? ORDER BY reported_at DESC",
             (cutoff_epoch,),
         ).fetchall()
@@ -3578,6 +3593,14 @@ def create_app() -> FastAPI:
             except Exception:
                 cited = []
             img_rel = f"/images/{r['id']}" if os.path.isfile(f"/var/lib/roadguard/images/{r['id']}.jpg") else ""
+            # Round 23 (4.11.2026): per-case agent justified summary fed to
+            # the digest Cases table and the detail pane. Pulled from the
+            # agent_value_json column backfilled in the round 22 migration.
+            try:
+                av = json.loads(r["agent_value_json"] or "{}")
+            except Exception:
+                av = {}
+            per_agent = av.get("per_agent_justified") or {}
             cases.append({
                 "id": r["id"],
                 "decision": (r["agent_decision"] or "n/a").lower(),
@@ -3590,6 +3613,12 @@ def create_app() -> FastAPI:
                 "cited": cited,
                 "image": img_rel,
                 "n_trace": len(trace),
+                "justified_count": av.get("agents_justified_count"),
+                "agents_total": av.get("agents_total"),
+                "rule_tree_action": av.get("rule_tree_action"),
+                "final_action": av.get("final_action"),
+                "changed_rule_hint": bool(av.get("changed_rule_hint")),
+                "per_agent_justified": per_agent,
             })
         con.close()
         cases_json = json.dumps(cases)
@@ -3605,23 +3634,16 @@ def create_app() -> FastAPI:
 
         # Overview tiles are inlined above the Cases table so the operator
         # sees the headline numbers and the cases themselves on one scroll.
-        # Round 23 (4.11.2026): KPI vs target row at the TOP of the digest
-        # - the same four KPIs the deck and the /flow dashboard carry, so
-        # the viewer sees targets and pass/fail colours on one screen.
+        # Round 23 (4.11.2026): agreement with the rule tree moved out of
+        # the main strip into the new "Agent value" tab (see agent_value_html
+        # below). The main strip keeps the queue counters and the second
+        # round-22 row on their own, as the operator asked.
         correct_pct = 100.0 * sum(
             1 for r in av_rows if (r["agent_value_json"] or "") and
             (json.loads(r["agent_value_json"]).get("rule_tree_action")
              == json.loads(r["agent_value_json"]).get("final_action"))
         ) / max(1, av_counts["runs"]) if av_counts["runs"] else 0.0
-        kpi_targets_strip = (
-            "<div class='kpi-strip kpi-targets' style='margin-bottom:8px'>"
-            f"<div class='kpi {('standard' if correct_pct >= 85 else 'urgent')}'>"
-            f"<div class='kpi-v'>{correct_pct:.0f}%</div>"
-            f"<div class='kpi-l'>Agreement w/ rule tree (target 85%)</div></div>"
-            "</div>"
-        )
         kpi_strip = (
-            kpi_targets_strip +
             "<div class='kpi-strip'>"
             f"<div class='kpi'><div class='kpi-v'>{len(rows)}</div><div class='kpi-l'>New reports</div></div>"
             f"<div class='kpi urgent'><div class='kpi-v'>{counts['urgent']}</div><div class='kpi-l'>Urgent</div></div>"
@@ -3652,12 +3674,29 @@ def create_app() -> FastAPI:
                 ts = datetime.fromtimestamp(c["reported_at"], timezone.utc).strftime("%H:%M")
                 d = html.escape(c["decision"])
                 cls = _css_for(c["decision"])
+                # Round 23 (4.11.2026): per-row justified ratio + agree /
+                # override buttons; the two buttons POST to
+                # /agent_feedback/{id} and the counts feed the "Agent
+                # value" tab's worker-agreement rate.
+                jc = c.get("justified_count")
+                at = c.get("agents_total") or 6
+                justified_cell = (
+                    f"<span class='j-pill j-{('ok' if jc and jc >= 4 else 'warn') if jc is not None else 'na'}'>"
+                    f"{jc if jc is not None else '-'}/{at}</span>"
+                )
+                hid = html.escape(c['id'])
+                action_cell = (
+                    f"<button class='fb-btn fb-agree' data-id='{hid}' title='Worker agrees with the agent'>Agree</button>"
+                    f"<button class='fb-btn fb-override' data-id='{hid}' title='Worker overrides the agent'>Override</button>"
+                )
                 rows_html_parts.append(
                     f"<tr data-idx='{i-1}' class='row'>"
                     f"<td>{i}</td>"
                     f"<td><code>{html.escape(c['id'][:12])}</code></td>"
                     f"<td class='{cls}'>{d}</td>"
                     f"<td>{c['priority'] or ''}</td>"
+                    f"<td class='td-just'>{justified_cell}</td>"
+                    f"<td class='td-act' data-hid='{hid}'>{action_cell}</td>"
                     f"<td>{html.escape(c['location'])[:60]}</td>"
                     f"<td>{ts}</td>"
                     f"</tr>"
@@ -3665,7 +3704,10 @@ def create_app() -> FastAPI:
             rows_html = "".join(rows_html_parts)
             table_html = (
                 "<table class='cases'>"
-                "<thead><tr><th>#</th><th>id</th><th>decision</th><th>priority</th><th>location</th><th>time</th></tr></thead>"
+                "<thead><tr><th>#</th><th>id</th><th>decision</th><th>priority</th>"
+                "<th title='Agents justified / total'>agents OK</th>"
+                "<th>worker feedback</th>"
+                "<th>location</th><th>time</th></tr></thead>"
                 f"<tbody id='rows'>{rows_html}</tbody>"
                 "</table>"
             )
@@ -3747,6 +3789,8 @@ def create_app() -> FastAPI:
             f"<nav class='tabs' id='tabs'>"
             f"<button class='tab-btn active' data-tab='cases'>Cases ({len(rows)})</button>"
             f"<button class='tab-btn' data-tab='timeline'>Timeline</button>"
+            f"<button class='tab-btn' data-tab='agentvalue'>Agent value</button>"
+            f"<button class='tab-btn' data-tab='ruletree'>Rule tree</button>"
             f"</nav>"
         )
 
@@ -3818,6 +3862,51 @@ def create_app() -> FastAPI:
         .tl-item .tl-body{padding:0 14px 12px 38px;border-top:1px solid #f1f5f9}
         .tl-item .tl-pipe{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#6b7280;margin:8px 0 4px}
         .tl-item .tl-r{font-size:13px;color:#374151;line-height:1.5;margin-top:6px}
+        /* Round 23: per-row justified pill + agree/override buttons */
+        .j-pill{display:inline-block;padding:2px 8px;border-radius:999px;font-family:ui-monospace,monospace;font-size:12px;font-weight:700}
+        .j-pill.j-ok{background:#dcfce7;color:#166534}
+        .j-pill.j-warn{background:#fef3c7;color:#92400e}
+        .j-pill.j-na{background:#f3f4f6;color:#6b7280}
+        .fb-btn{appearance:none;background:#fff;border:1px solid #d1d5db;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;margin:0 2px;font-weight:600}
+        .fb-btn.fb-agree{color:#166534;border-color:#86efac}
+        .fb-btn.fb-override{color:#991b1b;border-color:#fecaca}
+        .fb-btn.sent{background:#f3f4f6;color:#6b7280;cursor:default;border-color:#e5e7eb}
+        .fb-btn:hover:not(.sent){background:#f9fafb}
+        .td-just,.td-act{white-space:nowrap}
+        /* Agent value tab */
+        .av-wrap{max-width:1100px}
+        .av-h{margin:0 0 10px;font-size:16px;font-weight:700;color:#111827}
+        .av-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+        .av-card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;text-align:center}
+        .av-card.ok{border-left:4px solid #16a34a}
+        .av-card.fail{border-left:4px solid #dc2626}
+        .av-v{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:28px;font-weight:800;color:#0ea5e9;line-height:1.1}
+        .av-card.ok .av-v{color:#16a34a}
+        .av-card.fail .av-v{color:#dc2626}
+        .av-l{font-size:13px;color:#374151;margin-top:4px;font-weight:600}
+        .av-t{font-size:11px;color:#6b7280;margin-top:2px}
+        .av-overrides{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:14px;font-size:13px}
+        .av-overrides .av-ov-row{padding:8px 0;border-bottom:1px solid #f1f5f9}
+        .av-overrides .av-ov-row:last-child{border-bottom:0}
+        .av-ov-id{font-family:ui-monospace,monospace;color:#1d4ed8;font-weight:600}
+        /* Rule tree tab */
+        .rt-wrap{max-width:1100px}
+        .rt-h{margin:0 0 6px;font-size:16px;font-weight:700;color:#111827}
+        .rt-sub{color:#6b7280;font-size:13px;margin:0 0 18px}
+        .rt-tree{display:flex;flex-direction:column;gap:14px;align-items:center}
+        .rt-row{display:flex;gap:28px;justify-content:center;align-items:flex-start;flex-wrap:wrap;position:relative}
+        .rt-row::before{content:"";position:absolute;top:-10px;left:50%;height:10px;border-left:2px dashed #cbd5e1}
+        .rt-col{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:180px;max-width:280px}
+        .rt-label{font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:0.03em}
+        .rt-node{background:#fff;border:2px solid #cbd5e1;border-radius:8px;padding:10px 14px;font-weight:700;color:#111827;text-align:center;min-width:150px}
+        .rt-root{background:#eff6ff;border-color:#60a5fa;color:#1e40af}
+        .rt-known{background:#eef2ff;border-color:#8b5cf6;color:#5b21b6}
+        .rt-human{background:#fee2e2;border-color:#ef4444;color:#991b1b}
+        .rt-standard{background:#dcfce7;border-color:#22c55e;color:#166534}
+        .rt-evi{background:#fef3c7;border-color:#f59e0b;color:#92400e}
+        .rt-branch{background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;padding:8px 14px;font-weight:600;color:#1f2937;font-size:13px;text-align:center}
+        .rt-branch.rt-fallback{background:#fff7ed;border-color:#fdba74;color:#9a3412}
+        .rt-note{font-size:11px;color:#6b7280;text-align:center;max-width:220px}
         """
 
         script = """
@@ -3853,6 +3942,64 @@ def create_app() -> FastAPI:
         }
         rows.forEach(r => r.addEventListener('click', () => pick(+r.dataset.idx)));
         if (rows.length) pick(0);
+        // Round 23 (4.11.2026): per-row Agree / Override buttons POST to
+        // /agent_feedback/{id}; successful click grays the pair out so
+        // the worker sees his vote landed and cannot double-count it.
+        function bindFbButtons(root) {
+          (root || document).querySelectorAll('.fb-btn').forEach(btn => {
+            if (btn.dataset.bound === '1') return;
+            btn.dataset.bound = '1';
+            btn.addEventListener('click', async (ev) => {
+              ev.stopPropagation();
+              const hid = btn.dataset.id;
+              const agree = btn.classList.contains('fb-agree');
+              try {
+                const base = location.pathname.replace(/\/digest.*/, '');
+                await fetch(base + '/agent_feedback/' + encodeURIComponent(hid), {
+                  method: 'POST',
+                  headers: {'content-type': 'application/json'},
+                  body: JSON.stringify({agree: agree, note: ''}),
+                });
+                const cell = btn.closest('.td-act');
+                if (cell) {
+                  cell.querySelectorAll('.fb-btn').forEach(b => {
+                    b.classList.add('sent'); b.disabled = true;
+                  });
+                  btn.textContent = agree ? 'Agree &#x2713;' : 'Override &#x2713;';
+                  btn.innerHTML = agree ? 'Agree &#x2713;' : 'Override &#x2713;';
+                }
+                refreshAgentValue();
+              } catch (e) { /* silent */ }
+            });
+          });
+        }
+        bindFbButtons(document);
+        // Round 23: the Agent value tab loads the worker-agreement rate
+        // from /stats/feedback and refreshes after every button click.
+        async function refreshAgentValue() {
+          try {
+            const base = location.pathname.replace(/\/digest.*/, '');
+            const d = await fetch(base + '/stats/feedback?window_hours=24', {cache:'no-store'})
+                      .then(r => r.json());
+            const v = document.getElementById('av-worker-v');
+            const t = document.getElementById('av-worker-t');
+            const list = document.getElementById('av-override-list');
+            if (v) v.textContent = (d.agreement_rate != null ? d.agreement_rate + '%' : '--');
+            if (t) t.textContent = (d.agree || 0) + ' agree / ' + (d.override || 0) + ' override';
+            if (list) {
+              if (!d.overrides || !d.overrides.length) {
+                list.innerHTML = '<div class="k" style="color:#6b7280">No overrides yet.</div>';
+              } else {
+                list.innerHTML = d.overrides.map(o =>
+                  '<div class="av-ov-row"><span class="av-ov-id">' + (o.hazard_id || '').substring(0,12) +
+                  '</span> &middot; <b>' + (o.class || '') + '</b> &middot; agent said <b>' + (o.decision || '') +
+                  '</b>' + (o.note ? ' &middot; <i>' + o.note + '</i>' : '') + '</div>'
+                ).join('');
+              }
+            }
+          } catch (e) { /* silent */ }
+        }
+        refreshAgentValue();
         // Silent background refresh: re-fetch the page HTML, swap in the
         // KPIs + table + timeline sections only, preserve the user's active
         // tab, selected row, and scroll position so the page never jumps.
@@ -3872,11 +4019,109 @@ def create_app() -> FastAPI:
             const newRows = document.querySelectorAll('.cases tr.row');
             const selId = (CASES[0] || {}).id;
             newRows.forEach(r => r.addEventListener('click', () => pick(+r.dataset.idx)));
+            bindFbButtons(document);
           } catch (e) { /* silent */ }
         }
         setInterval(refresh, 30000);
+        setInterval(refreshAgentValue, 30000);
         """.replace("__CASES__", cases_json)
 
+        # Round 23 (4.11.2026): the new "Agent value" tab. The 85% tile
+        # moved here from the top of the Cases pane; the worker-agreement
+        # rate (from agent_feedback via /stats/feedback) is loaded live by
+        # the page's JS because it changes on every button click.
+        agent_value_html = (
+            "<div class='av-wrap'>"
+            "<h3 class='av-h'>How much is the agent worth right now</h3>"
+            "<div class='av-grid'>"
+            f"<div class='av-card {'ok' if correct_pct >= 85 else 'fail'}'>"
+            f"<div class='av-v'>{correct_pct:.0f}%</div>"
+            f"<div class='av-l'>Agreement with the rule tree</div>"
+            f"<div class='av-t'>target 85%</div></div>"
+            "<div class='av-card' id='av-worker-card'>"
+            "<div class='av-v' id='av-worker-v'>--</div>"
+            "<div class='av-l'>Worker agreed with agent</div>"
+            "<div class='av-t' id='av-worker-t'>loading...</div></div>"
+            "<div class='av-card'>"
+            f"<div class='av-v'>{av_counts['changed_rule_hint']}</div>"
+            f"<div class='av-l'>Cases LLM moved the rule tree</div>"
+            f"<div class='av-t'>out of {av_counts['runs']}</div></div>"
+            "<div class='av-card'>"
+            f"<div class='av-v'>{av_counts['floor_applied']}</div>"
+            f"<div class='av-l'>Floors applied</div>"
+            f"<div class='av-t'>out of {av_counts['runs']}</div></div>"
+            "</div>"
+            "<h3 class='av-h' style='margin-top:18px'>Worker overrides (last 24h)</h3>"
+            "<div id='av-override-list' class='av-overrides'>loading...</div>"
+            "</div>"
+        )
+        # The rule tree tab is a static, Hebrew-first flowchart that
+        # mirrors _decide_rule_based for the city worker. Boxes are
+        # sized and coloured by what the branch outputs so a reader
+        # recognises urgent/human_review/standard/needs_more_evidence/
+        # known_image at a glance, without reading code.
+        rule_tree_html = """
+        <div class='rt-wrap'>
+          <h3 class='rt-h'>Rule tree the agent is compared against</h3>
+          <p class='rt-sub'>This is the deterministic baseline every agent decision is measured against.
+             The agent earns its compute only when it moves one of the leaves in the right direction (see the "Agent value" tab).</p>
+          <div class='rt-tree'>
+            <div class='rt-row'><div class='rt-node rt-root'>Incoming hazard</div></div>
+            <div class='rt-row'>
+              <div class='rt-branch'>sha256 match in catalogue?</div>
+            </div>
+            <div class='rt-row'>
+              <div class='rt-col'>
+                <div class='rt-label'>YES &mdash; same file</div>
+                <div class='rt-node rt-known'>known_image</div>
+                <div class='rt-note'>catalogue sealed; LLM is skipped</div>
+              </div>
+              <div class='rt-col'>
+                <div class='rt-label'>NO &mdash; new or similar photo</div>
+                <div class='rt-branch'>phash neighbour disagrees with live detector?</div>
+                <div class='rt-row'>
+                  <div class='rt-col'>
+                    <div class='rt-label'>YES &mdash; class mismatch</div>
+                    <div class='rt-node rt-human'>human_review</div>
+                    <div class='rt-note'>phash_class_mismatch floor (round 21)</div>
+                  </div>
+                  <div class='rt-col'>
+                    <div class='rt-label'>NO &mdash; carry on</div>
+                    <div class='rt-branch'>severity_signal?</div>
+                    <div class='rt-row'>
+                      <div class='rt-col'>
+                        <div class='rt-label'>severe OR recurring</div>
+                        <div class='rt-node rt-human'>human_review</div>
+                        <div class='rt-note'>priority bumped by severity</div>
+                      </div>
+                      <div class='rt-col'>
+                        <div class='rt-label'>moderate</div>
+                        <div class='rt-node rt-standard'>standard</div>
+                        <div class='rt-note'>routine queue</div>
+                      </div>
+                      <div class='rt-col'>
+                        <div class='rt-label'>minor &amp; low confidence</div>
+                        <div class='rt-node rt-evi'>needs_more_evidence</div>
+                        <div class='rt-note'>request another photo</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class='rt-row'>
+              <div class='rt-branch rt-fallback'>LLM failed (timeout / ungrounded / unparseable)?</div>
+            </div>
+            <div class='rt-row'>
+              <div class='rt-col'>
+                <div class='rt-label'>YES</div>
+                <div class='rt-node rt-human'>fall back to rule tree verdict (no LLM)</div>
+                <div class='rt-note'>safety net; never the agent's call</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        """
         html_doc = (
             "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -3894,6 +4139,8 @@ def create_app() -> FastAPI:
             "</aside>"
             "</div></section>"
             f"<section id='pane-timeline' class='tab-pane'>{timeline_html}</section>"
+            f"<section id='pane-agentvalue' class='tab-pane'>{agent_value_html}</section>"
+            f"<section id='pane-ruletree' class='tab-pane'>{rule_tree_html}</section>"
             f"<script>{script}</script>"
             "</body></html>"
         )
@@ -3988,6 +4235,94 @@ def create_app() -> FastAPI:
             "total_hazards": len(rows),
             "as_of": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
             **aggregates,
+        }
+
+    @app.post("/agent_feedback/{hazard_id}")
+    def post_agent_feedback(hazard_id: str, body: dict, request: Request) -> dict:
+        """Round 23 (4.11.2026): the worker's agree/override click on the
+        agent's verdict for one hazard. Writes one row to agent_feedback
+        and returns the running tally for this hazard. Private: gated to
+        Tailscale / loopback, same as the digest page that calls it.
+        Body: {"agree": bool, "note": str?}.
+        """
+        if not _is_private_host(request):
+            raise HTTPException(status_code=404, detail="not found")
+        try:
+            agree = bool(body.get("agree"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="agree_required")
+        note = str(body.get("note") or "")[:400]
+        import sqlite3 as _sqlite3
+        import uuid as _uuid
+        settings = get_settings()
+        con = _sqlite3.connect(settings.roadguard_db_path)
+        con.row_factory = _sqlite3.Row
+        try:
+            fid = "fb_" + _uuid.uuid4().hex[:12]
+            con.execute(
+                "INSERT INTO agent_feedback (id, hazard_id, created_at, worker_id, agree, note) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (fid, hazard_id, time.time(), "", 1 if agree else 0, note),
+            )
+            con.commit()
+            row = con.execute(
+                "SELECT SUM(agree) AS agree_n, COUNT(*) AS total FROM agent_feedback WHERE hazard_id = ?",
+                (hazard_id,),
+            ).fetchone()
+        finally:
+            con.close()
+        return {
+            "id": fid,
+            "hazard_id": hazard_id,
+            "agree": agree,
+            "agree_total": int(row["agree_n"] or 0),
+            "feedback_total": int(row["total"] or 0),
+        }
+
+    @app.get("/stats/feedback")
+    def stats_feedback(request: Request, window_hours: int = 24) -> dict:
+        """Round 23 (4.11.2026): aggregate of agent_feedback rows the
+        /digest 'Agent value' tab shows - how many hazards the worker
+        clicked on, how many times he agreed vs overrode the agent, and
+        the list of overrides.
+        """
+        if not _is_private_host(request):
+            raise HTTPException(status_code=404, detail="not found")
+        try:
+            hrs = max(1, min(720, int(window_hours)))
+        except (TypeError, ValueError):
+            hrs = 24
+        settings = get_settings()
+        import sqlite3 as _sqlite3
+        con = _sqlite3.connect(settings.roadguard_db_path)
+        con.row_factory = _sqlite3.Row
+        cutoff = time.time() - hrs * 3600
+        try:
+            rows = con.execute(
+                "SELECT f.hazard_id, f.agree, f.note, f.created_at, "
+                "       h.class, h.agent_decision "
+                "FROM agent_feedback f "
+                "LEFT JOIN hazards h ON h.id = f.hazard_id "
+                "WHERE f.created_at >= ? "
+                "ORDER BY f.created_at DESC",
+                (cutoff,),
+            ).fetchall()
+        finally:
+            con.close()
+        agree = sum(1 for r in rows if r["agree"])
+        override = len(rows) - agree
+        overrides = [
+            {"hazard_id": r["hazard_id"], "class": r["class"],
+             "decision": r["agent_decision"], "note": r["note"]}
+            for r in rows if not r["agree"]
+        ]
+        return {
+            "window_hours": hrs,
+            "total_feedback": len(rows),
+            "agree": agree,
+            "override": override,
+            "agreement_rate": round(100.0 * agree / len(rows), 1) if rows else 0.0,
+            "overrides": overrides,
         }
 
     @app.get("/stats/kpi")

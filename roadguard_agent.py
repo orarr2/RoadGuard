@@ -476,6 +476,24 @@ CREATE TABLE IF NOT EXISTS agent_notes (
 CREATE INDEX IF NOT EXISTS idx_agent_notes_case
     ON agent_notes(hazard_class, road_type, created_at DESC);
 
+-- Round 23 (4.11.2026): worker verdict on the agent's call per hazard.
+-- One row per worker click on "Agree with agent" / "Override agent" in
+-- the digest; the aggregate is what the /digest "Agent value" tab shows
+-- as a worker-agreement rate next to the rule-tree-agreement number. No
+-- foreign key: a feedback can land before the hazard row is persisted
+-- (the worker may click on a case still processing).
+CREATE TABLE IF NOT EXISTS agent_feedback (
+    id          TEXT PRIMARY KEY,
+    hazard_id   TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    worker_id   TEXT NOT NULL DEFAULT '',
+    agree       INTEGER NOT NULL,         -- 1 = worker agrees, 0 = worker overrides
+    note        TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_feedback_hazard
+    ON agent_feedback(hazard_id, created_at DESC);
+
 -- Persistent DecisionCache (live-drive flow). Each row is a (key -> verdict)
 -- entry with an expiry wall-clock. The server reads unexpired rows into
 -- an in-memory LRU on startup and writes-through on every put, so the
