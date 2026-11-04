@@ -3716,9 +3716,10 @@ def create_app() -> FastAPI:
                 cls = _css_for(c["decision"])
                 hid = html.escape(c['id'])
                 hazard_label = html.escape(_hazard_label(id_to_class.get(c["id"], "")))
-                # Round 23 (4.11.2026): three-button worker feedback -
-                # Agree, Disagree, Not relevant. The three POST the
-                # matching verdict to /agent_feedback/{id}.
+                # Round 23 iter 3 (4.11.2026): three buttons stay
+                # clickable so the worker can change his mind. The
+                # row's own 'your vote' cell holds the last verdict
+                # (if any) and refreshes from /agent_feedback/by_hazard.
                 action_cell = (
                     f"<button class='fb-btn fb-agree' data-id='{hid}' data-verdict='agree' title='Worker agrees with the agent'>Agree</button>"
                     f"<button class='fb-btn fb-disagree' data-id='{hid}' data-verdict='disagree' title='Worker disagrees with the agent'>Disagree</button>"
@@ -3731,6 +3732,7 @@ def create_app() -> FastAPI:
                     f"<td class='td-hazard'>{hazard_label}</td>"
                     f"<td class='{cls}'>{d}</td>"
                     f"<td>{c['priority'] or ''}</td>"
+                    f"<td class='td-vote' data-hid='{hid}'><span class='vote-pill vote-none'>not voted</span></td>"
                     f"<td class='td-act' data-hid='{hid}'>{action_cell}</td>"
                     f"<td>{html.escape(c['location'])[:60]}</td>"
                     f"<td>{ts}</td>"
@@ -3742,6 +3744,7 @@ def create_app() -> FastAPI:
                 "<thead><tr><th>#</th><th>id</th>"
                 "<th title='Hazard type the agents identified in the image'>hazard the agents saw</th>"
                 "<th>decision</th><th>priority</th>"
+                "<th title='Your latest vote on this case'>your vote</th>"
                 "<th>worker feedback</th>"
                 "<th>location</th><th>time</th></tr></thead>"
                 f"<tbody id='rows'>{rows_html}</tbody>"
@@ -3897,15 +3900,27 @@ def create_app() -> FastAPI:
         .tl-item .tl-body{padding:0 14px 12px 38px;border-top:1px solid #f1f5f9}
         .tl-item .tl-pipe{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#6b7280;margin:8px 0 4px}
         .tl-item .tl-r{font-size:13px;color:#374151;line-height:1.5;margin-top:6px}
-        /* Round 23: hazard-label cell + 3 worker-feedback buttons */
+        /* Round 23 iter 3: hazard-label cell, 3 feedback buttons (always
+           re-clickable), per-case vote pill. */
         .td-hazard{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#1f2937;white-space:nowrap}
-        .fb-btn{appearance:none;background:#fff;border:1px solid #d1d5db;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;margin:0 2px;font-weight:600}
+        .fb-btn{appearance:none;background:#fff;border:1px solid #d1d5db;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;margin:0 2px;font-weight:600;transition:background 0.1s,color 0.1s}
         .fb-btn.fb-agree{color:#166534;border-color:#86efac}
         .fb-btn.fb-disagree{color:#991b1b;border-color:#fecaca}
         .fb-btn.fb-nr{color:#6b7280;border-color:#d1d5db}
-        .fb-btn.sent{background:#f3f4f6;color:#6b7280;cursor:default;border-color:#e5e7eb}
-        .fb-btn:hover:not(.sent){background:#f9fafb}
-        .td-act{white-space:nowrap}
+        .fb-btn:hover{background:#f9fafb}
+        .fb-btn.active-agree{background:#dcfce7;color:#166534;border-color:#86efac}
+        .fb-btn.active-disagree{background:#fee2e2;color:#991b1b;border-color:#fecaca}
+        .fb-btn.active-nr{background:#f3f4f6;color:#1f2937;border-color:#d1d5db}
+        .fb-btn.flash-ok{animation:flash-ok-anim 0.6s ease-out}
+        @keyframes flash-ok-anim{0%{box-shadow:0 0 0 0 rgba(34,197,94,0.6)}100%{box-shadow:0 0 0 6px rgba(34,197,94,0)}}
+        .fb-btn.flash-err{animation:flash-err-anim 0.6s ease-out}
+        @keyframes flash-err-anim{0%{box-shadow:0 0 0 0 rgba(239,68,68,0.6)}100%{box-shadow:0 0 0 6px rgba(239,68,68,0)}}
+        .td-act,.td-vote{white-space:nowrap}
+        .vote-pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;font-family:ui-monospace,monospace}
+        .vote-pill.vote-none{background:#f3f4f6;color:#9ca3af}
+        .vote-pill.vote-agree{background:#dcfce7;color:#166534}
+        .vote-pill.vote-disagree{background:#fee2e2;color:#991b1b}
+        .vote-pill.vote-not_relevant{background:#e5e7eb;color:#374151}
         /* Agent value tab */
         .av-wrap{max-width:1100px}
         .av-h{margin:0 0 10px;font-size:16px;font-weight:700;color:#111827}
@@ -3973,10 +3988,37 @@ def create_app() -> FastAPI:
         }
         rows.forEach(r => r.addEventListener('click', () => pick(+r.dataset.idx)));
         if (rows.length) pick(0);
-        // Round 23 (4.11.2026): three-button worker feedback. Each
-        // button sends its own verdict (agree / disagree / not_relevant)
-        // to /agent_feedback/{id}, grays the row out and refreshes the
-        // Agent value tab.
+        // Round 23 iter 3 (4.11.2026): three-button worker feedback.
+        // Buttons stay clickable (undo / change your mind), each click
+        // POSTs a new verdict row that becomes the case's latest. Any
+        // HTTP non-2xx flashes the button red and does NOT update the
+        // 'your vote' pill, so the worker sees his click did NOT save.
+        function urlBase() { return location.pathname.replace(/\\/digest.*/, ''); }
+        function setVotePill(hid, verdict) {
+          document.querySelectorAll(".td-vote[data-hid='" + hid + "']").forEach(td => {
+            td.innerHTML = '';
+            const pill = create('span', 'vote-pill vote-' + verdict);
+            pill.textContent = verdict === 'not_relevant' ? 'not relevant' : verdict;
+            td.appendChild(pill);
+          });
+          document.querySelectorAll(".td-act[data-hid='" + hid + "'] .fb-btn").forEach(b => {
+            b.classList.remove('active-agree','active-disagree','active-nr');
+            if (b.dataset.verdict === verdict) {
+              b.classList.add('active-' + (verdict === 'not_relevant' ? 'nr' : verdict));
+            }
+          });
+        }
+        function clearVotePill(hid) {
+          document.querySelectorAll(".td-vote[data-hid='" + hid + "']").forEach(td => {
+            td.innerHTML = '<span class="vote-pill vote-none">not voted</span>';
+          });
+        }
+        function create(tag, cls, text) {
+          const n = document.createElement(tag);
+          if (cls) n.className = cls;
+          if (text != null) n.textContent = text;
+          return n;
+        }
         function bindFbButtons(root) {
           (root || document).querySelectorAll('.fb-btn').forEach(btn => {
             if (btn.dataset.bound === '1') return;
@@ -3986,28 +4028,48 @@ def create_app() -> FastAPI:
               const hid = btn.dataset.id;
               const verdict = btn.dataset.verdict || 'agree';
               try {
-                const base = location.pathname.replace(/\\/digest.*/, '');
-                await fetch(base + '/agent_feedback/' + encodeURIComponent(hid), {
+                const r = await fetch(urlBase() + '/agent_feedback/' + encodeURIComponent(hid), {
                   method: 'POST',
                   headers: {'content-type': 'application/json'},
                   body: JSON.stringify({verdict: verdict, note: ''}),
                 });
-                const cell = btn.closest('.td-act');
-                if (cell) {
-                  cell.querySelectorAll('.fb-btn').forEach(b => {
-                    b.classList.add('sent'); b.disabled = true;
-                  });
-                  const mark = ' \\u2713';
-                  if (verdict === 'agree') btn.textContent = 'Agree' + mark;
-                  else if (verdict === 'disagree') btn.textContent = 'Disagree' + mark;
-                  else btn.textContent = 'Not relevant' + mark;
-                }
+                if (!r.ok) { throw new Error('http ' + r.status); }
+                btn.classList.remove('flash-err');
+                btn.offsetWidth; // reflow to retrigger animation
+                btn.classList.add('flash-ok');
+                setTimeout(() => btn.classList.remove('flash-ok'), 700);
+                setVotePill(hid, verdict);
                 refreshAgentValue();
-              } catch (e) { /* silent */ }
+              } catch (e) {
+                btn.classList.remove('flash-ok');
+                btn.offsetWidth;
+                btn.classList.add('flash-err');
+                setTimeout(() => btn.classList.remove('flash-err'), 700);
+                // Leave the vote pill as it was so the worker sees the
+                // click did NOT save.
+              }
             });
           });
         }
         bindFbButtons(document);
+        // Round 23 iter 3: load the latest vote per hazard and paint
+        // the 'your vote' cells, so a worker reloading the page sees
+        // what he already voted. Polled every 30s by the digest's own
+        // refresh timer.
+        async function refreshVotes() {
+          try {
+            const d = await fetch(urlBase() + '/agent_feedback/by_hazard?window_hours=24', {cache:'no-store'})
+                      .then(r => r.json());
+            const byH = d.by_hazard || {};
+            document.querySelectorAll('.td-vote[data-hid]').forEach(td => {
+              const hid = td.dataset.hid;
+              const v = byH[hid];
+              if (v && v.verdict) setVotePill(hid, v.verdict);
+              else clearVotePill(hid);
+            });
+          } catch (e) { /* silent */ }
+        }
+        refreshVotes();
         // Round 23: the Agent value tab loads the three-verdict counters
         // from /stats/feedback, refreshes after every button click.
         async function refreshAgentValue() {
@@ -4015,12 +4077,12 @@ def create_app() -> FastAPI:
             const base = location.pathname.replace(/\\/digest.*/, '');
             const d = await fetch(base + '/stats/feedback?window_hours=24', {cache:'no-store'})
                       .then(r => r.json());
-            const total = d.total_feedback || 0;
+            const total = d.total_cases_voted || 0;
             function setCard(idv, idt, n) {
               const v = document.getElementById(idv);
               const t = document.getElementById(idt);
               if (v) v.textContent = String(n);
-              if (t) t.textContent = total ? (n + ' of ' + total + ' feedback') : 'no feedback yet';
+              if (t) t.textContent = total ? (n + ' of ' + total + ' cases voted') : 'no votes yet';
             }
             setCard('av-agree-v', 'av-agree-t', d.agree || 0);
             setCard('av-dis-v',   'av-dis-t',   d.disagree || 0);
@@ -4043,6 +4105,7 @@ def create_app() -> FastAPI:
           } catch (e) { /* silent */ }
         }
         refreshAgentValue();
+        setInterval(refreshVotes, 30000);
         // Silent background refresh: re-fetch the page HTML, swap in the
         // KPIs + table + timeline sections only, preserve the user's active
         // tab, selected row, and scroll position so the page never jumps.
@@ -4142,16 +4205,16 @@ def create_app() -> FastAPI:
             f"<div class='av-t'>target 85%</div></div>"
             "<div class='av-card' id='av-agree-card'>"
             "<div class='av-v' id='av-agree-v'>0</div>"
-            "<div class='av-l'>Worker: Agree</div>"
-            "<div class='av-t' id='av-agree-t'>0 total feedback</div></div>"
+            "<div class='av-l'>Cases worker agreed with</div>"
+            "<div class='av-t' id='av-agree-t'>no votes yet</div></div>"
             "<div class='av-card' id='av-dis-card'>"
             "<div class='av-v' id='av-dis-v'>0</div>"
-            "<div class='av-l'>Worker: Disagree</div>"
-            "<div class='av-t' id='av-dis-t'>0 total feedback</div></div>"
+            "<div class='av-l'>Cases worker disagreed with</div>"
+            "<div class='av-t' id='av-dis-t'>no votes yet</div></div>"
             "<div class='av-card' id='av-nr-card'>"
             "<div class='av-v' id='av-nr-v'>0</div>"
-            "<div class='av-l'>Worker: Not relevant</div>"
-            "<div class='av-t' id='av-nr-t'>0 total feedback</div></div>"
+            "<div class='av-l'>Cases worker marked not relevant</div>"
+            "<div class='av-t' id='av-nr-t'>no votes yet</div></div>"
             "</div>"
             "<h3 class='av-h' style='margin-top:18px'>Each agent and its metrics (last 24h)</h3>"
             f"<div class='ag-grid'>{per_agent_rows}</div>"
@@ -4161,111 +4224,108 @@ def create_app() -> FastAPI:
             "<div id='av-nr-list' class='av-overrides'>No 'not relevant' flags yet.</div>"
             "</div>"
         )
-        # Round 23 (4.11.2026) redesign: the rule tree is drawn as an
-        # actual decision tree. One SVG pane, uniform node style, every
-        # branch tagged yes/no, children stacked below their parent and
-        # connected by lines. No colors by outcome, no decoration.
+        # Round 23 iter 3 (4.11.2026): rule tree redrawn as a proper
+        # decision tree. All edges are right-angle elbows (never crossed
+        # diagonals), nodes share one uniform style, labels sit beside
+        # the segments they belong to.
         rule_tree_html = """
         <div class='rt-wrap'>
           <h3 class='rt-h'>Rule tree the agent is compared against</h3>
           <p class='rt-sub'>Deterministic baseline. Every agent verdict is scored against the leaf this tree would have picked.</p>
           <div class='rt-canvas'>
-            <svg viewBox='0 0 1100 820' xmlns='http://www.w3.org/2000/svg' class='rt-svg' preserveAspectRatio='xMidYMin meet'>
+            <svg viewBox='0 0 1200 780' xmlns='http://www.w3.org/2000/svg' class='rt-svg' preserveAspectRatio='xMidYMin meet'>
               <style>
                 .rt-svg .n rect{fill:#fff;stroke:#334155;stroke-width:1.5;rx:8;ry:8}
                 .rt-svg .n text{font:600 13px -apple-system,Segoe UI,Roboto,sans-serif;fill:#111827}
-                .rt-svg .n.leaf rect{stroke-width:2}
                 .rt-svg .leaf text{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
                 .rt-svg .edge{stroke:#334155;stroke-width:1.5;fill:none}
                 .rt-svg .edge-lbl{font:600 11px -apple-system,Segoe UI,Roboto,sans-serif;fill:#334155;text-anchor:middle}
+                .rt-svg .divider{stroke:#cbd5e1;stroke-dasharray:4,4;stroke-width:1}
+                .rt-svg .section-lbl{font:700 11px -apple-system,Segoe UI,Roboto,sans-serif;fill:#6b7280;letter-spacing:0.04em;text-anchor:middle}
               </style>
-              <!-- Edges first so nodes draw on top -->
-              <path class='edge' d='M550,50 L550,100'/>
-              <path class='edge' d='M550,145 L220,205'/>
-              <path class='edge' d='M550,145 L880,205'/>
-              <text class='edge-lbl' x='360' y='180'>yes (same file)</text>
-              <text class='edge-lbl' x='740' y='180'>no (new photo)</text>
 
-              <path class='edge' d='M880,250 L640,310'/>
-              <path class='edge' d='M880,250 L1020,310'/>
-              <text class='edge-lbl' x='750' y='285'>yes</text>
-              <text class='edge-lbl' x='970' y='285'>no</text>
+              <!-- Edges: root -> sha256 -->
+              <path class='edge' d='M450,52 V90'/>
 
-              <path class='edge' d='M640,355 L400,415'/>
-              <path class='edge' d='M640,355 L640,415'/>
-              <path class='edge' d='M640,355 L880,415'/>
-              <text class='edge-lbl' x='510' y='390'>severe / recurring</text>
-              <text class='edge-lbl' x='640' y='390'>moderate</text>
-              <text class='edge-lbl' x='770' y='390'>minor + low conf</text>
+              <!-- sha256 -> known_image (yes) and -> phash? (no), elbow at y=170 -->
+              <path class='edge' d='M450,132 V170 H150 V200'/>
+              <path class='edge' d='M450,132 V170 H750 V200'/>
+              <text class='edge-lbl' x='300' y='163'>yes (same file)</text>
+              <text class='edge-lbl' x='600' y='163'>no (new or similar photo)</text>
 
-              <path class='edge' d='M550,520 L550,570'/>
-              <path class='edge' d='M550,615 L310,675'/>
-              <path class='edge' d='M550,615 L790,675'/>
-              <text class='edge-lbl' x='420' y='650'>yes (LLM failed)</text>
-              <text class='edge-lbl' x='680' y='650'>no (LLM returned)</text>
+              <!-- phash? -> human_review (yes) and -> severity? (no), elbow at y=288 -->
+              <path class='edge' d='M750,242 V288 H500 V320'/>
+              <path class='edge' d='M750,242 V288 H950 V320'/>
+              <text class='edge-lbl' x='625' y='281'>yes (phash class mismatch)</text>
+              <text class='edge-lbl' x='850' y='281'>no</text>
 
-              <!-- Root -->
-              <g class='n' transform='translate(450,10)'>
-                <rect width='200' height='40'/>
-                <text x='100' y='25' text-anchor='middle'>incoming hazard</text>
+              <!-- severity? -> three leaves, elbow at y=408 -->
+              <path class='edge' d='M950,362 V408 H750 V440'/>
+              <path class='edge' d='M950,362 V440'/>
+              <path class='edge' d='M950,362 V408 H1150 V440'/>
+              <text class='edge-lbl' x='850' y='401'>severe / recurring</text>
+              <text class='edge-lbl' x='998' y='401'>moderate</text>
+              <text class='edge-lbl' x='1050' y='401'>minor + low conf</text>
+
+              <!-- Divider + LLM-failed section label -->
+              <line class='divider' x1='40' y1='530' x2='1160' y2='530'/>
+              <text class='section-lbl' x='600' y='553'>SAFETY NET (applies to any branch above)</text>
+
+              <!-- LLM failed? -> fall_back (yes) and keep (no), elbow at y=648 -->
+              <path class='edge' d='M600,632 V648 H400 V680'/>
+              <path class='edge' d='M600,632 V648 H800 V680'/>
+              <text class='edge-lbl' x='500' y='641'>yes (LLM failed)</text>
+              <text class='edge-lbl' x='700' y='641'>no (LLM returned)</text>
+
+              <!-- Nodes -->
+              <g class='n' transform='translate(350,10)'>
+                <rect width='200' height='42'/>
+                <text x='100' y='27' text-anchor='middle'>incoming hazard</text>
+              </g>
+              <g class='n' transform='translate(320,90)'>
+                <rect width='260' height='42'/>
+                <text x='130' y='27' text-anchor='middle'>sha256 match in catalogue?</text>
+              </g>
+              <g class='n leaf' transform='translate(50,200)'>
+                <rect width='200' height='42'/>
+                <text x='100' y='27' text-anchor='middle'>known_image</text>
+              </g>
+              <g class='n' transform='translate(610,200)'>
+                <rect width='280' height='42'/>
+                <text x='140' y='27' text-anchor='middle'>phash class mismatch?</text>
+              </g>
+              <g class='n leaf' transform='translate(400,320)'>
+                <rect width='200' height='42'/>
+                <text x='100' y='27' text-anchor='middle'>human_review</text>
+              </g>
+              <g class='n' transform='translate(830,320)'>
+                <rect width='240' height='42'/>
+                <text x='120' y='27' text-anchor='middle'>severity_signal?</text>
+              </g>
+              <g class='n leaf' transform='translate(650,440)'>
+                <rect width='200' height='42'/>
+                <text x='100' y='27' text-anchor='middle'>human_review</text>
+              </g>
+              <g class='n leaf' transform='translate(870,440)'>
+                <rect width='160' height='42'/>
+                <text x='80' y='27' text-anchor='middle'>standard</text>
+              </g>
+              <g class='n leaf' transform='translate(1050,440)'>
+                <rect width='200' height='42'/>
+                <text x='100' y='27' text-anchor='middle'>needs_more_evidence</text>
               </g>
 
-              <!-- Level 1: sha256 match -->
-              <g class='n' transform='translate(420,100)'>
-                <rect width='260' height='45'/>
-                <text x='130' y='28' text-anchor='middle'>sha256 match in catalogue?</text>
+              <g class='n' transform='translate(480,590)'>
+                <rect width='240' height='42'/>
+                <text x='120' y='27' text-anchor='middle'>LLM failed?</text>
               </g>
-
-              <!-- Level 2 left leaf: known_image -->
-              <g class='n leaf' transform='translate(120,205)'>
-                <rect width='200' height='45'/>
-                <text x='100' y='28' text-anchor='middle'>known_image</text>
+              <g class='n leaf' transform='translate(300,680)'>
+                <rect width='200' height='42'/>
+                <text x='100' y='27' text-anchor='middle'>fall back to rule tree</text>
               </g>
-
-              <!-- Level 2 right: phash branch -->
-              <g class='n' transform='translate(760,205)'>
-                <rect width='240' height='45'/>
-                <text x='120' y='28' text-anchor='middle'>phash class mismatch?</text>
-              </g>
-
-              <!-- Level 3 right-right leaf: human_review (phash floor) -->
-              <g class='n leaf' transform='translate(540,310)'>
-                <rect width='200' height='45'/>
-                <text x='100' y='28' text-anchor='middle'>human_review</text>
-              </g>
-
-              <!-- Level 3 right: severity branch -->
-              <g class='n' transform='translate(920,310)'>
-                <rect width='200' height='45'/>
-                <text x='100' y='28' text-anchor='middle'>severity_signal?</text>
-              </g>
-
-              <!-- Level 4 three leaves -->
-              <g class='n leaf' transform='translate(300,415)'>
-                <rect width='200' height='45'/>
-                <text x='100' y='28' text-anchor='middle'>human_review</text>
-              </g>
-              <g class='n leaf' transform='translate(540,415)'>
-                <rect width='200' height='45'/>
-                <text x='100' y='28' text-anchor='middle'>standard</text>
-              </g>
-              <g class='n leaf' transform='translate(780,415)'>
-                <rect width='200' height='45'/>
-                <text x='100' y='28' text-anchor='middle'>needs_more_evidence</text>
-              </g>
-
-              <!-- Level 5: LLM failure branch (applies to any leaf above) -->
-              <g class='n' transform='translate(420,475)'>
-                <rect width='260' height='45'/>
-                <text x='130' y='28' text-anchor='middle'>LLM failed?</text>
-              </g>
-              <g class='n leaf' transform='translate(210,675)'>
-                <rect width='200' height='45'/>
-                <text x='100' y='28' text-anchor='middle'>fall back to rule tree</text>
-              </g>
-              <g class='n leaf' transform='translate(690,675)'>
-                <rect width='200' height='45'/>
-                <text x='100' y='28' text-anchor='middle'>keep agent verdict</text>
+              <g class='n leaf' transform='translate(700,680)'>
+                <rect width='200' height='42'/>
+                <text x='100' y='27' text-anchor='middle'>keep agent verdict</text>
               </g>
             </svg>
           </div>
@@ -4387,6 +4447,47 @@ def create_app() -> FastAPI:
 
     _VALID_VERDICTS = {"agree", "disagree", "not_relevant"}
 
+    @app.get("/agent_feedback/by_hazard")
+    def get_agent_feedback_by_hazard(request: Request, window_hours: int = 24) -> dict:
+        """Round 23 (4.11.2026) iter 3: latest worker verdict per hazard
+        in the window, keyed by hazard_id. The digest JS reads this on
+        page load so a case the worker already voted on shows its vote
+        and lets the worker CHANGE it (undo / re-vote).
+        """
+        if not _is_private_host(request):
+            raise HTTPException(status_code=404, detail="not found")
+        try:
+            hrs = max(1, min(720, int(window_hours)))
+        except (TypeError, ValueError):
+            hrs = 24
+        settings = get_settings()
+        import sqlite3 as _sqlite3
+        con = _sqlite3.connect(settings.roadguard_db_path)
+        con.row_factory = _sqlite3.Row
+        cutoff = time.time() - hrs * 3600
+        try:
+            # Latest row per hazard_id (SQLite row_number through a
+            # window function is available from 3.25; the server runs
+            # a newer one).
+            rows = con.execute(
+                "WITH ranked AS ("
+                "  SELECT hazard_id, verdict, agree, note, created_at, "
+                "         ROW_NUMBER() OVER (PARTITION BY hazard_id ORDER BY created_at DESC) rn "
+                "  FROM agent_feedback WHERE created_at >= ?"
+                ") SELECT hazard_id, verdict, agree, note, created_at FROM ranked WHERE rn = 1",
+                (cutoff,),
+            ).fetchall()
+        finally:
+            con.close()
+        out = {}
+        for r in rows:
+            v = (r["verdict"] or "").strip().lower() if "verdict" in r.keys() else ""
+            if not v:
+                v = "agree" if r["agree"] else "disagree"
+            out[r["hazard_id"]] = {"verdict": v, "note": r["note"] or "",
+                                   "at": r["created_at"]}
+        return {"window_hours": hrs, "by_hazard": out}
+
     @app.post("/agent_feedback/{hazard_id}")
     def post_agent_feedback(hazard_id: str, body: dict, request: Request) -> dict:
         """Round 23 (4.11.2026): the worker's three-state verdict on the
@@ -4445,10 +4546,12 @@ def create_app() -> FastAPI:
 
     @app.get("/stats/feedback")
     def stats_feedback(request: Request, window_hours: int = 24) -> dict:
-        """Round 23 (4.11.2026): aggregate of agent_feedback rows the
-        /digest 'Agent value' tab shows - how many hazards the worker
-        clicked on, how often each of the three verdicts fired, and the
-        case lists behind each verdict.
+        """Round 23 (4.11.2026) iter 3: aggregate the worker's verdicts
+        by DISTINCT HAZARD, not by click count. A hazard the worker
+        clicked three times (Disagree -> Agree -> Not relevant) is
+        counted once, with its LATEST verdict. The 'Agent value' tab's
+        counters therefore read as 'how many cases the worker labeled
+        X', which is what the owner asked for.
         """
         if not _is_private_host(request):
             raise HTTPException(status_code=404, detail="not found")
@@ -4462,13 +4565,20 @@ def create_app() -> FastAPI:
         con.row_factory = _sqlite3.Row
         cutoff = time.time() - hrs * 3600
         try:
+            # Only the LATEST feedback row per hazard counts; earlier
+            # votes on the same case are history for the audit, not for
+            # the KPI cards.
             rows = con.execute(
-                "SELECT f.hazard_id, f.agree, f.verdict, f.note, f.created_at, "
-                "       h.class, h.agent_decision "
-                "FROM agent_feedback f "
-                "LEFT JOIN hazards h ON h.id = f.hazard_id "
-                "WHERE f.created_at >= ? "
-                "ORDER BY f.created_at DESC",
+                "WITH ranked AS ("
+                "  SELECT f.hazard_id, f.agree, f.verdict, f.note, f.created_at, "
+                "         h.class, h.agent_decision, "
+                "         ROW_NUMBER() OVER (PARTITION BY f.hazard_id ORDER BY f.created_at DESC) rn "
+                "  FROM agent_feedback f "
+                "  LEFT JOIN hazards h ON h.id = f.hazard_id "
+                "  WHERE f.created_at >= ?"
+                ") SELECT hazard_id, agree, verdict, note, class, agent_decision "
+                "FROM ranked WHERE rn = 1 "
+                "ORDER BY hazard_id",
                 (cutoff,),
             ).fetchall()
         finally:
@@ -4490,14 +4600,14 @@ def create_app() -> FastAPI:
             elif v == "not_relevant":
                 not_relevant.append({"hazard_id": r["hazard_id"], "class": r["class"],
                                      "decision": r["agent_decision"], "note": r["note"]})
-        total = len(rows)
+        total_cases = len(rows)
         return {
             "window_hours": hrs,
-            "total_feedback": total,
+            "total_cases_voted": total_cases,
             "agree": counters["agree"],
             "disagree": counters["disagree"],
             "not_relevant": counters["not_relevant"],
-            "agreement_rate": round(100.0 * counters["agree"] / total, 1) if total else 0.0,
+            "agreement_rate": round(100.0 * counters["agree"] / total_cases, 1) if total_cases else 0.0,
             "disagrees": disagrees,
             "not_relevants": not_relevant,
         }
