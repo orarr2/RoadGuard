@@ -3954,7 +3954,7 @@ def create_app() -> FastAPI:
               const hid = btn.dataset.id;
               const agree = btn.classList.contains('fb-agree');
               try {
-                const base = location.pathname.replace(/\/digest.*/, '');
+                const base = location.pathname.replace(/\\/digest.*/, '');
                 await fetch(base + '/agent_feedback/' + encodeURIComponent(hid), {
                   method: 'POST',
                   headers: {'content-type': 'application/json'},
@@ -3978,7 +3978,7 @@ def create_app() -> FastAPI:
         // from /stats/feedback and refreshes after every button click.
         async function refreshAgentValue() {
           try {
-            const base = location.pathname.replace(/\/digest.*/, '');
+            const base = location.pathname.replace(/\\/digest.*/, '');
             const d = await fetch(base + '/stats/feedback?window_hours=24', {cache:'no-store'})
                       .then(r => r.json());
             const v = document.getElementById('av-worker-v');
