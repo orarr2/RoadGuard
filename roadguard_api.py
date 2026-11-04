@@ -863,8 +863,37 @@ footer {
       </div>
       <div class="live-line" id="live-line">waiting for events...</div>
     </div>
+    <!-- Round 23 (4.11.2026): live KPI vs targets, per-agent justified
+         ratios, run cost totals, advantage-over-tree case ids. Polled
+         from /stats/kpi, /stats/agents and /stats/advantage every 30s.
+         Each row carries a short inline note the owner can read without
+         opening the trace. -->
+    <div class="panel" id="kpi-panel" style="margin-top:14px">
+      <h2>KPI vs targets (24h)</h2>
+      <div id="kpi-rows" class="kpi-rows">loading...</div>
+    </div>
+    <div class="panel" id="cost-panel" style="margin-top:14px">
+      <h2>Run cost (24h)</h2>
+      <div id="cost-rows" class="kv">loading...</div>
+    </div>
+    <div class="panel" id="advantage-panel" style="margin-top:14px">
+      <h2>Agent advantage (24h)</h2>
+      <div id="advantage-rows" class="kv">loading...</div>
+    </div>
   </aside>
 </main>
+<style>
+  .kpi-rows .kpi-row { display:flex; justify-content:space-between; gap:8px; align-items:center;
+                       padding:6px 0; border-bottom:1px solid var(--border); font-size:13px; }
+  .kpi-rows .kpi-row:last-child { border-bottom:none; }
+  .kpi-rows .kpi-label { color: var(--text); font-weight: 600; }
+  .kpi-rows .kpi-value { font-family: "JetBrains Mono", ui-monospace, Consolas, monospace; font-size: 13px; }
+  .kpi-rows .kpi-value.ok { color: var(--ok); }
+  .kpi-rows .kpi-value.fail { color: var(--bad); }
+  .kpi-rows .kpi-note { font-size: 11px; color: var(--dim); padding-top:2px; }
+  #advantage-rows .adv-case { font-family: "JetBrains Mono", ui-monospace, Consolas, monospace;
+                              font-size: 11px; color: var(--text-mid); word-break: break-all; }
+</style>
 
 
 <!-- The passphrase modal was removed. /flow is reached through the Caddy
@@ -1303,6 +1332,96 @@ function start() {
 function stop() {
   if (timer) { clearInterval(timer); timer = null; }
 }
+
+// Round 23 (4.11.2026): KPI / cost / advantage panels. These three poll
+// their own endpoints every 30 seconds; the diagram's 2-second tick
+// focuses on the running hazard and does not need to be slowed down.
+let kpiTimer = null;
+async function refreshKpi() {
+  try {
+    const d = await apiGet("/stats/kpi?window_hours=24");
+    const rows = el("kpi-rows");
+    if (!rows) return;
+    rows.innerHTML = "";
+    for (const k of (d.kpis || [])) {
+      const row = create("div", "kpi-row");
+      row.appendChild(create("div", "kpi-label", k.label));
+      const vcls = "kpi-value " + (k.status === "ok" ? "ok" : "fail");
+      const vtext = (k.key === "median_latency_s")
+        ? (k.value_pct + " s / cap 360 s")
+        : (k.value_pct + "% / target " + k.target_pct + "%");
+      row.appendChild(create("div", vcls, vtext));
+      rows.appendChild(row);
+      if (k.note) {
+        const note = create("div", "kpi-note", k.note);
+        note.style.gridColumn = "1 / -1";
+        rows.appendChild(note);
+      }
+    }
+    if (!(d.kpis || []).length) rows.textContent = "no cases in the last 24h";
+  } catch (e) { /* silent, retry next tick */ }
+}
+async function refreshCost() {
+  try {
+    const d = await apiGet("/stats/agents?window_hours=24");
+    const rows = el("cost-rows");
+    if (!rows) return;
+    const c = d.cost_total || {};
+    const aj = d.agents_justified || {};
+    rows.innerHTML = "";
+    function row(k, v) {
+      rows.appendChild(create("span", "k", k));
+      rows.appendChild(create("span", "v", v));
+    }
+    row("total hazards", String(d.total_hazards || 0));
+    row("LLM calls", String(c.llm_calls || 0));
+    row("tokens in", String(c.tokens_in || 0));
+    row("tokens out", String(c.tokens_out || 0));
+    row("wall seconds", String(c.wall_seconds || 0));
+    row("Ollama self-hosted", "$0.00");
+    row("commercial equivalent", "$" + Number(c.cost_commercial_equivalent_usd || 0).toFixed(4));
+    rows.appendChild(create("div", "kpi-note", "monthly city cost: Oracle A1.Flex free + Ollama + Tailscale = $0"));
+    const header = create("div", "kpi-note", "agent justified / runs:");
+    header.style.marginTop = "6px";
+    rows.appendChild(header);
+    for (const sp of ["sanitize","signal_extractor","supervisor","profile_builder","rag_retriever","decision"]) {
+      const b = aj[sp] || {};
+      row(sp, (b.justified || 0) + " / " + (b.runs || 0));
+    }
+  } catch (e) { /* silent */ }
+}
+async function refreshAdvantage() {
+  try {
+    const d = await apiGet("/stats/advantage?window_hours=24");
+    const rows = el("advantage-rows");
+    if (!rows) return;
+    rows.innerHTML = "";
+    const over = d.advantage_over_tree || [];
+    const approved = d.agent_approved_by_human || [];
+    const denied = d.agent_corrected_by_human || [];
+    function section(title, list) {
+      const h = create("div", "kpi-note", title + " (" + list.length + ")");
+      h.style.marginTop = "6px"; h.style.fontWeight = "600";
+      rows.appendChild(h);
+      if (!list.length) { rows.appendChild(create("div", "adv-case", "none")); return; }
+      for (const c of list.slice(0, 5)) {
+        const line = create("div", "adv-case",
+          (c.id || "").substring(0, 12) + "  " + (c.class || "") + "  " + (c.decision || c.final_action || ""));
+        rows.appendChild(line);
+      }
+      if (list.length > 5) rows.appendChild(create("div", "adv-case", "... and " + (list.length - 5) + " more"));
+    }
+    section("Agent > rule tree", over);
+    section("Agent approved by human", approved);
+    section("Agent corrected by human", denied);
+  } catch (e) { /* silent */ }
+}
+function startKpiPolls() {
+  if (kpiTimer) clearInterval(kpiTimer);
+  refreshKpi(); refreshCost(); refreshAdvantage();
+  kpiTimer = setInterval(() => { refreshKpi(); refreshCost(); refreshAdvantage(); }, 30000);
+}
+startKpiPolls();
 
 el("pause-btn").addEventListener("click", () => {
   paused = !paused;
@@ -2400,6 +2519,58 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
                 a["tool_failures"] += len(auto.get("failed_tools") or [])
         if had_fallback:
             llm_fallback_runs += 1
+    # Round 23 (4.11.2026): per-agent justified aggregate + total cost +
+    # advantage over rule tree. Advantage over the human lives on /stats/
+    # advantage and reads the approvals table (human decisions on hazards
+    # the agent flagged for review); it is not in this trace walk.
+    justified_counts = {sp: 0 for sp in (
+        "sanitize", "signal_extractor", "supervisor",
+        "profile_builder", "rag_retriever", "decision")}
+    justified_runs = {sp: 0 for sp in justified_counts}
+    cost_total = {"llm_calls": 0, "tokens_in": 0, "tokens_out": 0,
+                  "wall_seconds": 0.0, "cost_self_hosted_usd": 0.0,
+                  "cost_commercial_equivalent_usd": 0.0}
+    advantage_over_tree_ids: list[str] = []
+    for row in rows or []:
+        try:
+            av = json.loads(
+                (row["agent_value_json"] if hasattr(row, "__getitem__") else "") or "{}"
+            )
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(av, dict):
+            continue
+        pa = av.get("per_agent_justified") or {}
+        for sp, data in pa.items():
+            if not isinstance(data, dict):
+                continue
+            if data.get("ran"):
+                justified_runs[sp] = justified_runs.get(sp, 0) + 1
+            if data.get("justified"):
+                justified_counts[sp] = justified_counts.get(sp, 0) + 1
+        c = av.get("cost") or {}
+        if isinstance(c, dict):
+            cost_total["llm_calls"] += int(c.get("llm_calls") or 0)
+            cost_total["tokens_in"] += int(c.get("tokens_in") or 0)
+            cost_total["tokens_out"] += int(c.get("tokens_out") or 0)
+            try:
+                cost_total["wall_seconds"] += float(c.get("wall_seconds") or 0)
+            except (TypeError, ValueError):
+                pass
+            try:
+                cost_total["cost_commercial_equivalent_usd"] += float(
+                    c.get("cost_commercial_equivalent_usd") or 0)
+            except (TypeError, ValueError):
+                pass
+        if av.get("changed_rule_hint"):
+            try:
+                advantage_over_tree_ids.append(str(row["id"]))
+            except (KeyError, IndexError):
+                pass
+    cost_total["wall_seconds"] = round(cost_total["wall_seconds"], 2)
+    cost_total["cost_commercial_equivalent_usd"] = round(
+        cost_total["cost_commercial_equivalent_usd"], 6)
+
     return {
         "per_agent": counters,
         "llm_fallback_runs": llm_fallback_runs,
@@ -2408,6 +2579,12 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
         "fast_path_skips": fast_path_skips,
         "autonomy": autonomy,
         "agent_value": agent_value,
+        "agents_justified": {
+            sp: {"justified": justified_counts[sp], "runs": justified_runs[sp]}
+            for sp in justified_counts
+        },
+        "cost_total": cost_total,
+        "advantage_over_tree_ids": advantage_over_tree_ids,
     }
 
 
@@ -3409,7 +3586,23 @@ def create_app() -> FastAPI:
 
         # Overview tiles are inlined above the Cases table so the operator
         # sees the headline numbers and the cases themselves on one scroll.
+        # Round 23 (4.11.2026): KPI vs target row at the TOP of the digest
+        # - the same four KPIs the deck and the /flow dashboard carry, so
+        # the viewer sees targets and pass/fail colours on one screen.
+        correct_pct = 100.0 * sum(
+            1 for r in av_rows if (r["agent_value_json"] or "") and
+            (json.loads(r["agent_value_json"]).get("rule_tree_action")
+             == json.loads(r["agent_value_json"]).get("final_action"))
+        ) / max(1, av_counts["runs"]) if av_counts["runs"] else 0.0
+        kpi_targets_strip = (
+            "<div class='kpi-strip kpi-targets' style='margin-bottom:8px'>"
+            f"<div class='kpi {('standard' if correct_pct >= 85 else 'urgent')}'>"
+            f"<div class='kpi-v'>{correct_pct:.0f}%</div>"
+            f"<div class='kpi-l'>Agreement w/ rule tree (target 85%)</div></div>"
+            "</div>"
+        )
         kpi_strip = (
+            kpi_targets_strip +
             "<div class='kpi-strip'>"
             f"<div class='kpi'><div class='kpi-v'>{len(rows)}</div><div class='kpi-l'>New reports</div></div>"
             f"<div class='kpi urgent'><div class='kpi-v'>{counts['urgent']}</div><div class='kpi-l'>Urgent</div></div>"
@@ -3764,7 +3957,7 @@ def create_app() -> FastAPI:
         now = time.time()
         try:
             rows = con.execute(
-                "SELECT id, class, agent_decision, agent_trace_json "
+                "SELECT id, class, agent_decision, agent_trace_json, agent_value_json "
                 "FROM hazards WHERE reported_at >= ?",
                 (now - hrs * 3600,),
             ).fetchall()
@@ -3776,6 +3969,199 @@ def create_app() -> FastAPI:
             "total_hazards": len(rows),
             "as_of": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
             **aggregates,
+        }
+
+    @app.get("/stats/kpi")
+    def stats_kpi(request: Request, window_hours: int = 24) -> dict:
+        """Round 23 (4.11.2026): live KPI board matching the presentation's
+        targets table. Returns the four KPIs - correct_action,
+        grounded_citations, rag_relevance, median_latency - each with its
+        target, current value, pass/fail flag and a plain-language reason.
+        Private: gated to Tailscale / loopback like /digest and /stats/
+        agents. The /flow page, the /digest KPI strip and the deck all
+        read this one source.
+        """
+        if not _is_private_host(request):
+            raise HTTPException(status_code=404, detail="not found")
+        try:
+            hrs = max(1, min(720, int(window_hours)))
+        except (TypeError, ValueError):
+            hrs = 24
+        settings = get_settings()
+        import sqlite3 as _sqlite3
+        con = _sqlite3.connect(settings.roadguard_db_path)
+        con.row_factory = _sqlite3.Row
+        now = time.time()
+        try:
+            rows = con.execute(
+                "SELECT id, class, agent_decision, agent_trace_json, agent_value_json "
+                "FROM hazards WHERE reported_at >= ?",
+                (now - hrs * 3600,),
+            ).fetchall()
+        finally:
+            con.close()
+        n = len(rows)
+        if n == 0:
+            return {"window_hours": hrs, "total_hazards": 0, "kpis": []}
+        # Correct action: without ground truth, read as "agreement with
+        # the deterministic rule tree". When expected_verdicts.csv is
+        # filled the computation moves to that ground truth.
+        rule_tree_eq_final = 0
+        grounded = 0
+        decision_llm_runs = 0
+        direct_match_runs = 0
+        rag_total_runs = 0
+        latencies: list[float] = []
+        for r in rows:
+            try:
+                av = json.loads((r["agent_value_json"] if r["agent_value_json"] else "") or "{}")
+            except (TypeError, ValueError):
+                av = {}
+            if av.get("rule_tree_action") == av.get("final_action"):
+                rule_tree_eq_final += 1
+            try:
+                trace = json.loads(r["agent_trace_json"] or "[]")
+            except (TypeError, ValueError):
+                trace = []
+            case_latency = 0.0
+            stamps = []
+            for e in trace:
+                if not isinstance(e, dict):
+                    continue
+                if e.get("ts"):
+                    try:
+                        stamps.append(float(e["ts"]))
+                    except (TypeError, ValueError):
+                        pass
+                c = e.get("content") if isinstance(e.get("content"), dict) else None
+                if not c:
+                    continue
+                if e.get("speaker") == "decision" and e.get("kind") == "final":
+                    if c.get("source") == "llm_react":
+                        decision_llm_runs += 1
+                        rc = c.get("rationale_check") if isinstance(c.get("rationale_check"), dict) else {}
+                        if rc.get("ok") and (c.get("cited_sources") or []):
+                            grounded += 1
+                if e.get("speaker") == "rag_retriever":
+                    rag_total_runs += 1
+                    if c.get("coverage") == "direct_match":
+                        direct_match_runs += 1
+            if len(stamps) >= 2:
+                case_latency = max(stamps) - min(stamps)
+            if case_latency > 0:
+                latencies.append(case_latency)
+        median_lat = (sorted(latencies)[len(latencies) // 2] if latencies else 0.0)
+        kpis = [
+            {
+                "key": "correct_action",
+                "label": "Agreement with rule tree",
+                "target_pct": 85,
+                "value_pct": round(100.0 * rule_tree_eq_final / max(1, n), 1),
+                "numerator": rule_tree_eq_final,
+                "denominator": n,
+                "status": "ok" if (rule_tree_eq_final / max(1, n)) >= 0.85 else "fail",
+                "note": "no ground truth yet - fill expected_verdicts.csv to switch to real accuracy",
+            },
+            {
+                "key": "grounded_citations",
+                "label": "Grounded LLM citations",
+                "target_pct": 90,
+                "value_pct": round(100.0 * grounded / max(1, decision_llm_runs), 1) if decision_llm_runs else 0.0,
+                "numerator": grounded,
+                "denominator": decision_llm_runs,
+                "status": "ok" if (decision_llm_runs and grounded / decision_llm_runs >= 0.90) else "fail",
+                "note": "share of Decision LLM runs that passed rationale_check with cited sources",
+            },
+            {
+                "key": "rag_relevance",
+                "label": "RAG direct match",
+                "target_pct": 95,
+                "value_pct": round(100.0 * direct_match_runs / max(1, rag_total_runs), 1) if rag_total_runs else 0.0,
+                "numerator": direct_match_runs,
+                "denominator": rag_total_runs,
+                "status": "ok" if (rag_total_runs and direct_match_runs / rag_total_runs >= 0.95) else "fail",
+                "note": "share of RAG runs that returned a direct topic match for the hazard class",
+            },
+            {
+                "key": "median_latency_s",
+                "label": "Median latency (s)",
+                "target_pct": 360,  # a seconds cap, not a percent
+                "value_pct": round(median_lat, 1),
+                "numerator": 0,
+                "denominator": 0,
+                "status": "ok" if median_lat <= 360 else "fail",
+                "note": "wall seconds per case; cap 360s",
+            },
+        ]
+        return {"window_hours": hrs, "total_hazards": n, "kpis": kpis}
+
+    @app.get("/stats/advantage")
+    def stats_advantage(request: Request, window_hours: int = 24) -> dict:
+        """Round 23 (4.11.2026): cases where the agent outperformed the
+        deterministic rule tree OR the human (deny on approval). Returns
+        two lists the /flow page and the deck case-study slides read.
+        Private, like the other /stats endpoints.
+        """
+        if not _is_private_host(request):
+            raise HTTPException(status_code=404, detail="not found")
+        try:
+            hrs = max(1, min(720, int(window_hours)))
+        except (TypeError, ValueError):
+            hrs = 24
+        settings = get_settings()
+        import sqlite3 as _sqlite3
+        con = _sqlite3.connect(settings.roadguard_db_path)
+        con.row_factory = _sqlite3.Row
+        now = time.time()
+        try:
+            rows = con.execute(
+                "SELECT h.id, h.class, h.agent_decision, h.agent_value_json, "
+                "       h.reported_at, h.priority, "
+                "       a.status AS approval_status, a.note AS approval_note, a.decided_at "
+                "FROM hazards h "
+                "LEFT JOIN approvals a ON a.hazard_id = h.id "
+                "WHERE h.reported_at >= ? "
+                "ORDER BY h.reported_at DESC",
+                (now - hrs * 3600,),
+            ).fetchall()
+        finally:
+            con.close()
+        vs_tree: list[dict] = []
+        vs_human_approved: list[dict] = []
+        vs_human_denied: list[dict] = []
+        for r in rows:
+            try:
+                av = json.loads((r["agent_value_json"] if r["agent_value_json"] else "") or "{}")
+            except (TypeError, ValueError):
+                av = {}
+            if not isinstance(av, dict):
+                continue
+            if av.get("changed_rule_hint"):
+                vs_tree.append({
+                    "id": r["id"], "class": r["class"], "decision": r["agent_decision"],
+                    "rule_tree_action": av.get("rule_tree_action"),
+                    "final_action": av.get("final_action"),
+                    "profile_llm_changed": av.get("profile_llm_changed"),
+                    "research_llm_changed": av.get("research_llm_changed"),
+                    "reported_at": r["reported_at"],
+                })
+            status = (r["approval_status"] if hasattr(r, "__getitem__") else getattr(r, "approval_status", None)) or ""
+            if status == "approved":
+                vs_human_approved.append({
+                    "id": r["id"], "class": r["class"], "decision": r["agent_decision"],
+                    "note": r["approval_note"], "decided_at": r["decided_at"],
+                })
+            elif status == "denied":
+                vs_human_denied.append({
+                    "id": r["id"], "class": r["class"], "decision": r["agent_decision"],
+                    "note": r["approval_note"], "decided_at": r["decided_at"],
+                })
+        return {
+            "window_hours": hrs,
+            "total_hazards": len(rows),
+            "advantage_over_tree": vs_tree,
+            "agent_approved_by_human": vs_human_approved,
+            "agent_corrected_by_human": vs_human_denied,
         }
 
     @app.get("/digest/latest", response_class=HTMLResponse)

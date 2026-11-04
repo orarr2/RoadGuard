@@ -12577,6 +12577,248 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
 # back None/False).
 
 
+# ---------------------------------------------------------------------------
+# Round 23 (4.11.2026): per-agent justification, per-run cost, per-agent
+# behaviour metrics -- and "advantage over rule tree / human".
+# ---------------------------------------------------------------------------
+# Owner's demand: every image lands with a yes/no per agent + a reason
+# per yes, then at the end of a run show the total tokens and compute, how
+# accurate each agent was, and WHICH cases the agents outperformed the
+# rule tree or the human. Every number is read from the trace the agent
+# already writes and the approvals the human already decided.
+
+_COMMERCIAL_LLM_PRICE_PER_1K_IN = 0.0003   # Groq llama-3-8B equivalent input
+_COMMERCIAL_LLM_PRICE_PER_1K_OUT = 0.0006  # Groq llama-3-8B equivalent output
+
+
+def _agent_entries_by_speaker(trace: list[dict]) -> dict[str, list[dict]]:
+    """Group content dicts from a run's trace by their speaker. Keeps the
+    full order so a caller inspects the first/last entry per speaker."""
+    bucket: dict[str, list[dict]] = {}
+    for entry in trace or []:
+        if not isinstance(entry, dict):
+            continue
+        sp = str(entry.get("speaker") or "")
+        c = entry.get("content") if isinstance(entry.get("content"), dict) else None
+        if not sp or not c:
+            continue
+        bucket.setdefault(sp, []).append(entry)
+    return bucket
+
+
+def _justify_sanitize(contents: list[dict]) -> dict:
+    reasons: list[str] = []
+    for c in contents:
+        if c.get("location_scrubbed"):
+            reasons.append("location_scrubbed")
+        if c.get("ocr_suspicious"):
+            reasons.append("ocr_injection_blocked")
+        if c.get("reporter_text_suspicious"):
+            reasons.append("reporter_text_filtered")
+    return {"ran": bool(contents), "justified": bool(reasons),
+            "reasons": reasons or (["nothing_to_scrub"] if contents else ["did_not_run"])}
+
+
+def _justify_signal_extractor(contents: list[dict]) -> dict:
+    if not contents:
+        return {"ran": False, "justified": False, "reasons": ["did_not_run"]}
+    reasons: list[str] = []
+    for c in contents:
+        if not c.get("has_text"):
+            continue
+        m = c.get("mentioned") or {}
+        if any(m.get(k) for k in ("hazard_class", "lane_blocked", "road_type")):
+            reasons.append("extracted_claims_from_text")
+        if c.get("urgency_claimed"):
+            reasons.append("detected_urgency")
+        signals = {k: v for k, v in (c.get("reporter_signals") or {}).items()
+                   if v not in (None, "", [], False)}
+        if signals:
+            reasons.append("extracted_numeric_signals")
+        if c.get("contradictions"):
+            reasons.append("caught_contradiction")
+    if not reasons:
+        reasons = ["no_reporter_text"] if not any(c.get("has_text") for c in contents) else ["llm_claims_dropped"]
+    return {"ran": True, "justified": any(
+        r for r in reasons if r not in ("no_reporter_text", "llm_claims_dropped", "did_not_run")),
+            "reasons": reasons}
+
+
+def _justify_supervisor(contents: list[dict]) -> dict:
+    if not contents:
+        return {"ran": False, "justified": False, "reasons": ["did_not_run"]}
+    reasons: list[str] = []
+    for c in contents:
+        concern = str(c.get("pipeline_concern") or "")
+        if concern and concern != "none":
+            reasons.append(f"flagged_{concern}")
+        if c.get("force_action"):
+            reasons.append(f"forced_action_{c['force_action']}")
+    return {"ran": True, "justified": bool(reasons),
+            "reasons": reasons or ["no_concern_raised"]}
+
+
+def _justify_profile_builder(contents: list[dict]) -> dict:
+    if not contents:
+        return {"ran": False, "justified": False, "reasons": ["did_not_run"]}
+    reasons: list[str] = []
+    rebuttals: list[str] = []
+    for c in contents:
+        dl = c.get("dataset_lookup") or {}
+        if isinstance(dl, dict) and dl.get("found"):
+            reasons.append("catalogue_hit")
+        delta = c.get("llm_delta") or {}
+        if c.get("llm_used") and delta:
+            auto = c.get("autonomy") or {}
+            viol = list(auto.get("violations") or [])
+            blocked = [v for v in viol if "severity_blocked_" in str(v)]
+            if blocked:
+                rebuttals.extend(blocked)
+            else:
+                reasons.append("severity_moved_with_signal")
+        auto = c.get("autonomy") or {}
+        if int(auto.get("hops") or 0) > 0 and auto.get("tools_used"):
+            reasons.append("agent_reasoned_with_tools")
+    return {"ran": True, "justified": bool(reasons),
+            "reasons": reasons or (["llm_blocked_by_gate"] if rebuttals else ["no_signal_added"]),
+            "rebuttals": rebuttals}
+
+
+def _justify_rag_retriever(contents: list[dict]) -> dict:
+    if not contents:
+        return {"ran": False, "justified": False, "reasons": ["did_not_run"]}
+    reasons: list[str] = []
+    for c in contents:
+        coverage = str(c.get("coverage") or "")
+        n = int(c.get("n_procedures") or 0)
+        dc = c.get("decision_coverage") if isinstance(c.get("decision_coverage"), dict) else {}
+        suff = str((dc or {}).get("sufficiency") or "")
+        if coverage == "direct_match" and n >= 1:
+            reasons.append("direct_match_retrieved")
+        if suff == "sufficient_coverage":
+            reasons.append("sufficient_coverage")
+        auto = c.get("autonomy") or {}
+        if int(auto.get("hops") or 0) > 0 and auto.get("tools_used"):
+            reasons.append("agent_chose_queries")
+    return {"ran": True, "justified": bool(reasons),
+            "reasons": reasons or ["no_relevant_passages"]}
+
+
+def _justify_decision(contents: list[dict], summary: dict | None) -> dict:
+    if not contents or not summary:
+        return {"ran": bool(contents), "justified": False,
+                "reasons": ["did_not_run"] if not contents else ["no_summary"]}
+    reasons: list[str] = []
+    final = None
+    for e in contents:
+        if e.get("kind") == "final":
+            final = e.get("content") or {}
+    final = final or {}
+    rc = final.get("rationale_check") if isinstance(final.get("rationale_check"), dict) else {}
+    cited = final.get("cited_sources") or []
+    source = str(final.get("source") or "")
+    if summary.get("changed_rule_hint"):
+        reasons.append("workers_moved_rule_tree")
+    if source == "llm_react" and rc.get("ok") and cited:
+        reasons.append("grounded_rationale_vs_rule_tree")
+    if rc.get("enforcement") == "kept":
+        reasons.append("llm_verdict_stood_on_fact_check")
+    if final.get("floor_applied"):
+        reasons.append(f"floor_caught_llm:{final.get('floor_reason') or 'unnamed'}")
+    rebuttals: list[str] = []
+    if rc.get("enforcement") == "rule_tree_verdict":
+        rebuttals.append("llm_overridden_by_tree")
+    if source == "rule_based":
+        rebuttals.append("llm_fell_back_to_tree")
+    if source == "catalog_match":
+        rebuttals.append("catalogue_short_circuit")
+    return {"ran": True, "justified": bool(reasons),
+            "reasons": reasons or (rebuttals or ["no_added_value"]),
+            "rebuttals": rebuttals}
+
+
+def _compute_per_agent_justification(trace: list[dict] | None,
+                                     summary: dict | None) -> dict[str, dict]:
+    """Per-agent yes/no + reason list for one case. The owner reads this
+    at the end of every image in the trace: did Sanitize earn its hop?
+    did Signal Extractor earn its LLM? did Decision outperform the tree?"""
+    if not isinstance(trace, list):
+        return {}
+    by = _agent_entries_by_speaker(trace)
+    # Order the owner expects in the footer.
+    out: dict[str, dict] = {}
+    for sp, fn in (
+        ("sanitize",         _justify_sanitize),
+        ("signal_extractor", _justify_signal_extractor),
+        ("supervisor",       _justify_supervisor),
+        ("profile_builder",  _justify_profile_builder),
+        ("rag_retriever",    _justify_rag_retriever),
+    ):
+        contents = [e.get("content") or {} for e in by.get(sp, [])]
+        out[sp] = fn(contents)
+    out["decision"] = _justify_decision(by.get("decision", []) or [], summary)
+    return out
+
+
+def _compute_run_cost(trace: list[dict] | None) -> dict:
+    """Total LLM calls + tokens + wall-seconds for one case's trace, plus
+    two cost columns: Ollama self-hosted (free on the VM today) and the
+    equivalent cost if the same tokens went to a commercial API (Groq
+    llama-3-8B pricing, Nov 2026; swap for Settings.commercial_price_*
+    later). CPU seconds are not available from the trace alone and are
+    reported as None."""
+    calls = tok_in = tok_out = 0
+    stamps: list[float] = []
+    for e in trace or []:
+        if not isinstance(e, dict):
+            continue
+        c = e.get("content") if isinstance(e.get("content"), dict) else None
+        if not c:
+            continue
+        if e.get("ts"):
+            try:
+                stamps.append(float(e["ts"]))
+            except (TypeError, ValueError):
+                pass
+        llm = c.get("llm")
+        if isinstance(llm, dict):
+            calls += int(llm.get("calls") or 0)
+            tok_in += int(llm.get("tokens_in") or 0)
+            tok_out += int(llm.get("tokens_out") or 0)
+    wall = (max(stamps) - min(stamps)) if len(stamps) >= 2 else 0.0
+    commercial = (
+        (tok_in / 1000.0) * _COMMERCIAL_LLM_PRICE_PER_1K_IN
+        + (tok_out / 1000.0) * _COMMERCIAL_LLM_PRICE_PER_1K_OUT
+    )
+    return {
+        "llm_calls": calls,
+        "tokens_in": tok_in,
+        "tokens_out": tok_out,
+        "wall_seconds": round(wall, 2),
+        "cost_self_hosted_usd": 0.0,
+        "cost_commercial_equivalent_usd": round(commercial, 6),
+    }
+
+
+def _compute_per_agent_behavior(trace: list[dict] | None) -> dict[str, dict]:
+    """Per-agent behaviour counters for ONE case: how many hops, tools,
+    violations, fact-check failures. Aggregated across a round by
+    _aggregate_agent_metrics; here it just records the per-case view
+    that the trace footer can print."""
+    if not isinstance(trace, list):
+        return {}
+    by = _agent_entries_by_speaker(trace)
+    out: dict[str, dict] = {}
+    for sp, contents in by.items():
+        auto_hops = sum(int((c.get("content") or {}).get("autonomy", {}).get("hops") or 0) for c in contents)
+        tools = sum(len((c.get("content") or {}).get("autonomy", {}).get("tools_used") or []) for c in contents)
+        violations = sum(len((c.get("content") or {}).get("autonomy", {}).get("violations") or []) for c in contents)
+        llm_used = any((c.get("content") or {}).get("llm_used") for c in contents)
+        out[sp] = {"hops": auto_hops, "tools_used": tools,
+                   "violations": violations, "llm_used": bool(llm_used)}
+    return out
+
+
 def _build_agent_value_summary(trace: list[dict] | None) -> dict | None:
     """Per-case 'did the agent change the rule tree's verdict' summary.
 
@@ -12634,7 +12876,7 @@ def _build_agent_value_summary(trace: list[dict] | None) -> dict | None:
     else:
         llm_proposed = None
     enforcement = rc.get("enforcement") if isinstance(rc, dict) else None
-    return {
+    base = {
         "rule_tree_action": rule_tree_action,
         "rule_tree_with_worker_action": rule_tree_with_worker_action,
         "llm_proposed_action": llm_proposed,
@@ -12647,6 +12889,18 @@ def _build_agent_value_summary(trace: list[dict] | None) -> dict | None:
         "floor_reason": final.get("floor_reason") or None,
         "enforcement": enforcement,
     }
+    # Round 23 (4.11.2026): per-agent justification + run cost attached
+    # to the same summary blob so the DB column and the trace footer both
+    # carry the owner's four answers ('justified', 'reason', 'cost',
+    # 'accuracy') in one shape.
+    base["per_agent_justified"] = _compute_per_agent_justification(trace, base)
+    justified_count = sum(1 for v in base["per_agent_justified"].values()
+                          if isinstance(v, dict) and v.get("justified"))
+    base["agents_justified_count"] = justified_count
+    base["agents_total"] = len(base["per_agent_justified"])
+    base["cost"] = _compute_run_cost(trace)
+    base["per_agent_behavior"] = _compute_per_agent_behavior(trace)
+    return base
 
 
 def _build_agent_value_summary_json(trace_json: str | None) -> str:
@@ -12766,6 +13020,36 @@ def format_trace_lines(
                 flags.append(f"enforcement:{av['enforcement']}")
             tail = (f"  flags={','.join(flags)}" if flags else "")
             lines.append(f"{_INDENT}agent value: " + "  ".join(parts) + tail)
+            # Round 23 (4.11.2026): per-agent justification, the owner reads
+            # this as his main answer to "did every agent earn its compute
+            # on this case". One line per agent, YES/NO + reason slugs.
+            pa = av.get("per_agent_justified") or {}
+            jc = av.get("agents_justified_count", 0)
+            total = av.get("agents_total", 0)
+            lines.append(f"{_INDENT}agent justified: {jc} of {total} agents")
+            for sp in ("sanitize", "signal_extractor", "supervisor",
+                       "profile_builder", "rag_retriever", "decision"):
+                entry = pa.get(sp) or {}
+                flag = "YES" if entry.get("justified") else "NO"
+                reasons = entry.get("reasons") or []
+                reb = entry.get("rebuttals") or []
+                reb_tail = f"  rebuttals={','.join(reb)}" if reb else ""
+                lines.append(
+                    f"{_INDENT}  {sp:17s} {flag:3s}  "
+                    f"{','.join(reasons) or '-'}{reb_tail}"
+                )
+            # Run cost (per case): tokens, wall, and Ollama vs commercial
+            # equivalent so the owner can quote the cost to the city in two
+            # columns without digging into the trace.
+            cost = av.get("cost") or {}
+            lines.append(
+                f"{_INDENT}run cost: llm_calls={cost.get('llm_calls', 0)}  "
+                f"tokens_in={cost.get('tokens_in', 0)}  "
+                f"tokens_out={cost.get('tokens_out', 0)}  "
+                f"wall={cost.get('wall_seconds', 0)}s  "
+                f"ollama_self_hosted=$0.00  "
+                f"commercial_equivalent=${cost.get('cost_commercial_equivalent_usd', 0):.6f}"
+            )
     return lines
 
 
