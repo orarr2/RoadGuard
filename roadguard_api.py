@@ -3510,8 +3510,9 @@ def create_app() -> FastAPI:
         con = sqlite3.connect("/var/lib/roadguard/roadguard.db")
         con.row_factory = sqlite3.Row
         rows = con.execute(
-            "SELECT id, class, agent_decision, priority, agent_rationale, reported_at, location, "
-            "status, cited_sources_json, agent_trace_json, agent_value_json "
+            "SELECT id, class, confidence, agent_decision, priority, agent_rationale, "
+            "       reported_at, location, status, cited_sources_json, agent_trace_json, "
+            "       agent_value_json "
             "FROM hazards WHERE reported_at >= ? ORDER BY reported_at DESC",
             (cutoff_epoch,),
         ).fetchall()
@@ -3597,15 +3598,24 @@ def create_app() -> FastAPI:
                 cited = json.loads(r["cited_sources_json"] or "[]")
             except Exception:
                 cited = []
-            img_rel = f"/images/{r['id']}" if os.path.isfile(f"/var/lib/roadguard/images/{r['id']}.jpg") else ""
-            # Round 23 (4.11.2026): per-case agent justified summary fed to
-            # the digest Cases table and the detail pane. Pulled from the
-            # agent_value_json column backfilled in the round 22 migration.
+            # Round 23 iter 4 (4.11.2026): always set the image URL so
+            # the detail pane can retry; the client uses onerror to hide
+            # the <img> when the file is still being written. The old
+            # os.path.isfile gate hid freshly ingested images for up to
+            # one digest refresh window (~30s).
+            img_rel = f"/images/{r['id']}"
             try:
                 av = json.loads(r["agent_value_json"] or "{}")
             except Exception:
                 av = {}
             per_agent = av.get("per_agent_justified") or {}
+            # Round 23 iter 4: YOLO live confidence for the hazard, read
+            # from the hazards row directly (the `confidence` column is
+            # the YOLO top1_confidence stamped on submission).
+            try:
+                score = float(r["confidence"]) if r["confidence"] is not None else None
+            except (TypeError, ValueError, IndexError):
+                score = None
             cases.append({
                 "id": r["id"],
                 "decision": (r["agent_decision"] or "n/a").lower(),
@@ -3624,6 +3634,8 @@ def create_app() -> FastAPI:
                 "final_action": av.get("final_action"),
                 "changed_rule_hint": bool(av.get("changed_rule_hint")),
                 "per_agent_justified": per_agent,
+                "hazard_class": (r["class"] or "").upper(),
+                "score": score,
             })
         con.close()
         cases_json = json.dumps(cases)
@@ -3648,28 +3660,19 @@ def create_app() -> FastAPI:
             (json.loads(r["agent_value_json"]).get("rule_tree_action")
              == json.loads(r["agent_value_json"]).get("final_action"))
         ) / max(1, av_counts["runs"]) if av_counts["runs"] else 0.0
+        # Round 23 iter 4 (4.11.2026): owner asked for ONE row with only
+        # the essentials - the queue shape plus the two agent-value
+        # counts that matter to the owner's eye (LLM changed tree, floor
+        # fired). The other twelve tiles moved out; deeper detail lives
+        # in the Agent value tab.
         kpi_strip = (
             "<div class='kpi-strip'>"
             f"<div class='kpi'><div class='kpi-v'>{len(rows)}</div><div class='kpi-l'>New reports</div></div>"
             f"<div class='kpi urgent'><div class='kpi-v'>{counts['urgent']}</div><div class='kpi-l'>Urgent</div></div>"
-            f"<div class='kpi standard'><div class='kpi-v'>{counts['standard']}</div><div class='kpi-l'>Standard queue</div></div>"
             f"<div class='kpi human'><div class='kpi-v'>{counts['human_review']}</div><div class='kpi-l'>Human review</div></div>"
-            f"<div class='kpi evi'><div class='kpi-v'>{counts['needs_more_evidence']}</div><div class='kpi-l'>Needs more evidence</div></div>"
-            f"<div class='kpi'><div class='kpi-v'>{counts['known_image']}</div><div class='kpi-l'>Known image</div></div>"
-            f"<div class='kpi'><div class='kpi-v'>{approvals_pending}</div><div class='kpi-l'>Approvals pending</div></div>"
-            f"<div class='kpi'><div class='kpi-v'>{evidence_open}</div><div class='kpi-l'>Awaiting photo</div></div>"
-            "</div>"
-            # Round 22 (4.11.2026): a second row for the agent value KPIs -
-            # kept separate from the queue tiles so the operator can read
-            # "the agent moved X of N rule tree verdicts this window" on
-            # its own, and the queue strip stays unchanged.
-            "<div class='kpi-strip av-strip' style='margin-top:6px'>"
-            f"<div class='kpi'><div class='kpi-v'>{av_counts['runs']}</div><div class='kpi-l'>Runs with agent value</div></div>"
-            f"<div class='kpi human'><div class='kpi-v'>{av_counts['changed_rule_hint']}</div><div class='kpi-l'>LLM changed the rule tree</div></div>"
-            f"<div class='kpi'><div class='kpi-v'>{av_counts['profile_llm_changed']}</div><div class='kpi-l'>Profile LLM moved it</div></div>"
-            f"<div class='kpi'><div class='kpi-v'>{av_counts['research_llm_changed']}</div><div class='kpi-l'>RAG LLM moved it</div></div>"
+            f"<div class='kpi standard'><div class='kpi-v'>{counts['standard']}</div><div class='kpi-l'>Standard</div></div>"
+            f"<div class='kpi'><div class='kpi-v'>{av_counts['changed_rule_hint']}</div><div class='kpi-l'>LLM changed the rule tree</div></div>"
             f"<div class='kpi'><div class='kpi-v'>{av_counts['floor_applied']}</div><div class='kpi-l'>Floor applied</div></div>"
-            f"<div class='kpi'><div class='kpi-v'>{av_counts['enforcement_rule_tree_verdict']}</div><div class='kpi-l'>LLM overridden by tree</div></div>"
             "</div>"
         )
 
@@ -3710,41 +3713,70 @@ def create_app() -> FastAPI:
                             break
                 id_to_class[r["id"]] = primary or str(r["class"] or "")
             rows_html_parts = []
+            # Round 23 iter 4 (4.11.2026): class filter counters for the
+            # sub-tabs above the Cases table.
+            class_counts = {"ALL": 0, "D00": 0, "D10": 0, "D20": 0, "D40": 0, "OTHER": 0}
+            for c in cases:
+                code = (id_to_class.get(c["id"]) or "").upper()
+                class_counts["ALL"] += 1
+                if code in class_counts:
+                    class_counts[code] += 1
+                else:
+                    class_counts["OTHER"] += 1
             for i, c in enumerate(cases, 1):
                 ts = datetime.fromtimestamp(c["reported_at"], timezone.utc).strftime("%H:%M")
                 d = html.escape(c["decision"])
                 cls = _css_for(c["decision"])
                 hid = html.escape(c['id'])
+                cls_code = (id_to_class.get(c["id"]) or "").upper() or "OTHER"
                 hazard_label = html.escape(_hazard_label(id_to_class.get(c["id"], "")))
-                # Round 23 iter 3 (4.11.2026): three buttons stay
-                # clickable so the worker can change his mind. The
-                # row's own 'your vote' cell holds the last verdict
-                # (if any) and refreshes from /agent_feedback/by_hazard.
+                # Round 23 iter 4 (4.11.2026): the 'your vote' pill cell
+                # is removed - the clicked button picks up the active
+                # style instead, which is the same signal with one fewer
+                # column.
                 action_cell = (
                     f"<button class='fb-btn fb-agree' data-id='{hid}' data-verdict='agree' title='Worker agrees with the agent'>Agree</button>"
                     f"<button class='fb-btn fb-disagree' data-id='{hid}' data-verdict='disagree' title='Worker disagrees with the agent'>Disagree</button>"
                     f"<button class='fb-btn fb-nr' data-id='{hid}' data-verdict='not_relevant' title='Image is not a hazard / noise / other'>Not relevant</button>"
                 )
+                score_text = f"{c['score']:.2f}" if c.get("score") is not None else "-"
                 rows_html_parts.append(
-                    f"<tr data-idx='{i-1}' class='row'>"
+                    f"<tr data-idx='{i-1}' data-hzc='{cls_code}' class='row'>"
                     f"<td>{i}</td>"
                     f"<td><code>{html.escape(c['id'][:12])}</code></td>"
                     f"<td class='td-hazard'>{hazard_label}</td>"
+                    f"<td class='td-score'>{score_text}</td>"
                     f"<td class='{cls}'>{d}</td>"
                     f"<td>{c['priority'] or ''}</td>"
-                    f"<td class='td-vote' data-hid='{hid}'><span class='vote-pill vote-none'>not voted</span></td>"
                     f"<td class='td-act' data-hid='{hid}'>{action_cell}</td>"
                     f"<td>{html.escape(c['location'])[:60]}</td>"
                     f"<td>{ts}</td>"
                     f"</tr>"
                 )
             rows_html = "".join(rows_html_parts)
+            class_chip_bar_parts = []
+            for code in ("ALL", "D40", "D20", "D00", "D10", "OTHER"):
+                if code != "ALL" and class_counts.get(code, 0) == 0:
+                    continue
+                active_cls = " active" if code == "ALL" else ""
+                chip_label = "ALL" if code == "ALL" else _hazard_label(code)
+                class_chip_bar_parts.append(
+                    f"<button class='cls-chip{active_cls}' data-cls='{code}'>"
+                    f"{html.escape(chip_label)} "
+                    f"<span class='cls-n'>({class_counts.get(code, 0)})</span>"
+                    f"</button>"
+                )
+            class_chip_bar = (
+                "<div class='cls-chips' id='cls-chips'>"
+                + "".join(class_chip_bar_parts) + "</div>"
+            )
             table_html = (
+                class_chip_bar +
                 "<table class='cases'>"
                 "<thead><tr><th>#</th><th>id</th>"
                 "<th title='Hazard type the agents identified in the image'>hazard the agents saw</th>"
+                "<th title='YOLO live confidence (0-1)'>score</th>"
                 "<th>decision</th><th>priority</th>"
-                "<th title='Your latest vote on this case'>your vote</th>"
                 "<th>worker feedback</th>"
                 "<th>location</th><th>time</th></tr></thead>"
                 f"<tbody id='rows'>{rows_html}</tbody>"
@@ -3809,11 +3841,10 @@ def create_app() -> FastAPI:
                 "</div>"
             )
         else:
-            clusters_html = (
-                "<div class='clusters-wrap'>"
-                f"<p class='k'>No clusters (no location+class group with &ge; 3 reports in the last {window_hours}h). Add a few more submissions from the same place and this table will fill in.</p>"
-                "</div>"
-            )
+            # Round 23 iter 4 (4.11.2026): owner asked to drop the empty-
+            # state placeholder ("No clusters..."), the whole block is
+            # hidden when no clusters exist in the window.
+            clusters_html = ""
 
         header = (
             f"<header class='topbar'>"
@@ -3827,6 +3858,7 @@ def create_app() -> FastAPI:
             f"</header>"
             f"<nav class='tabs' id='tabs'>"
             f"<button class='tab-btn active' data-tab='cases'>Cases ({len(rows)})</button>"
+            f"<button class='tab-btn' data-tab='priority'>Priority</button>"
             f"<button class='tab-btn' data-tab='agentvalue'>Agent value</button>"
             f"<button class='tab-btn' data-tab='ruletree'>Rule tree</button>"
             f"</nav>"
@@ -3900,9 +3932,11 @@ def create_app() -> FastAPI:
         .tl-item .tl-body{padding:0 14px 12px 38px;border-top:1px solid #f1f5f9}
         .tl-item .tl-pipe{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#6b7280;margin:8px 0 4px}
         .tl-item .tl-r{font-size:13px;color:#374151;line-height:1.5;margin-top:6px}
-        /* Round 23 iter 3: hazard-label cell, 3 feedback buttons (always
-           re-clickable), per-case vote pill. */
+        /* Round 23 iter 4: hazard-label + score cells, 3 feedback buttons
+           (always clickable, active verdict gets the active-* class),
+           class-filter chips, and the Priority tab. */
         .td-hazard{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#1f2937;white-space:nowrap}
+        .td-score{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#1f2937;white-space:nowrap;text-align:right}
         .fb-btn{appearance:none;background:#fff;border:1px solid #d1d5db;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;margin:0 2px;font-weight:600;transition:background 0.1s,color 0.1s}
         .fb-btn.fb-agree{color:#166534;border-color:#86efac}
         .fb-btn.fb-disagree{color:#991b1b;border-color:#fecaca}
@@ -3915,12 +3949,31 @@ def create_app() -> FastAPI:
         @keyframes flash-ok-anim{0%{box-shadow:0 0 0 0 rgba(34,197,94,0.6)}100%{box-shadow:0 0 0 6px rgba(34,197,94,0)}}
         .fb-btn.flash-err{animation:flash-err-anim 0.6s ease-out}
         @keyframes flash-err-anim{0%{box-shadow:0 0 0 0 rgba(239,68,68,0.6)}100%{box-shadow:0 0 0 6px rgba(239,68,68,0)}}
-        .td-act,.td-vote{white-space:nowrap}
-        .vote-pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;font-family:ui-monospace,monospace}
-        .vote-pill.vote-none{background:#f3f4f6;color:#9ca3af}
-        .vote-pill.vote-agree{background:#dcfce7;color:#166534}
-        .vote-pill.vote-disagree{background:#fee2e2;color:#991b1b}
-        .vote-pill.vote-not_relevant{background:#e5e7eb;color:#374151}
+        .td-act{white-space:nowrap}
+        /* Class filter chips above the Cases table */
+        .cls-chips{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 10px}
+        .cls-chip{appearance:none;background:#fff;border:1px solid #d1d5db;border-radius:999px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;color:#374151;font-family:ui-monospace,monospace}
+        .cls-chip:hover{background:#f9fafb}
+        .cls-chip.active{background:#0ea5e9;color:#fff;border-color:#0ea5e9}
+        .cls-chip .cls-n{opacity:0.75;font-weight:500}
+        /* Priority tab */
+        .pri-wrap{max-width:1180px}
+        .pri-h{margin:0 0 6px;font-size:16px;font-weight:700;color:#111827}
+        .pri-sub{color:#6b7280;font-size:13px;margin:0 0 18px}
+        .pri-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+        .pri-card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:14px}
+        .pri-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;border-bottom:1px solid #f1f5f9;padding-bottom:8px}
+        .pri-ttl{font-weight:700;font-size:13px}
+        .pri-ttl.urgent{color:#b91c1c}
+        .pri-ttl.human{color:#1d4ed8}
+        .pri-ttl.standard{color:#047857}
+        .pri-ttl.evi{color:#b45309}
+        .pri-cnt{font-size:11px;color:#6b7280;font-family:ui-monospace,monospace}
+        .pri-row{display:grid;grid-template-columns:90px 36px 1fr 100px;gap:6px;align-items:center;padding:4px 0;font-size:12px;border-bottom:1px solid #f8fafc}
+        .pri-row:last-child{border-bottom:0}
+        .pri-pri{font-family:ui-monospace,monospace;color:#374151;font-weight:700}
+        .pri-haz{font-family:ui-monospace,monospace;color:#1f2937}
+        .pri-empty{color:#9ca3af;font-size:12px;padding:8px 0;font-style:italic}
         /* Agent value tab */
         .av-wrap{max-width:1100px}
         .av-h{margin:0 0 10px;font-size:16px;font-weight:700;color:#111827}
@@ -3947,12 +4000,14 @@ def create_app() -> FastAPI:
         .ag-metric{display:flex;justify-content:space-between;font-size:12px}
         .ag-m-k{color:#374151}
         .ag-m-v{font-family:ui-monospace,monospace;font-weight:700;color:#111827}
-        /* Round 23: rule tree tab, uniform decision tree, no colour by outcome */
-        .rt-wrap{max-width:1180px}
+        /* Round 23 iter 4: rule tree canvas scales to the viewport
+           and scrolls horizontally when the tree overflows (viewBox
+           is 1800x1150, so on narrow screens it scrolls). */
+        .rt-wrap{max-width:100%}
         .rt-h{margin:0 0 6px;font-size:16px;font-weight:700;color:#111827}
         .rt-sub{color:#6b7280;font-size:13px;margin:0 0 18px}
-        .rt-canvas{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;overflow:auto}
-        .rt-svg{width:100%;height:auto;max-height:820px;display:block}
+        .rt-canvas{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;overflow-x:auto;overflow-y:hidden}
+        .rt-svg{min-width:1200px;width:100%;height:auto;display:block}
         """
 
         script = """
@@ -3969,9 +4024,12 @@ def create_app() -> FastAPI:
           rows.forEach(r => r.classList.toggle('sel', +r.dataset.idx === idx));
           const c = CASES[idx];
           if (!c) { detail.innerHTML = '<div class="d-empty">Pick a case on the left.</div>'; return; }
-          const img = c.image
-            ? `<img class="d-img" src="${c.image}" alt="citizen photo">`
-            : '<div class="d-img" style="display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:12px;height:160px">(photo not available)</div>';
+          // Round 23 iter 4 (4.11.2026): always try the image URL and
+          // hide the <img> on error - the file may be written seconds
+          // after the hazard row is created, so a 404 at page load is
+          // temporary; the next detail-pane reopen will see it.
+          const imgPath = c.image || (urlBase() + '/images/' + c.id);
+          const img = `<img class="d-img" src="${imgPath}" alt="citizen photo" onerror="this.style.display='none'; const p=document.createElement('div'); p.className='d-img'; p.style.cssText='display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:12px;height:160px'; p.textContent='(photo not yet written)'; this.parentNode.insertBefore(p, this)">`;
           const cited = c.cited && c.cited.length ? c.cited.map(s => `<code>${s}</code>`).join(', ') : '<i>none cited</i>';
           const decCls = c.decision === 'urgent' ? 'urgent' : (c.decision === 'human_review' ? 'human' : (c.decision === 'standard' ? 'standard' : 'evi'));
           detail.innerHTML = `
@@ -3994,13 +4052,10 @@ def create_app() -> FastAPI:
         // HTTP non-2xx flashes the button red and does NOT update the
         // 'your vote' pill, so the worker sees his click did NOT save.
         function urlBase() { return location.pathname.replace(/\\/digest.*/, ''); }
-        function setVotePill(hid, verdict) {
-          document.querySelectorAll(".td-vote[data-hid='" + hid + "']").forEach(td => {
-            td.innerHTML = '';
-            const pill = create('span', 'vote-pill vote-' + verdict);
-            pill.textContent = verdict === 'not_relevant' ? 'not relevant' : verdict;
-            td.appendChild(pill);
-          });
+        // Round 23 iter 4 (4.11.2026): the per-case verdict now shows
+        // only through the active-* class on the clicked button; the
+        // separate pill cell has been removed.
+        function markVote(hid, verdict) {
           document.querySelectorAll(".td-act[data-hid='" + hid + "'] .fb-btn").forEach(b => {
             b.classList.remove('active-agree','active-disagree','active-nr');
             if (b.dataset.verdict === verdict) {
@@ -4008,11 +4063,26 @@ def create_app() -> FastAPI:
             }
           });
         }
-        function clearVotePill(hid) {
-          document.querySelectorAll(".td-vote[data-hid='" + hid + "']").forEach(td => {
-            td.innerHTML = '<span class="vote-pill vote-none">not voted</span>';
+        function clearVote(hid) {
+          document.querySelectorAll(".td-act[data-hid='" + hid + "'] .fb-btn").forEach(b => {
+            b.classList.remove('active-agree','active-disagree','active-nr');
           });
         }
+        // Round 23 iter 4: class-filter chips above the Cases table.
+        function bindClassChips() {
+          const chips = document.querySelectorAll('.cls-chip');
+          chips.forEach(chip => {
+            chip.addEventListener('click', () => {
+              chips.forEach(c => c.classList.toggle('active', c === chip));
+              const target = chip.dataset.cls || 'ALL';
+              document.querySelectorAll('.cases tr.row').forEach(r => {
+                r.style.display = (target === 'ALL' || r.dataset.hzc === target)
+                  ? '' : 'none';
+              });
+            });
+          });
+        }
+        bindClassChips();
         function create(tag, cls, text) {
           const n = document.createElement(tag);
           if (cls) n.className = cls;
@@ -4038,15 +4108,15 @@ def create_app() -> FastAPI:
                 btn.offsetWidth; // reflow to retrigger animation
                 btn.classList.add('flash-ok');
                 setTimeout(() => btn.classList.remove('flash-ok'), 700);
-                setVotePill(hid, verdict);
+                markVote(hid, verdict);
                 refreshAgentValue();
               } catch (e) {
                 btn.classList.remove('flash-ok');
                 btn.offsetWidth;
                 btn.classList.add('flash-err');
                 setTimeout(() => btn.classList.remove('flash-err'), 700);
-                // Leave the vote pill as it was so the worker sees the
-                // click did NOT save.
+                // Leave the active-* state as it was so the worker sees
+                // the click did NOT save.
               }
             });
           });
@@ -4061,11 +4131,11 @@ def create_app() -> FastAPI:
             const d = await fetch(urlBase() + '/agent_feedback/by_hazard?window_hours=24', {cache:'no-store'})
                       .then(r => r.json());
             const byH = d.by_hazard || {};
-            document.querySelectorAll('.td-vote[data-hid]').forEach(td => {
+            document.querySelectorAll('.td-act[data-hid]').forEach(td => {
               const hid = td.dataset.hid;
               const v = byH[hid];
-              if (v && v.verdict) setVotePill(hid, v.verdict);
-              else clearVotePill(hid);
+              if (v && v.verdict) markVote(hid, v.verdict);
+              else clearVote(hid);
             });
           } catch (e) { /* silent */ }
         }
@@ -4131,6 +4201,54 @@ def create_app() -> FastAPI:
         setInterval(refresh, 30000);
         setInterval(refreshAgentValue, 30000);
         """.replace("__CASES__", cases_json)
+
+        # Round 23 iter 4 (4.11.2026): the Priority tab buckets the cases
+        # by the priority number the agents assigned. The owner reads
+        # it as 'how urgent did the agents call each case', in contrast
+        # to the Cases table's sorting by time. Buckets: Urgent (>=80),
+        # High (60-79), Medium (40-59), Low (<40).
+        PRI_BUCKETS = [
+            ("Urgent (>=80)", "urgent", 80, 1000),
+            ("High (60-79)",  "human",   60, 79),
+            ("Medium (40-59)", "standard", 40, 59),
+            ("Low (<40)",     "evi",      0,  39),
+        ]
+        bucket_cards: list[str] = []
+        for label, ccls, lo, hi in PRI_BUCKETS:
+            in_bucket = [c for c in cases if c.get("priority") is not None
+                         and lo <= int(c["priority"]) <= hi]
+            card_rows = ""
+            for c in in_bucket[:30]:
+                hid_short = html.escape(c["id"][:12])
+                hz = html.escape(_hazard_label(id_to_class.get(c["id"], "")))
+                dec = html.escape(c["decision"])
+                dcls = _css_for(c["decision"])
+                card_rows += (
+                    f"<div class='pri-row'>"
+                    f"<code>{hid_short}</code>"
+                    f"<span class='pri-pri'>p{c['priority']}</span>"
+                    f"<span class='pri-haz'>{hz}</span>"
+                    f"<span class='{dcls}'>{dec}</span>"
+                    f"</div>"
+                )
+            if not in_bucket:
+                card_rows = "<div class='pri-empty'>no cases in this band</div>"
+            bucket_cards.append(
+                f"<div class='pri-card'>"
+                f"<div class='pri-head'><span class='pri-ttl {ccls}'>{html.escape(label)}</span>"
+                f"<span class='pri-cnt'>{len(in_bucket)} cases</span></div>"
+                f"<div class='pri-body'>{card_rows}</div>"
+                f"</div>"
+            )
+        priority_html = (
+            "<div class='pri-wrap'>"
+            "<h3 class='pri-h'>Priority the agents assigned</h3>"
+            "<p class='pri-sub'>Priority bands drive how fast a case moves to a worker. "
+            "The agent's priority number is what the owner should look at together with the class label, "
+            "not just the decision tag.</p>"
+            f"<div class='pri-grid'>{''.join(bucket_cards)}</div>"
+            "</div>"
+        )
 
         # Round 23 (4.11.2026): the "Agent value" tab. Four top cards for
         # the rule-tree agreement + the three worker-verdict counters,
@@ -4224,16 +4342,19 @@ def create_app() -> FastAPI:
             "<div id='av-nr-list' class='av-overrides'>No 'not relevant' flags yet.</div>"
             "</div>"
         )
-        # Round 23 iter 3 (4.11.2026): rule tree redrawn as a proper
-        # decision tree. All edges are right-angle elbows (never crossed
-        # diagonals), nodes share one uniform style, labels sit beside
-        # the segments they belong to.
+        # Round 23 iter 4 (4.11.2026): rule tree expanded. The owner saw
+        # the earlier version as cut off at the edges and missing the
+        # depth of the real _decide_rule_based tree. This one draws the
+        # catalog-detector-contradiction floor, the evidence-declined
+        # branch, the YOLO-confidence band gate on the severity side,
+        # and the LLM-failed safety net, in one SVG whose width scales
+        # to the viewport (max-width, overflow-x: auto on the canvas).
         rule_tree_html = """
         <div class='rt-wrap'>
           <h3 class='rt-h'>Rule tree the agent is compared against</h3>
-          <p class='rt-sub'>Deterministic baseline. Every agent verdict is scored against the leaf this tree would have picked.</p>
+          <p class='rt-sub'>Deterministic baseline. Every agent verdict is scored against the leaf this tree would have picked. Scroll right to see the full depth.</p>
           <div class='rt-canvas'>
-            <svg viewBox='0 0 1200 780' xmlns='http://www.w3.org/2000/svg' class='rt-svg' preserveAspectRatio='xMidYMin meet'>
+            <svg viewBox='0 0 1800 1150' xmlns='http://www.w3.org/2000/svg' class='rt-svg' preserveAspectRatio='xMinYMin meet'>
               <style>
                 .rt-svg .n rect{fill:#fff;stroke:#334155;stroke-width:1.5;rx:8;ry:8}
                 .rt-svg .n text{font:600 13px -apple-system,Segoe UI,Roboto,sans-serif;fill:#111827}
@@ -4244,86 +4365,178 @@ def create_app() -> FastAPI:
                 .rt-svg .section-lbl{font:700 11px -apple-system,Segoe UI,Roboto,sans-serif;fill:#6b7280;letter-spacing:0.04em;text-anchor:middle}
               </style>
 
-              <!-- Edges: root -> sha256 -->
-              <path class='edge' d='M450,52 V90'/>
+              <!-- Root -> sha256 -->
+              <path class='edge' d='M900,62 V100'/>
 
-              <!-- sha256 -> known_image (yes) and -> phash? (no), elbow at y=170 -->
-              <path class='edge' d='M450,132 V170 H150 V200'/>
-              <path class='edge' d='M450,132 V170 H750 V200'/>
-              <text class='edge-lbl' x='300' y='163'>yes (same file)</text>
-              <text class='edge-lbl' x='600' y='163'>no (new or similar photo)</text>
+              <!-- sha256 match? -> known branch (yes) and -> new-photo branch (no), elbow at y=180 -->
+              <path class='edge' d='M900,152 V180 H300 V210'/>
+              <path class='edge' d='M900,152 V180 H1200 V210'/>
+              <text class='edge-lbl' x='600' y='172'>yes (same file)</text>
+              <text class='edge-lbl' x='1050' y='172'>no (new photo)</text>
 
-              <!-- phash? -> human_review (yes) and -> severity? (no), elbow at y=288 -->
-              <path class='edge' d='M750,242 V288 H500 V320'/>
-              <path class='edge' d='M750,242 V288 H950 V320'/>
-              <text class='edge-lbl' x='625' y='281'>yes (phash class mismatch)</text>
-              <text class='edge-lbl' x='850' y='281'>no</text>
+              <!-- known branch: detector class matches catalog labels? -->
+              <path class='edge' d='M300,262 V310'/>
+              <text class='edge-lbl' x='300' y='290'>catalogue agrees with detector?</text>
+              <path class='edge' d='M300,362 V390 H150 V420'/>
+              <path class='edge' d='M300,362 V390 H450 V420'/>
+              <text class='edge-lbl' x='210' y='383'>yes</text>
+              <text class='edge-lbl' x='390' y='383'>no (floor)</text>
 
-              <!-- severity? -> three leaves, elbow at y=408 -->
-              <path class='edge' d='M950,362 V408 H750 V440'/>
-              <path class='edge' d='M950,362 V440'/>
-              <path class='edge' d='M950,362 V408 H1150 V440'/>
-              <text class='edge-lbl' x='850' y='401'>severe / recurring</text>
-              <text class='edge-lbl' x='998' y='401'>moderate</text>
-              <text class='edge-lbl' x='1050' y='401'>minor + low conf</text>
+              <!-- new-photo branch: phash? -->
+              <path class='edge' d='M1200,262 V310'/>
 
-              <!-- Divider + LLM-failed section label -->
-              <line class='divider' x1='40' y1='530' x2='1160' y2='530'/>
-              <text class='section-lbl' x='600' y='553'>SAFETY NET (applies to any branch above)</text>
+              <!-- phash yes -> human_review (phash floor); phash no -> evidence_declined? -->
+              <path class='edge' d='M1200,362 V390 H900 V420'/>
+              <path class='edge' d='M1200,362 V390 H1500 V420'/>
+              <text class='edge-lbl' x='1050' y='383'>yes (class mismatch)</text>
+              <text class='edge-lbl' x='1350' y='383'>no</text>
 
-              <!-- LLM failed? -> fall_back (yes) and keep (no), elbow at y=648 -->
-              <path class='edge' d='M600,632 V648 H400 V680'/>
-              <path class='edge' d='M600,632 V648 H800 V680'/>
-              <text class='edge-lbl' x='500' y='641'>yes (LLM failed)</text>
-              <text class='edge-lbl' x='700' y='641'>no (LLM returned)</text>
+              <!-- evidence_declined? -->
+              <path class='edge' d='M1500,472 V510 H1200 V540'/>
+              <path class='edge' d='M1500,472 V510 H1700 V540'/>
+              <text class='edge-lbl' x='1340' y='503'>yes (declined)</text>
+              <text class='edge-lbl' x='1600' y='503'>no (carry on)</text>
+
+              <!-- severity_signal? -->
+              <path class='edge' d='M1700,592 V630'/>
+
+              <!-- severity? -> three subtrees -->
+              <path class='edge' d='M1700,682 V710 H1430 V740'/>
+              <path class='edge' d='M1700,682 V740'/>
+              <path class='edge' d='M1700,682 V710 H1980 V740'/>
+              <text class='edge-lbl' x='1565' y='703'>severe / recurring</text>
+              <text class='edge-lbl' x='1750' y='703'>moderate</text>
+              <text class='edge-lbl' x='1900' y='703'>minor</text>
+
+              <!-- severity=moderate: YOLO confidence band? -->
+              <path class='edge' d='M1700,792 V820 H1620 V850'/>
+              <path class='edge' d='M1700,792 V820 H1780 V850'/>
+              <text class='edge-lbl' x='1660' y='813'>low conf</text>
+              <text class='edge-lbl' x='1860' y='813'>high conf</text>
+
+              <!-- severity=minor: confidence band? -->
+              <path class='edge' d='M1980,792 V820 H1900 V850'/>
+              <path class='edge' d='M1980,792 V820 H2060 V850'/>
+              <text class='edge-lbl' x='1940' y='813'>low conf</text>
+              <text class='edge-lbl' x='2140' y='813'>high conf</text>
+
+              <!-- Divider + safety net -->
+              <line class='divider' x1='40' y1='960' x2='1760' y2='960'/>
+              <text class='section-lbl' x='900' y='983'>SAFETY NET (applies to any leaf above)</text>
+
+              <!-- LLM failed? -->
+              <path class='edge' d='M900,1022 V1050 H650 V1080'/>
+              <path class='edge' d='M900,1022 V1050 H1150 V1080'/>
+              <text class='edge-lbl' x='760' y='1043'>yes (LLM failed)</text>
+              <text class='edge-lbl' x='1050' y='1043'>no (LLM returned)</text>
 
               <!-- Nodes -->
-              <g class='n' transform='translate(350,10)'>
+              <g class='n' transform='translate(800,20)'>
                 <rect width='200' height='42'/>
                 <text x='100' y='27' text-anchor='middle'>incoming hazard</text>
               </g>
-              <g class='n' transform='translate(320,90)'>
-                <rect width='260' height='42'/>
-                <text x='130' y='27' text-anchor='middle'>sha256 match in catalogue?</text>
+              <g class='n' transform='translate(760,100)'>
+                <rect width='280' height='52'/>
+                <text x='140' y='22' text-anchor='middle'>sha256 match in catalogue?</text>
+                <text x='140' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>same file as a labelled photo?</text>
               </g>
-              <g class='n leaf' transform='translate(50,200)'>
+
+              <!-- Known branch: catalog contradiction -->
+              <g class='n' transform='translate(180,210)'>
+                <rect width='240' height='52'/>
+                <text x='120' y='22' text-anchor='middle'>catalogue agrees?</text>
+                <text x='120' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>detector class in catalog labels?</text>
+              </g>
+              <g class='n leaf' transform='translate(50,420)'>
                 <rect width='200' height='42'/>
                 <text x='100' y='27' text-anchor='middle'>known_image</text>
               </g>
-              <g class='n' transform='translate(610,200)'>
-                <rect width='280' height='42'/>
-                <text x='140' y='27' text-anchor='middle'>phash class mismatch?</text>
-              </g>
-              <g class='n leaf' transform='translate(400,320)'>
-                <rect width='200' height='42'/>
-                <text x='100' y='27' text-anchor='middle'>human_review</text>
-              </g>
-              <g class='n' transform='translate(830,320)'>
-                <rect width='240' height='42'/>
-                <text x='120' y='27' text-anchor='middle'>severity_signal?</text>
-              </g>
-              <g class='n leaf' transform='translate(650,440)'>
-                <rect width='200' height='42'/>
-                <text x='100' y='27' text-anchor='middle'>human_review</text>
-              </g>
-              <g class='n leaf' transform='translate(870,440)'>
-                <rect width='160' height='42'/>
-                <text x='80' y='27' text-anchor='middle'>standard</text>
-              </g>
-              <g class='n leaf' transform='translate(1050,440)'>
-                <rect width='200' height='42'/>
-                <text x='100' y='27' text-anchor='middle'>needs_more_evidence</text>
+              <g class='n leaf' transform='translate(350,420)'>
+                <rect width='200' height='52'/>
+                <text x='100' y='22' text-anchor='middle'>human_review</text>
+                <text x='100' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>catalog_detector_contradiction</text>
               </g>
 
-              <g class='n' transform='translate(480,590)'>
+              <!-- New-photo branch: phash -->
+              <g class='n' transform='translate(1070,210)'>
+                <rect width='260' height='52'/>
+                <text x='130' y='22' text-anchor='middle'>phash class mismatch?</text>
+                <text x='130' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>neighbour label disagrees with detector</text>
+              </g>
+              <g class='n leaf' transform='translate(800,420)'>
+                <rect width='200' height='52'/>
+                <text x='100' y='22' text-anchor='middle'>human_review</text>
+                <text x='100' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>phash_class_mismatch floor</text>
+              </g>
+
+              <g class='n' transform='translate(1370,420)'>
+                <rect width='260' height='52'/>
+                <text x='130' y='22' text-anchor='middle'>evidence_declined?</text>
+                <text x='130' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>reporter: "no other photo"</text>
+              </g>
+              <g class='n leaf' transform='translate(1100,540)'>
+                <rect width='200' height='52'/>
+                <text x='100' y='22' text-anchor='middle'>human_review</text>
+                <text x='100' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>evidence_declined</text>
+              </g>
+
+              <g class='n' transform='translate(1570,540)'>
+                <rect width='260' height='52'/>
+                <text x='130' y='22' text-anchor='middle'>severity_signal?</text>
+                <text x='130' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>from area, lane, class, recurrence</text>
+              </g>
+
+              <!-- Severity leaves -->
+              <g class='n leaf' transform='translate(1330,740)'>
+                <rect width='200' height='52'/>
+                <text x='100' y='22' text-anchor='middle'>human_review</text>
+                <text x='100' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>severe / recurring</text>
+              </g>
+
+              <!-- Moderate: conf band split -->
+              <g class='n' transform='translate(1600,740)'>
+                <rect width='200' height='52'/>
+                <text x='100' y='22' text-anchor='middle'>YOLO confidence?</text>
+                <text x='100' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>low or high band</text>
+              </g>
+              <g class='n leaf' transform='translate(1520,850)'>
+                <rect width='200' height='52'/>
+                <text x='100' y='22' text-anchor='middle'>needs_more_evidence</text>
+                <text x='100' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>moderate + low conf</text>
+              </g>
+              <g class='n leaf' transform='translate(1700,850)'>
+                <rect width='160' height='52'/>
+                <text x='80' y='22' text-anchor='middle'>standard</text>
+                <text x='80' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>moderate + high conf</text>
+              </g>
+
+              <!-- Minor: conf band split -->
+              <g class='n' transform='translate(1880,740)'>
+                <rect width='200' height='52'/>
+                <text x='100' y='22' text-anchor='middle'>YOLO confidence?</text>
+                <text x='100' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>low or high band</text>
+              </g>
+              <g class='n leaf' transform='translate(1800,850)'>
+                <rect width='200' height='52'/>
+                <text x='100' y='22' text-anchor='middle'>needs_more_evidence</text>
+                <text x='100' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>minor + low conf</text>
+              </g>
+              <g class='n leaf' transform='translate(1980,850)'>
+                <rect width='160' height='52'/>
+                <text x='80' y='22' text-anchor='middle'>standard</text>
+                <text x='80' y='40' text-anchor='middle' font-size='10' fill='#6b7280'>minor + high conf</text>
+              </g>
+
+              <!-- Safety net -->
+              <g class='n' transform='translate(780,1020)'>
                 <rect width='240' height='42'/>
                 <text x='120' y='27' text-anchor='middle'>LLM failed?</text>
               </g>
-              <g class='n leaf' transform='translate(300,680)'>
+              <g class='n leaf' transform='translate(550,1080)'>
                 <rect width='200' height='42'/>
                 <text x='100' y='27' text-anchor='middle'>fall back to rule tree</text>
               </g>
-              <g class='n leaf' transform='translate(700,680)'>
+              <g class='n leaf' transform='translate(1050,1080)'>
                 <rect width='200' height='42'/>
                 <text x='100' y='27' text-anchor='middle'>keep agent verdict</text>
               </g>
@@ -4347,6 +4560,7 @@ def create_app() -> FastAPI:
             "<div class='d-empty'>Pick a case on the left.</div>"
             "</aside>"
             "</div></section>"
+            f"<section id='pane-priority' class='tab-pane'>{priority_html}</section>"
             f"<section id='pane-agentvalue' class='tab-pane'>{agent_value_html}</section>"
             f"<section id='pane-ruletree' class='tab-pane'>{rule_tree_html}</section>"
             f"<script>{script}</script>"
