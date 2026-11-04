@@ -3529,6 +3529,11 @@ def create_app() -> FastAPI:
             "SELECT agent_value_json FROM hazards WHERE reported_at >= ? AND agent_value_json != ''",
             (cutoff_epoch,),
         ).fetchall()
+        # Round 23 (4.11.2026): also walk the full trace aggregator so the
+        # per-agent panel in the Agent value tab can read per_agent /
+        # agents_justified / cost_total from one source. The call is
+        # cheap (reads the same rows the digest already fetched).
+        aggregates = _aggregate_agent_metrics(rows)
         av_counts = {"runs": 0, "changed_rule_hint": 0,
                      "profile_llm_changed": 0, "research_llm_changed": 0,
                      "enforcement_rule_tree_verdict": 0, "floor_applied": 0}
@@ -3668,34 +3673,64 @@ def create_app() -> FastAPI:
             "</div>"
         )
 
+        # Round 23 (4.11.2026): readable hazard label - the YOLO class
+        # the agents identified in the image, with its plain name so a
+        # city worker reads it without the dataset code.
+        _HAZARD_LABEL = {
+            "D00": "longitudinal crack",
+            "D10": "transverse crack",
+            "D20": "alligator crack",
+            "D40": "pothole",
+        }
+
+        def _hazard_label(cls_code: str) -> str:
+            code = (cls_code or "").upper()
+            name = _HAZARD_LABEL.get(code, "")
+            return f"{code} {name}".strip() if code else "n/a"
+
         if rows:
+            # Fetch the per-case class the AGENTS identified (profile
+            # builder's primary_class, with the YOLO live detection as
+            # the fallback when the agent left it blank) alongside the
+            # existing hazards.class column.
+            id_to_class = {}
+            for r in rows:
+                try:
+                    trace = json.loads(r["agent_trace_json"] or "[]")
+                except Exception:
+                    trace = []
+                primary = ""
+                for e in trace:
+                    if not isinstance(e, dict):
+                        continue
+                    if e.get("speaker") == "profile_builder":
+                        pc = (e.get("content") or {}).get("primary_class")
+                        if pc:
+                            primary = str(pc).upper()
+                            break
+                id_to_class[r["id"]] = primary or str(r["class"] or "")
             rows_html_parts = []
             for i, c in enumerate(cases, 1):
                 ts = datetime.fromtimestamp(c["reported_at"], timezone.utc).strftime("%H:%M")
                 d = html.escape(c["decision"])
                 cls = _css_for(c["decision"])
-                # Round 23 (4.11.2026): per-row justified ratio + agree /
-                # override buttons; the two buttons POST to
-                # /agent_feedback/{id} and the counts feed the "Agent
-                # value" tab's worker-agreement rate.
-                jc = c.get("justified_count")
-                at = c.get("agents_total") or 6
-                justified_cell = (
-                    f"<span class='j-pill j-{('ok' if jc and jc >= 4 else 'warn') if jc is not None else 'na'}'>"
-                    f"{jc if jc is not None else '-'}/{at}</span>"
-                )
                 hid = html.escape(c['id'])
+                hazard_label = html.escape(_hazard_label(id_to_class.get(c["id"], "")))
+                # Round 23 (4.11.2026): three-button worker feedback -
+                # Agree, Disagree, Not relevant. The three POST the
+                # matching verdict to /agent_feedback/{id}.
                 action_cell = (
-                    f"<button class='fb-btn fb-agree' data-id='{hid}' title='Worker agrees with the agent'>Agree</button>"
-                    f"<button class='fb-btn fb-override' data-id='{hid}' title='Worker overrides the agent'>Override</button>"
+                    f"<button class='fb-btn fb-agree' data-id='{hid}' data-verdict='agree' title='Worker agrees with the agent'>Agree</button>"
+                    f"<button class='fb-btn fb-disagree' data-id='{hid}' data-verdict='disagree' title='Worker disagrees with the agent'>Disagree</button>"
+                    f"<button class='fb-btn fb-nr' data-id='{hid}' data-verdict='not_relevant' title='Image is not a hazard / noise / other'>Not relevant</button>"
                 )
                 rows_html_parts.append(
                     f"<tr data-idx='{i-1}' class='row'>"
                     f"<td>{i}</td>"
                     f"<td><code>{html.escape(c['id'][:12])}</code></td>"
+                    f"<td class='td-hazard'>{hazard_label}</td>"
                     f"<td class='{cls}'>{d}</td>"
                     f"<td>{c['priority'] or ''}</td>"
-                    f"<td class='td-just'>{justified_cell}</td>"
                     f"<td class='td-act' data-hid='{hid}'>{action_cell}</td>"
                     f"<td>{html.escape(c['location'])[:60]}</td>"
                     f"<td>{ts}</td>"
@@ -3704,8 +3739,9 @@ def create_app() -> FastAPI:
             rows_html = "".join(rows_html_parts)
             table_html = (
                 "<table class='cases'>"
-                "<thead><tr><th>#</th><th>id</th><th>decision</th><th>priority</th>"
-                "<th title='Agents justified / total'>agents OK</th>"
+                "<thead><tr><th>#</th><th>id</th>"
+                "<th title='Hazard type the agents identified in the image'>hazard the agents saw</th>"
+                "<th>decision</th><th>priority</th>"
                 "<th>worker feedback</th>"
                 "<th>location</th><th>time</th></tr></thead>"
                 f"<tbody id='rows'>{rows_html}</tbody>"
@@ -3788,7 +3824,6 @@ def create_app() -> FastAPI:
             f"</header>"
             f"<nav class='tabs' id='tabs'>"
             f"<button class='tab-btn active' data-tab='cases'>Cases ({len(rows)})</button>"
-            f"<button class='tab-btn' data-tab='timeline'>Timeline</button>"
             f"<button class='tab-btn' data-tab='agentvalue'>Agent value</button>"
             f"<button class='tab-btn' data-tab='ruletree'>Rule tree</button>"
             f"</nav>"
@@ -3862,17 +3897,15 @@ def create_app() -> FastAPI:
         .tl-item .tl-body{padding:0 14px 12px 38px;border-top:1px solid #f1f5f9}
         .tl-item .tl-pipe{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#6b7280;margin:8px 0 4px}
         .tl-item .tl-r{font-size:13px;color:#374151;line-height:1.5;margin-top:6px}
-        /* Round 23: per-row justified pill + agree/override buttons */
-        .j-pill{display:inline-block;padding:2px 8px;border-radius:999px;font-family:ui-monospace,monospace;font-size:12px;font-weight:700}
-        .j-pill.j-ok{background:#dcfce7;color:#166534}
-        .j-pill.j-warn{background:#fef3c7;color:#92400e}
-        .j-pill.j-na{background:#f3f4f6;color:#6b7280}
+        /* Round 23: hazard-label cell + 3 worker-feedback buttons */
+        .td-hazard{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#1f2937;white-space:nowrap}
         .fb-btn{appearance:none;background:#fff;border:1px solid #d1d5db;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;margin:0 2px;font-weight:600}
         .fb-btn.fb-agree{color:#166534;border-color:#86efac}
-        .fb-btn.fb-override{color:#991b1b;border-color:#fecaca}
+        .fb-btn.fb-disagree{color:#991b1b;border-color:#fecaca}
+        .fb-btn.fb-nr{color:#6b7280;border-color:#d1d5db}
         .fb-btn.sent{background:#f3f4f6;color:#6b7280;cursor:default;border-color:#e5e7eb}
         .fb-btn:hover:not(.sent){background:#f9fafb}
-        .td-just,.td-act{white-space:nowrap}
+        .td-act{white-space:nowrap}
         /* Agent value tab */
         .av-wrap{max-width:1100px}
         .av-h{margin:0 0 10px;font-size:16px;font-weight:700;color:#111827}
@@ -3889,24 +3922,22 @@ def create_app() -> FastAPI:
         .av-overrides .av-ov-row{padding:8px 0;border-bottom:1px solid #f1f5f9}
         .av-overrides .av-ov-row:last-child{border-bottom:0}
         .av-ov-id{font-family:ui-monospace,monospace;color:#1d4ed8;font-weight:600}
-        /* Rule tree tab */
-        .rt-wrap{max-width:1100px}
+        /* Round 23: per-agent breakdown grid in the Agent value tab */
+        .ag-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+        .ag-card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:14px}
+        .ag-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px;border-bottom:1px solid #f1f5f9;padding-bottom:6px}
+        .ag-name{font-family:ui-monospace,monospace;font-weight:700;color:#111827;font-size:14px}
+        .ag-just{font-family:ui-monospace,monospace;font-size:12px;color:#166534;font-weight:600}
+        .ag-metrics{display:grid;grid-template-columns:1fr;gap:4px}
+        .ag-metric{display:flex;justify-content:space-between;font-size:12px}
+        .ag-m-k{color:#374151}
+        .ag-m-v{font-family:ui-monospace,monospace;font-weight:700;color:#111827}
+        /* Round 23: rule tree tab, uniform decision tree, no colour by outcome */
+        .rt-wrap{max-width:1180px}
         .rt-h{margin:0 0 6px;font-size:16px;font-weight:700;color:#111827}
         .rt-sub{color:#6b7280;font-size:13px;margin:0 0 18px}
-        .rt-tree{display:flex;flex-direction:column;gap:14px;align-items:center}
-        .rt-row{display:flex;gap:28px;justify-content:center;align-items:flex-start;flex-wrap:wrap;position:relative}
-        .rt-row::before{content:"";position:absolute;top:-10px;left:50%;height:10px;border-left:2px dashed #cbd5e1}
-        .rt-col{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:180px;max-width:280px}
-        .rt-label{font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:0.03em}
-        .rt-node{background:#fff;border:2px solid #cbd5e1;border-radius:8px;padding:10px 14px;font-weight:700;color:#111827;text-align:center;min-width:150px}
-        .rt-root{background:#eff6ff;border-color:#60a5fa;color:#1e40af}
-        .rt-known{background:#eef2ff;border-color:#8b5cf6;color:#5b21b6}
-        .rt-human{background:#fee2e2;border-color:#ef4444;color:#991b1b}
-        .rt-standard{background:#dcfce7;border-color:#22c55e;color:#166534}
-        .rt-evi{background:#fef3c7;border-color:#f59e0b;color:#92400e}
-        .rt-branch{background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;padding:8px 14px;font-weight:600;color:#1f2937;font-size:13px;text-align:center}
-        .rt-branch.rt-fallback{background:#fff7ed;border-color:#fdba74;color:#9a3412}
-        .rt-note{font-size:11px;color:#6b7280;text-align:center;max-width:220px}
+        .rt-canvas{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;overflow:auto}
+        .rt-svg{width:100%;height:auto;max-height:820px;display:block}
         """
 
         script = """
@@ -3942,9 +3973,10 @@ def create_app() -> FastAPI:
         }
         rows.forEach(r => r.addEventListener('click', () => pick(+r.dataset.idx)));
         if (rows.length) pick(0);
-        // Round 23 (4.11.2026): per-row Agree / Override buttons POST to
-        // /agent_feedback/{id}; successful click grays the pair out so
-        // the worker sees his vote landed and cannot double-count it.
+        // Round 23 (4.11.2026): three-button worker feedback. Each
+        // button sends its own verdict (agree / disagree / not_relevant)
+        // to /agent_feedback/{id}, grays the row out and refreshes the
+        // Agent value tab.
         function bindFbButtons(root) {
           (root || document).querySelectorAll('.fb-btn').forEach(btn => {
             if (btn.dataset.bound === '1') return;
@@ -3952,21 +3984,23 @@ def create_app() -> FastAPI:
             btn.addEventListener('click', async (ev) => {
               ev.stopPropagation();
               const hid = btn.dataset.id;
-              const agree = btn.classList.contains('fb-agree');
+              const verdict = btn.dataset.verdict || 'agree';
               try {
                 const base = location.pathname.replace(/\\/digest.*/, '');
                 await fetch(base + '/agent_feedback/' + encodeURIComponent(hid), {
                   method: 'POST',
                   headers: {'content-type': 'application/json'},
-                  body: JSON.stringify({agree: agree, note: ''}),
+                  body: JSON.stringify({verdict: verdict, note: ''}),
                 });
                 const cell = btn.closest('.td-act');
                 if (cell) {
                   cell.querySelectorAll('.fb-btn').forEach(b => {
                     b.classList.add('sent'); b.disabled = true;
                   });
-                  btn.textContent = agree ? 'Agree &#x2713;' : 'Override &#x2713;';
-                  btn.innerHTML = agree ? 'Agree &#x2713;' : 'Override &#x2713;';
+                  const mark = ' \\u2713';
+                  if (verdict === 'agree') btn.textContent = 'Agree' + mark;
+                  else if (verdict === 'disagree') btn.textContent = 'Disagree' + mark;
+                  else btn.textContent = 'Not relevant' + mark;
                 }
                 refreshAgentValue();
               } catch (e) { /* silent */ }
@@ -3974,29 +4008,38 @@ def create_app() -> FastAPI:
           });
         }
         bindFbButtons(document);
-        // Round 23: the Agent value tab loads the worker-agreement rate
-        // from /stats/feedback and refreshes after every button click.
+        // Round 23: the Agent value tab loads the three-verdict counters
+        // from /stats/feedback, refreshes after every button click.
         async function refreshAgentValue() {
           try {
             const base = location.pathname.replace(/\\/digest.*/, '');
             const d = await fetch(base + '/stats/feedback?window_hours=24', {cache:'no-store'})
                       .then(r => r.json());
-            const v = document.getElementById('av-worker-v');
-            const t = document.getElementById('av-worker-t');
-            const list = document.getElementById('av-override-list');
-            if (v) v.textContent = (d.agreement_rate != null ? d.agreement_rate + '%' : '--');
-            if (t) t.textContent = (d.agree || 0) + ' agree / ' + (d.override || 0) + ' override';
-            if (list) {
-              if (!d.overrides || !d.overrides.length) {
-                list.innerHTML = '<div class="k" style="color:#6b7280">No overrides yet.</div>';
-              } else {
-                list.innerHTML = d.overrides.map(o =>
-                  '<div class="av-ov-row"><span class="av-ov-id">' + (o.hazard_id || '').substring(0,12) +
-                  '</span> &middot; <b>' + (o.class || '') + '</b> &middot; agent said <b>' + (o.decision || '') +
-                  '</b>' + (o.note ? ' &middot; <i>' + o.note + '</i>' : '') + '</div>'
-                ).join('');
-              }
+            const total = d.total_feedback || 0;
+            function setCard(idv, idt, n) {
+              const v = document.getElementById(idv);
+              const t = document.getElementById(idt);
+              if (v) v.textContent = String(n);
+              if (t) t.textContent = total ? (n + ' of ' + total + ' feedback') : 'no feedback yet';
             }
+            setCard('av-agree-v', 'av-agree-t', d.agree || 0);
+            setCard('av-dis-v',   'av-dis-t',   d.disagree || 0);
+            setCard('av-nr-v',    'av-nr-t',    d.not_relevant || 0);
+            function renderList(id, items, empty) {
+              const list = document.getElementById(id);
+              if (!list) return;
+              if (!items || !items.length) {
+                list.innerHTML = '<div class="k" style="color:#6b7280">' + empty + '</div>';
+                return;
+              }
+              list.innerHTML = items.map(o =>
+                '<div class="av-ov-row"><span class="av-ov-id">' + (o.hazard_id || '').substring(0,12) +
+                '</span> &middot; <b>' + (o.class || '') + '</b> &middot; agent said <b>' + (o.decision || '') +
+                '</b>' + (o.note ? ' &middot; <i>' + o.note + '</i>' : '') + '</div>'
+              ).join('');
+            }
+            renderList('av-disagree-list', d.disagrees, 'No disagreements yet.');
+            renderList('av-nr-list', d.not_relevants, "No 'not relevant' flags yet.");
           } catch (e) { /* silent */ }
         }
         refreshAgentValue();
@@ -4007,7 +4050,7 @@ def create_app() -> FastAPI:
           try {
             const html = await fetch(location.href, {cache: 'no-store'}).then(r => r.text());
             const doc = new DOMParser().parseFromString(html, 'text/html');
-            const parts = ['.kpi-strip', 'tbody#rows', '#pane-timeline .tl'];
+            const parts = ['.kpi-strip', 'tbody#rows'];
             for (const sel of parts) {
               const next = doc.querySelector(sel);
               const cur = document.querySelector(sel);
@@ -4026,10 +4069,69 @@ def create_app() -> FastAPI:
         setInterval(refreshAgentValue, 30000);
         """.replace("__CASES__", cases_json)
 
-        # Round 23 (4.11.2026): the new "Agent value" tab. The 85% tile
-        # moved here from the top of the Cases pane; the worker-agreement
-        # rate (from agent_feedback via /stats/feedback) is loaded live by
-        # the page's JS because it changes on every button click.
+        # Round 23 (4.11.2026): the "Agent value" tab. Four top cards for
+        # the rule-tree agreement + the three worker-verdict counters,
+        # then a per-agent panel that lists each of the six agents with
+        # its runs, justified count and the behaviour counters pulled
+        # from _aggregate_agent_metrics. Everything but the per-agent
+        # panel updates live from /stats/feedback on every click.
+        per_agent_rows = ""
+        _PER_AGENT_METRICS = [
+            ("sanitize", [
+                ("location_scrubbed", "PII scrubbed"),
+                ("ocr_suspicious", "OCR injection blocked"),
+                ("reporter_text_suspicious", "Suspicious text filtered"),
+            ]),
+            ("signal_extractor", [
+                ("has_text", "Cases with reporter text"),
+                ("llm_used", "LLM calls run"),
+            ]),
+            ("supervisor", [
+                ("concern_input_ambiguous", "Flagged input ambiguous"),
+                ("concern_budget_tight", "Flagged budget tight"),
+                ("concern_none", "No concern raised"),
+            ]),
+            ("profile_builder", [
+                ("catalog_hit", "Catalogue hits"),
+                ("class_matches_detector", "Agent class matches detector"),
+                ("llm_used", "LLM calls run"),
+            ]),
+            ("rag_retriever", [
+                ("coverage_direct_match", "Direct match"),
+                ("llm_used", "LLM calls run"),
+                ("total_passages_returned", "Passages returned"),
+            ]),
+            ("decision", [
+                ("rule_based", "Rule-based verdicts"),
+                ("llm_based", "LLM-based verdicts"),
+                ("contradiction_floor", "Floors fired"),
+            ]),
+        ]
+        for sp, metrics in _PER_AGENT_METRICS:
+            block = aggregates["per_agent"].get(sp, {}) if isinstance(aggregates.get("per_agent"), dict) else {}
+            aj = (aggregates.get("agents_justified") or {}).get(sp, {}) if isinstance(aggregates.get("agents_justified"), dict) else {}
+            justified = aj.get("justified", 0) if isinstance(aj, dict) else 0
+            runs = aj.get("runs", 0) if isinstance(aj, dict) else 0
+            metric_cells = "".join(
+                f"<div class='ag-metric'><span class='ag-m-k'>{html.escape(label)}</span>"
+                f"<span class='ag-m-v'>{block.get(key, 0)}</span></div>"
+                for key, label in metrics
+            )
+            per_agent_rows += (
+                f"<div class='ag-card'>"
+                f"<div class='ag-head'><span class='ag-name'>{sp}</span>"
+                f"<span class='ag-just'>{justified} / {runs} justified</span></div>"
+                f"<div class='ag-metrics'>{metric_cells}</div>"
+                f"</div>"
+            )
+        aggregates_json = {
+            "per_agent": aggregates.get("per_agent"),
+            "agents_justified": aggregates.get("agents_justified"),
+            "cost_total": aggregates.get("cost_total"),
+        }
+        # The window has to be set up for the aggregates call just above
+        # to have content for this snapshot: use the same 24h window the
+        # digest already reads.
         agent_value_html = (
             "<div class='av-wrap'>"
             "<h3 class='av-h'>How much is the agent worth right now</h3>"
@@ -4038,87 +4140,134 @@ def create_app() -> FastAPI:
             f"<div class='av-v'>{correct_pct:.0f}%</div>"
             f"<div class='av-l'>Agreement with the rule tree</div>"
             f"<div class='av-t'>target 85%</div></div>"
-            "<div class='av-card' id='av-worker-card'>"
-            "<div class='av-v' id='av-worker-v'>--</div>"
-            "<div class='av-l'>Worker agreed with agent</div>"
-            "<div class='av-t' id='av-worker-t'>loading...</div></div>"
-            "<div class='av-card'>"
-            f"<div class='av-v'>{av_counts['changed_rule_hint']}</div>"
-            f"<div class='av-l'>Cases LLM moved the rule tree</div>"
-            f"<div class='av-t'>out of {av_counts['runs']}</div></div>"
-            "<div class='av-card'>"
-            f"<div class='av-v'>{av_counts['floor_applied']}</div>"
-            f"<div class='av-l'>Floors applied</div>"
-            f"<div class='av-t'>out of {av_counts['runs']}</div></div>"
+            "<div class='av-card' id='av-agree-card'>"
+            "<div class='av-v' id='av-agree-v'>0</div>"
+            "<div class='av-l'>Worker: Agree</div>"
+            "<div class='av-t' id='av-agree-t'>0 total feedback</div></div>"
+            "<div class='av-card' id='av-dis-card'>"
+            "<div class='av-v' id='av-dis-v'>0</div>"
+            "<div class='av-l'>Worker: Disagree</div>"
+            "<div class='av-t' id='av-dis-t'>0 total feedback</div></div>"
+            "<div class='av-card' id='av-nr-card'>"
+            "<div class='av-v' id='av-nr-v'>0</div>"
+            "<div class='av-l'>Worker: Not relevant</div>"
+            "<div class='av-t' id='av-nr-t'>0 total feedback</div></div>"
             "</div>"
-            "<h3 class='av-h' style='margin-top:18px'>Worker overrides (last 24h)</h3>"
-            "<div id='av-override-list' class='av-overrides'>loading...</div>"
+            "<h3 class='av-h' style='margin-top:18px'>Each agent and its metrics (last 24h)</h3>"
+            f"<div class='ag-grid'>{per_agent_rows}</div>"
+            "<h3 class='av-h' style='margin-top:18px'>Cases the worker disagreed with (last 24h)</h3>"
+            "<div id='av-disagree-list' class='av-overrides'>No disagreements yet.</div>"
+            "<h3 class='av-h' style='margin-top:18px'>Cases the worker marked 'not relevant' (last 24h)</h3>"
+            "<div id='av-nr-list' class='av-overrides'>No 'not relevant' flags yet.</div>"
             "</div>"
         )
-        # The rule tree tab is a static, Hebrew-first flowchart that
-        # mirrors _decide_rule_based for the city worker. Boxes are
-        # sized and coloured by what the branch outputs so a reader
-        # recognises urgent/human_review/standard/needs_more_evidence/
-        # known_image at a glance, without reading code.
+        # Round 23 (4.11.2026) redesign: the rule tree is drawn as an
+        # actual decision tree. One SVG pane, uniform node style, every
+        # branch tagged yes/no, children stacked below their parent and
+        # connected by lines. No colors by outcome, no decoration.
         rule_tree_html = """
         <div class='rt-wrap'>
           <h3 class='rt-h'>Rule tree the agent is compared against</h3>
-          <p class='rt-sub'>This is the deterministic baseline every agent decision is measured against.
-             The agent earns its compute only when it moves one of the leaves in the right direction (see the "Agent value" tab).</p>
-          <div class='rt-tree'>
-            <div class='rt-row'><div class='rt-node rt-root'>Incoming hazard</div></div>
-            <div class='rt-row'>
-              <div class='rt-branch'>sha256 match in catalogue?</div>
-            </div>
-            <div class='rt-row'>
-              <div class='rt-col'>
-                <div class='rt-label'>YES &mdash; same file</div>
-                <div class='rt-node rt-known'>known_image</div>
-                <div class='rt-note'>catalogue sealed; LLM is skipped</div>
-              </div>
-              <div class='rt-col'>
-                <div class='rt-label'>NO &mdash; new or similar photo</div>
-                <div class='rt-branch'>phash neighbour disagrees with live detector?</div>
-                <div class='rt-row'>
-                  <div class='rt-col'>
-                    <div class='rt-label'>YES &mdash; class mismatch</div>
-                    <div class='rt-node rt-human'>human_review</div>
-                    <div class='rt-note'>phash_class_mismatch floor (round 21)</div>
-                  </div>
-                  <div class='rt-col'>
-                    <div class='rt-label'>NO &mdash; carry on</div>
-                    <div class='rt-branch'>severity_signal?</div>
-                    <div class='rt-row'>
-                      <div class='rt-col'>
-                        <div class='rt-label'>severe OR recurring</div>
-                        <div class='rt-node rt-human'>human_review</div>
-                        <div class='rt-note'>priority bumped by severity</div>
-                      </div>
-                      <div class='rt-col'>
-                        <div class='rt-label'>moderate</div>
-                        <div class='rt-node rt-standard'>standard</div>
-                        <div class='rt-note'>routine queue</div>
-                      </div>
-                      <div class='rt-col'>
-                        <div class='rt-label'>minor &amp; low confidence</div>
-                        <div class='rt-node rt-evi'>needs_more_evidence</div>
-                        <div class='rt-note'>request another photo</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class='rt-row'>
-              <div class='rt-branch rt-fallback'>LLM failed (timeout / ungrounded / unparseable)?</div>
-            </div>
-            <div class='rt-row'>
-              <div class='rt-col'>
-                <div class='rt-label'>YES</div>
-                <div class='rt-node rt-human'>fall back to rule tree verdict (no LLM)</div>
-                <div class='rt-note'>safety net; never the agent's call</div>
-              </div>
-            </div>
+          <p class='rt-sub'>Deterministic baseline. Every agent verdict is scored against the leaf this tree would have picked.</p>
+          <div class='rt-canvas'>
+            <svg viewBox='0 0 1100 820' xmlns='http://www.w3.org/2000/svg' class='rt-svg' preserveAspectRatio='xMidYMin meet'>
+              <style>
+                .rt-svg .n rect{fill:#fff;stroke:#334155;stroke-width:1.5;rx:8;ry:8}
+                .rt-svg .n text{font:600 13px -apple-system,Segoe UI,Roboto,sans-serif;fill:#111827}
+                .rt-svg .n.leaf rect{stroke-width:2}
+                .rt-svg .leaf text{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+                .rt-svg .edge{stroke:#334155;stroke-width:1.5;fill:none}
+                .rt-svg .edge-lbl{font:600 11px -apple-system,Segoe UI,Roboto,sans-serif;fill:#334155;text-anchor:middle}
+              </style>
+              <!-- Edges first so nodes draw on top -->
+              <path class='edge' d='M550,50 L550,100'/>
+              <path class='edge' d='M550,145 L220,205'/>
+              <path class='edge' d='M550,145 L880,205'/>
+              <text class='edge-lbl' x='360' y='180'>yes (same file)</text>
+              <text class='edge-lbl' x='740' y='180'>no (new photo)</text>
+
+              <path class='edge' d='M880,250 L640,310'/>
+              <path class='edge' d='M880,250 L1020,310'/>
+              <text class='edge-lbl' x='750' y='285'>yes</text>
+              <text class='edge-lbl' x='970' y='285'>no</text>
+
+              <path class='edge' d='M640,355 L400,415'/>
+              <path class='edge' d='M640,355 L640,415'/>
+              <path class='edge' d='M640,355 L880,415'/>
+              <text class='edge-lbl' x='510' y='390'>severe / recurring</text>
+              <text class='edge-lbl' x='640' y='390'>moderate</text>
+              <text class='edge-lbl' x='770' y='390'>minor + low conf</text>
+
+              <path class='edge' d='M550,520 L550,570'/>
+              <path class='edge' d='M550,615 L310,675'/>
+              <path class='edge' d='M550,615 L790,675'/>
+              <text class='edge-lbl' x='420' y='650'>yes (LLM failed)</text>
+              <text class='edge-lbl' x='680' y='650'>no (LLM returned)</text>
+
+              <!-- Root -->
+              <g class='n' transform='translate(450,10)'>
+                <rect width='200' height='40'/>
+                <text x='100' y='25' text-anchor='middle'>incoming hazard</text>
+              </g>
+
+              <!-- Level 1: sha256 match -->
+              <g class='n' transform='translate(420,100)'>
+                <rect width='260' height='45'/>
+                <text x='130' y='28' text-anchor='middle'>sha256 match in catalogue?</text>
+              </g>
+
+              <!-- Level 2 left leaf: known_image -->
+              <g class='n leaf' transform='translate(120,205)'>
+                <rect width='200' height='45'/>
+                <text x='100' y='28' text-anchor='middle'>known_image</text>
+              </g>
+
+              <!-- Level 2 right: phash branch -->
+              <g class='n' transform='translate(760,205)'>
+                <rect width='240' height='45'/>
+                <text x='120' y='28' text-anchor='middle'>phash class mismatch?</text>
+              </g>
+
+              <!-- Level 3 right-right leaf: human_review (phash floor) -->
+              <g class='n leaf' transform='translate(540,310)'>
+                <rect width='200' height='45'/>
+                <text x='100' y='28' text-anchor='middle'>human_review</text>
+              </g>
+
+              <!-- Level 3 right: severity branch -->
+              <g class='n' transform='translate(920,310)'>
+                <rect width='200' height='45'/>
+                <text x='100' y='28' text-anchor='middle'>severity_signal?</text>
+              </g>
+
+              <!-- Level 4 three leaves -->
+              <g class='n leaf' transform='translate(300,415)'>
+                <rect width='200' height='45'/>
+                <text x='100' y='28' text-anchor='middle'>human_review</text>
+              </g>
+              <g class='n leaf' transform='translate(540,415)'>
+                <rect width='200' height='45'/>
+                <text x='100' y='28' text-anchor='middle'>standard</text>
+              </g>
+              <g class='n leaf' transform='translate(780,415)'>
+                <rect width='200' height='45'/>
+                <text x='100' y='28' text-anchor='middle'>needs_more_evidence</text>
+              </g>
+
+              <!-- Level 5: LLM failure branch (applies to any leaf above) -->
+              <g class='n' transform='translate(420,475)'>
+                <rect width='260' height='45'/>
+                <text x='130' y='28' text-anchor='middle'>LLM failed?</text>
+              </g>
+              <g class='n leaf' transform='translate(210,675)'>
+                <rect width='200' height='45'/>
+                <text x='100' y='28' text-anchor='middle'>fall back to rule tree</text>
+              </g>
+              <g class='n leaf' transform='translate(690,675)'>
+                <rect width='200' height='45'/>
+                <text x='100' y='28' text-anchor='middle'>keep agent verdict</text>
+              </g>
+            </svg>
           </div>
         </div>
         """
@@ -4138,7 +4287,6 @@ def create_app() -> FastAPI:
             "<div class='d-empty'>Pick a case on the left.</div>"
             "</aside>"
             "</div></section>"
-            f"<section id='pane-timeline' class='tab-pane'>{timeline_html}</section>"
             f"<section id='pane-agentvalue' class='tab-pane'>{agent_value_html}</section>"
             f"<section id='pane-ruletree' class='tab-pane'>{rule_tree_html}</section>"
             f"<script>{script}</script>"
@@ -4237,20 +4385,29 @@ def create_app() -> FastAPI:
             **aggregates,
         }
 
+    _VALID_VERDICTS = {"agree", "disagree", "not_relevant"}
+
     @app.post("/agent_feedback/{hazard_id}")
     def post_agent_feedback(hazard_id: str, body: dict, request: Request) -> dict:
-        """Round 23 (4.11.2026): the worker's agree/override click on the
-        agent's verdict for one hazard. Writes one row to agent_feedback
+        """Round 23 (4.11.2026): the worker's three-state verdict on the
+        agent's call for one hazard. Writes one row to agent_feedback
         and returns the running tally for this hazard. Private: gated to
-        Tailscale / loopback, same as the digest page that calls it.
-        Body: {"agree": bool, "note": str?}.
+        Tailscale / loopback like the digest page that calls it.
+        Body: {"verdict": "agree" | "disagree" | "not_relevant",
+               "note": str?}.
+        For back-compat an older client that still sends {"agree": bool}
+        is accepted (true -> agree, false -> disagree).
         """
         if not _is_private_host(request):
             raise HTTPException(status_code=404, detail="not found")
-        try:
-            agree = bool(body.get("agree"))
-        except Exception:
-            raise HTTPException(status_code=400, detail="agree_required")
+        verdict = str(body.get("verdict") or "").strip().lower()
+        if not verdict:
+            # back-compat: {"agree": true/false}
+            if "agree" in body:
+                verdict = "agree" if bool(body.get("agree")) else "disagree"
+        if verdict not in _VALID_VERDICTS:
+            raise HTTPException(status_code=400,
+                                detail="verdict_must_be_agree_disagree_or_not_relevant")
         note = str(body.get("note") or "")[:400]
         import sqlite3 as _sqlite3
         import uuid as _uuid
@@ -4260,13 +4417,18 @@ def create_app() -> FastAPI:
         try:
             fid = "fb_" + _uuid.uuid4().hex[:12]
             con.execute(
-                "INSERT INTO agent_feedback (id, hazard_id, created_at, worker_id, agree, note) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (fid, hazard_id, time.time(), "", 1 if agree else 0, note),
+                "INSERT INTO agent_feedback (id, hazard_id, created_at, worker_id, agree, verdict, note) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (fid, hazard_id, time.time(), "", 1 if verdict == "agree" else 0, verdict, note),
             )
             con.commit()
             row = con.execute(
-                "SELECT SUM(agree) AS agree_n, COUNT(*) AS total FROM agent_feedback WHERE hazard_id = ?",
+                "SELECT "
+                "  SUM(CASE WHEN verdict = 'agree' THEN 1 ELSE 0 END) AS agree_n, "
+                "  SUM(CASE WHEN verdict = 'disagree' THEN 1 ELSE 0 END) AS disagree_n, "
+                "  SUM(CASE WHEN verdict = 'not_relevant' THEN 1 ELSE 0 END) AS nr_n, "
+                "  COUNT(*) AS total "
+                "FROM agent_feedback WHERE hazard_id = ?",
                 (hazard_id,),
             ).fetchone()
         finally:
@@ -4274,8 +4436,10 @@ def create_app() -> FastAPI:
         return {
             "id": fid,
             "hazard_id": hazard_id,
-            "agree": agree,
+            "verdict": verdict,
             "agree_total": int(row["agree_n"] or 0),
+            "disagree_total": int(row["disagree_n"] or 0),
+            "not_relevant_total": int(row["nr_n"] or 0),
             "feedback_total": int(row["total"] or 0),
         }
 
@@ -4283,8 +4447,8 @@ def create_app() -> FastAPI:
     def stats_feedback(request: Request, window_hours: int = 24) -> dict:
         """Round 23 (4.11.2026): aggregate of agent_feedback rows the
         /digest 'Agent value' tab shows - how many hazards the worker
-        clicked on, how many times he agreed vs overrode the agent, and
-        the list of overrides.
+        clicked on, how often each of the three verdicts fired, and the
+        case lists behind each verdict.
         """
         if not _is_private_host(request):
             raise HTTPException(status_code=404, detail="not found")
@@ -4299,7 +4463,7 @@ def create_app() -> FastAPI:
         cutoff = time.time() - hrs * 3600
         try:
             rows = con.execute(
-                "SELECT f.hazard_id, f.agree, f.note, f.created_at, "
+                "SELECT f.hazard_id, f.agree, f.verdict, f.note, f.created_at, "
                 "       h.class, h.agent_decision "
                 "FROM agent_feedback f "
                 "LEFT JOIN hazards h ON h.id = f.hazard_id "
@@ -4309,20 +4473,33 @@ def create_app() -> FastAPI:
             ).fetchall()
         finally:
             con.close()
-        agree = sum(1 for r in rows if r["agree"])
-        override = len(rows) - agree
-        overrides = [
-            {"hazard_id": r["hazard_id"], "class": r["class"],
-             "decision": r["agent_decision"], "note": r["note"]}
-            for r in rows if not r["agree"]
-        ]
+        def _verdict(r) -> str:
+            v = str(r["verdict"] or "").strip().lower() if "verdict" in r.keys() else ""
+            if v:
+                return v
+            return "agree" if r["agree"] else "disagree"
+        counters = {"agree": 0, "disagree": 0, "not_relevant": 0}
+        disagrees: list[dict] = []
+        not_relevant: list[dict] = []
+        for r in rows:
+            v = _verdict(r)
+            counters[v] = counters.get(v, 0) + 1
+            if v == "disagree":
+                disagrees.append({"hazard_id": r["hazard_id"], "class": r["class"],
+                                  "decision": r["agent_decision"], "note": r["note"]})
+            elif v == "not_relevant":
+                not_relevant.append({"hazard_id": r["hazard_id"], "class": r["class"],
+                                     "decision": r["agent_decision"], "note": r["note"]})
+        total = len(rows)
         return {
             "window_hours": hrs,
-            "total_feedback": len(rows),
-            "agree": agree,
-            "override": override,
-            "agreement_rate": round(100.0 * agree / len(rows), 1) if rows else 0.0,
-            "overrides": overrides,
+            "total_feedback": total,
+            "agree": counters["agree"],
+            "disagree": counters["disagree"],
+            "not_relevant": counters["not_relevant"],
+            "agreement_rate": round(100.0 * counters["agree"] / total, 1) if total else 0.0,
+            "disagrees": disagrees,
+            "not_relevants": not_relevant,
         }
 
     @app.get("/stats/kpi")

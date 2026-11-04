@@ -694,6 +694,11 @@ class Database:
         # so SELECT COUNT(*) WHERE json_extract(agent_value_json, '$.changed_rule_hint') = 1
         # answers "how often did the LLM change the rule tree's verdict" in one hop.
         ("hazards", "agent_value_json", "TEXT NOT NULL DEFAULT ''"),
+        # Round 23 (4.11.2026): the worker's feedback is 3-state (agree /
+        # disagree / not_relevant) not a boolean; add the text column
+        # that carries that verdict, keep the old `agree` column for
+        # back-compat.
+        ("agent_feedback", "verdict", "TEXT NOT NULL DEFAULT ''"),
     )
 
     def _migrate_columns(self) -> None:
