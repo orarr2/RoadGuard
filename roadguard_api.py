@@ -3512,7 +3512,7 @@ def create_app() -> FastAPI:
         rows = con.execute(
             "SELECT id, class, confidence, agent_decision, priority, agent_rationale, "
             "       reported_at, location, status, cited_sources_json, agent_trace_json, "
-            "       agent_value_json "
+            "       agent_value_json, bboxes_json "
             "FROM hazards WHERE reported_at >= ? ORDER BY reported_at DESC",
             (cutoff_epoch,),
         ).fetchall()
@@ -3636,6 +3636,7 @@ def create_app() -> FastAPI:
                 "per_agent_justified": per_agent,
                 "hazard_class": (r["class"] or "").upper(),
                 "score": score,
+                "bboxes": (lambda: json.loads(r["bboxes_json"] or "[]") if r["bboxes_json"] else [])(),
             })
         con.close()
         cases_json = json.dumps(cases)
@@ -3924,7 +3925,14 @@ def create_app() -> FastAPI:
         /* Detail panel */
         .detail{position:sticky;top:110px;background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;max-height:calc(100vh - 130px);overflow-y:auto}
         .detail h3{margin:0 0 8px;font-size:15px;letter-spacing:-0.01em}
-        .detail .d-img{width:100%;max-height:280px;object-fit:cover;border-radius:8px;background:#f1f5f9;margin-bottom:12px;display:block}
+        .detail .d-img{width:100%;max-height:280px;object-fit:cover;border-radius:8px;background:#f1f5f9;display:block}
+        .detail .d-img-wrap{position:relative;margin-bottom:12px;border-radius:8px;overflow:hidden}
+        .detail .d-bbox{position:absolute;border:2px solid #22d3ee;box-shadow:0 0 0 1px rgba(0,0,0,0.4);box-sizing:border-box;pointer-events:none}
+        .detail .d-bbox.d-bbox-D00{border-color:#f59e0b}
+        .detail .d-bbox.d-bbox-D10{border-color:#a855f7}
+        .detail .d-bbox.d-bbox-D20{border-color:#ef4444}
+        .detail .d-bbox.d-bbox-D40{border-color:#22d3ee}
+        .detail .d-bbox-lbl{position:absolute;top:-18px;left:0;background:rgba(17,24,39,0.85);color:#fff;font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 5px;border-radius:3px;white-space:nowrap}
         .detail .d-row{display:flex;justify-content:space-between;gap:12px;margin:6px 0;font-size:13px}
         .detail .d-row b{color:#6b7280;font-weight:500}
         .detail .d-rat{background:#f8fafc;border-radius:6px;padding:10px;font-size:13px;line-height:1.5;margin:8px 0}
@@ -4043,12 +4051,27 @@ def create_app() -> FastAPI:
           rows.forEach(r => r.classList.toggle('sel', +r.dataset.idx === idx));
           const c = CASES[idx];
           if (!c) { detail.innerHTML = '<div class="d-empty">Pick a case on the left.</div>'; return; }
-          // Round 23 iter 4 (4.11.2026): always try the image URL and
-          // hide the <img> on error - the file may be written seconds
-          // after the hazard row is created, so a 404 at page load is
-          // temporary; the next detail-pane reopen will see it.
+          // Round 23 iter 6 (4.11.2026): always try the image URL and
+          // overlay YOLO bboxes on top of the photo so the worker sees
+          // exactly where the agents said the hazard was. The overlay
+          // is positioned by percentages against the image's natural
+          // size, so it scales with the <img> on resize.
           const imgPath = c.image || (urlBase() + '/images/' + c.id);
-          const img = `<img class="d-img" src="${imgPath}" alt="citizen photo" onerror="this.style.display='none'; const p=document.createElement('div'); p.className='d-img'; p.style.cssText='display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:12px;height:160px'; p.textContent='(photo not yet written)'; this.parentNode.insertBefore(p, this)">`;
+          const bboxes = c.bboxes || [];
+          const bboxDataAttr = bboxes.length
+            ? ' data-bboxes="' + encodeURIComponent(JSON.stringify(bboxes)) + '"'
+            : '';
+          const img = (
+            '<div class="d-img-wrap"' + bboxDataAttr + '>' +
+            '<img class="d-img" src="' + imgPath + '" alt="citizen photo" ' +
+            'onload="window.__rgDrawBoxes && window.__rgDrawBoxes(this)" ' +
+            'onerror="this.style.display=\'none\'; const p=document.createElement(\'div\'); ' +
+                "p.className='d-img'; " +
+                "p.style.cssText='display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:12px;height:160px'; " +
+                "p.textContent='(photo not yet written)'; " +
+                'this.parentNode.insertBefore(p, this)">' +
+            '</div>'
+          );
           const cited = c.cited && c.cited.length ? c.cited.map(s => `<code>${s}</code>`).join(', ') : '<i>none cited</i>';
           const decCls = c.decision === 'urgent' ? 'urgent' : (c.decision === 'human_review' ? 'human' : (c.decision === 'standard' ? 'standard' : 'evi'));
           detail.innerHTML = `
@@ -4071,6 +4094,38 @@ def create_app() -> FastAPI:
         // HTTP non-2xx flashes the button red and does NOT update the
         // 'your vote' pill, so the worker sees his click did NOT save.
         function urlBase() { return location.pathname.replace(/\\/digest.*/, ''); }
+        // Round 23 iter 6 (4.11.2026): draw YOLO bboxes on the detail-
+        // pane image. bboxes format: [[x1, y1, x2, y2, class, conf], ...]
+        // in the image's own pixel space; the overlay uses percentages of
+        // naturalWidth / naturalHeight so it scales with the <img>.
+        window.__rgDrawBoxes = function(imgEl) {
+          try {
+            const wrap = imgEl.closest('.d-img-wrap');
+            if (!wrap) return;
+            wrap.querySelectorAll('.d-bbox').forEach(b => b.remove());
+            const raw = wrap.dataset.bboxes;
+            if (!raw) return;
+            const bboxes = JSON.parse(decodeURIComponent(raw));
+            const w = imgEl.naturalWidth, h = imgEl.naturalHeight;
+            if (!w || !h) return;
+            bboxes.forEach((b, i) => {
+              const [x1, y1, x2, y2, cls, conf] = b;
+              const left = (100 * x1 / w) + '%';
+              const top = (100 * y1 / h) + '%';
+              const width = (100 * (x2 - x1) / w) + '%';
+              const height = (100 * (y2 - y1) / h) + '%';
+              const div = document.createElement('div');
+              div.className = 'd-bbox d-bbox-' + (cls || '').replace(/[^A-Za-z0-9]/g, '');
+              div.style.cssText = 'left:' + left + ';top:' + top +
+                ';width:' + width + ';height:' + height;
+              const lbl = document.createElement('div');
+              lbl.className = 'd-bbox-lbl';
+              lbl.textContent = (cls || '?') + ' ' + (conf ? Number(conf).toFixed(2) : '');
+              div.appendChild(lbl);
+              wrap.appendChild(div);
+            });
+          } catch (e) { /* silent */ }
+        };
         const ACTIVE_CLASSES = ['active-agree','active-disagree','active-nr','active-not_relevant','active-ok','active-too_low','active-too_high'];
         // Round 23 iter 5 (4.11.2026): mark the verdict per (hazard, kind)
         // axis so hazard feedback and priority feedback are visible

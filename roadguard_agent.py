@@ -9424,8 +9424,13 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
 MAX_GROUNDING_RETRIES = 1  # one retry; the LLM rarely learns from more
 # policy.yaml decision.needs_more_evidence.max_requests_per_hazard
 MAX_EVIDENCE_REQUESTS_PER_HAZARD = 1
-# Roadmap section 8(b): ReAct in Decision only, hops <= 2.
-DECISION_REACT_MAX_HOPS = 2
+# Round 25 (4.11.2026) P1 (owner's analysis of the r22 run): Decision
+# ReAct is now capped at ONE tool-call hop, not two. Previously the
+# model could call two tools before committing to a verdict; in the
+# r22 log that produced 3 LLM calls (hop_1, hop_2, final) and 236 s
+# on a single case. One hop is enough for the lookup the model needs;
+# a second hop was almost never grounded in the first result anyway.
+DECISION_REACT_MAX_HOPS = 1
 
 _VALID_ACTIONS = {"urgent", "standard", "needs_more_evidence", "human_review", "known_image"}
 # IDX 18: the supervisor reads the assessment as model text; bounded and
@@ -11484,7 +11489,93 @@ def decision_node(state: RoadGuardState) -> dict:
             }
         decision["missing_evidence"] = [evidence_request["missing_field"]]
 
+    # Round 25 (4.11.2026) P1 - RAG enforcement. When the RAG retriever
+    # flagged insufficient_coverage, the standards do NOT answer the
+    # Decision questions; a verdict of standard is a leap the sources
+    # do not support. The owner's rule: "אם חסר מידע קריטי, Decision
+    # לא ישלים אותו באמצעות ניחוש. הוא יבחר בין בקשת ראיות נוספות
+    # לבין בדיקה אנושית". A standard verdict on insufficient_coverage
+    # is upgraded to needs_more_evidence (or human_review if the
+    # severity signal is severe).
+    rag_override: dict | None = None
+    research_detail = state.get("research_coverage_detail") or {}
+    if (
+        research_detail.get("sufficiency") == "insufficient_coverage"
+        and decision.get("action") == "standard"
+        and source == "llm_react"
+        and not state.get("dataset_match")
+    ):
+        severity = str(((state.get("hazard_profile") or {}).get("severity_signal")) or "").lower()
+        upgrade_to = "human_review" if severity == "severe" else "needs_more_evidence"
+        rag_override = {
+            "pre_override_action": decision.get("action"),
+            "pre_override_priority": decision.get("priority"),
+            "reason": "rag_insufficient_coverage_standard_leap",
+            "missing": list(research_detail.get("missing") or [])[:6],
+            "upgrade_to": upgrade_to,
+        }
+        decision = {
+            **decision,
+            "action": upgrade_to,
+            "priority": max(int(decision.get("priority") or 0), 40 if upgrade_to == "needs_more_evidence" else 55),
+            "rationale": (
+                f"RAG floor: the retrieved standards did not answer "
+                f"{', '.join(rag_override['missing']) or 'the decision questions'}; "
+                f"standard is a leap. {upgrade_to} picked by severity={severity or 'n/a'}."
+            )[:500],
+            "floor_reason": "rag_insufficient_coverage",
+            "floor_trigger": ",".join(rag_override["missing"]) or "insufficient_coverage",
+        }
+        source = "rule_based"
+
+    # Round 25 (4.11.2026) P1 - Supervisor consistency enforcement. If
+    # the Supervisor flagged a safety concern and set force_action=
+    # "human_review", the Decision LLM must not land on standard /
+    # needs_more_evidence. The owner's words: "Supervisor צריך לאכוף
+    # את גבולות ההחלטה. ה-LLM רשאי להציע החלטה, אבל לא לעקוף תנאי
+    # בטיחות". The upgrade runs even when AGENT_SUPERVISOR_ROUTING is
+    # off, since the LLM may have reasoned the ambiguity away without
+    # grounding; the deterministic rule tree wins on safety.
+    supervisor_plan = state.get("supervisor_plan") or {}
+    sup_force = str((supervisor_plan or {}).get("force_action") or "").strip().lower()
+    supervisor_override: dict | None = None
+    if sup_force == "human_review" and decision.get("action") not in {"human_review", "urgent"}:
+        supervisor_override = {
+            "pre_override_action": decision.get("action"),
+            "pre_override_priority": decision.get("priority"),
+            "reason": "supervisor_force_action_human_review",
+            "note": str((supervisor_plan or {}).get("note") or "")[:240],
+        }
+        decision = {
+            **decision,
+            "action": "human_review",
+            "priority": max(int(decision.get("priority") or 0), 50),
+            "rationale": (
+                f"supervisor safety floor: {supervisor_override['note'] or 'pipeline_concern raised'}; "
+                f"model proposed {supervisor_override['pre_override_action']} but could not clear the concern"
+            )[:500],
+            "floor_reason": "supervisor_force_action",
+            "floor_trigger": supervisor_override["note"],
+        }
+        source = "rule_based"
+
     trace_content = {**decision, "source": source}
+    if supervisor_override is not None:
+        trace_content["floor_applied"] = True
+        trace_content["overridden_llm_verdict"] = {
+            "action": supervisor_override["pre_override_action"],
+            "priority": supervisor_override["pre_override_priority"],
+            "rationale": "",
+            "cited_sources": [],
+        }
+    elif rag_override is not None:
+        trace_content["floor_applied"] = True
+        trace_content["overridden_llm_verdict"] = {
+            "action": rag_override["pre_override_action"],
+            "priority": rag_override["pre_override_priority"],
+            "rationale": "",
+            "cited_sources": [],
+        }
     if fallback_reason:
         # Round 10 (1.11.2026): the reason was on the state and in the log,
         # not in the stored trace; the formatter already prints it.
