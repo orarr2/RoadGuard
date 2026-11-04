@@ -4055,7 +4055,10 @@ def create_app() -> FastAPI:
           // overlay YOLO bboxes on top of the photo so the worker sees
           // exactly where the agents said the hazard was. The overlay
           // is positioned by percentages against the image's natural
-          // size, so it scales with the <img> on resize.
+          // size, so it scales with the <img> on resize. The onload /
+          // onerror handlers use global helpers (__rgDrawBoxes /
+          // __rgImgErr) to keep the quoting simple inside this inline
+          // template.
           const imgPath = c.image || (urlBase() + '/images/' + c.id);
           const bboxes = c.bboxes || [];
           const bboxDataAttr = bboxes.length
@@ -4065,11 +4068,7 @@ def create_app() -> FastAPI:
             '<div class="d-img-wrap"' + bboxDataAttr + '>' +
             '<img class="d-img" src="' + imgPath + '" alt="citizen photo" ' +
             'onload="window.__rgDrawBoxes && window.__rgDrawBoxes(this)" ' +
-            'onerror="this.style.display=\'none\'; const p=document.createElement(\'div\'); ' +
-                "p.className='d-img'; " +
-                "p.style.cssText='display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:12px;height:160px'; " +
-                "p.textContent='(photo not yet written)'; " +
-                'this.parentNode.insertBefore(p, this)">' +
+            'onerror="window.__rgImgErr && window.__rgImgErr(this)">' +
             '</div>'
           );
           const cited = c.cited && c.cited.length ? c.cited.map(s => `<code>${s}</code>`).join(', ') : '<i>none cited</i>';
@@ -4098,6 +4097,16 @@ def create_app() -> FastAPI:
         // pane image. bboxes format: [[x1, y1, x2, y2, class, conf], ...]
         // in the image's own pixel space; the overlay uses percentages of
         // naturalWidth / naturalHeight so it scales with the <img>.
+        window.__rgImgErr = function(imgEl) {
+          try {
+            imgEl.style.display = 'none';
+            const p = document.createElement('div');
+            p.className = 'd-img';
+            p.style.cssText = 'display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:12px;height:160px';
+            p.textContent = '(photo not yet written)';
+            if (imgEl.parentNode) imgEl.parentNode.insertBefore(p, imgEl);
+          } catch (e) { /* silent */ }
+        };
         window.__rgDrawBoxes = function(imgEl) {
           try {
             const wrap = imgEl.closest('.d-img-wrap');
