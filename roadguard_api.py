@@ -2739,22 +2739,24 @@ def _compute_ds_metrics_block(
         if not isinstance(av, dict):
             av = {}
 
-        # Uplift: rule_tree == final?
-        rt_final = av.get("rule_tree") == av.get("final") and av.get("final")
-        if rt_final:
+        # Uplift: rule_tree_action == final_action? The JSON uses the
+        # *_action suffix; the trace file's 'rule_tree=X' is a render of
+        # these same fields, not a separate schema.
+        rt_action = av.get("rule_tree_action") or av.get("rule_tree")
+        final_action = av.get("final_action") or av.get("final")
+        llm_action = av.get("llm_proposed_action") or av.get("llm")
+        if rt_action and final_action and rt_action == final_action:
             rule_tree_eq_final += 1
-        flags = str(av.get("flags") or "")
-        had_floor = "floor:" in flags or av.get("floor_applied")
+        had_floor = bool(av.get("floor_applied")) or ("floor:" in str(av.get("flags") or ""))
         if had_floor:
             floor_fire += 1
-        llm_val = av.get("llm")
         llm_moved = (
-            isinstance(llm_val, str) and llm_val not in ("", "-")
-            and av.get("rule_tree") and llm_val != av.get("rule_tree")
+            isinstance(llm_action, str) and llm_action not in ("", "-", "none")
+            and rt_action and llm_action != rt_action
         )
         if llm_moved:
             llm_flip += 1
-            if not had_floor and llm_val == av.get("final"):
+            if not had_floor and llm_action == final_action:
                 llm_clean_wins += 1
 
         # Cost.
@@ -2859,12 +2861,12 @@ def _compute_ds_metrics_block(
             av = {}
         if not isinstance(av, dict):
             continue
-        flags = str(av.get("flags") or "")
-        if "floor:" in flags or av.get("floor_applied"):
+        if bool(av.get("floor_applied")) or ("floor:" in str(av.get("flags") or "")):
             floor_fired_hids.add(hid)
-        llm_val = av.get("llm")
-        if (isinstance(llm_val, str) and llm_val not in ("", "-")
-                and av.get("rule_tree") and llm_val != av.get("rule_tree")):
+        llm_a = av.get("llm_proposed_action") or av.get("llm")
+        rt_a = av.get("rule_tree_action") or av.get("rule_tree")
+        if (isinstance(llm_a, str) and llm_a not in ("", "-", "none")
+                and rt_a and llm_a != rt_a):
             llm_flipped_hids.add(hid)
     fp_intersect = [hid for hid in floor_fired_hids if hid in fb_hazard]
     sf_precision = _rate(

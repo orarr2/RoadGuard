@@ -248,3 +248,31 @@ def test_grounding_score_citation_missing_from_passages():
     out = rg._compute_ds_metrics_block(rows, [])
     assert out["ds_metrics"]["grounding_n"] == 1
     assert out["ds_metrics"]["grounding_score_pct"] == 0.0
+
+
+# ---------------------------------------------------------------- real schema
+
+def test_real_schema_action_suffix_keys_resolve():
+    """The actual agent_value_json in the DB uses *_action suffixes
+    (rule_tree_action, final_action, llm_proposed_action), not the
+    trace-render short names. The compute must read both."""
+    rows = [
+        _hazard("h1", "human_review", av={
+            "rule_tree_action": "human_review",
+            "final_action": "human_review",
+            "llm_proposed_action": "human_review",
+            "floor_applied": False,
+        }),
+        _hazard("h2", "human_review", av={
+            "rule_tree_action": "standard",
+            "final_action": "human_review",
+            "llm_proposed_action": "standard",
+            "floor_applied": True,
+            "floor_reason": "phash_class_mismatch",
+        }),
+    ]
+    out = rg._compute_ds_metrics_block(rows, [])
+    assert out["uplift"]["rule_tree_eq_final_rate"] == 50.0
+    assert out["uplift"]["floor_fire_rate"] == 50.0
+    # LLM did not move the rule tree on either case.
+    assert out["uplift"]["llm_flip_rate"] == 0.0
