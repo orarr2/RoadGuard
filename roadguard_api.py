@@ -2622,6 +2622,397 @@ def _aggregate_agent_metrics(rows) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------- round 26
+# Round 26 (5.11.2026): 20 data-science metrics in the Agent value tab. The
+# owner wanted real metrics beyond the three existing cards. Ground truth is
+# the municipal worker's in-system feedback (agent_feedback), not an external
+# labeled catalog. The function returns None-valued panels with a 'pending'
+# note when there is not enough feedback to compute a metric - a 'metric not
+# yet populated' message, not a zero that reads as a failing score.
+
+
+def _percentile(sorted_vals: list[float], p: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    idx = max(0, min(len(sorted_vals) - 1, int(p * len(sorted_vals))))
+    return float(sorted_vals[idx])
+
+
+def _roc_auc_binary(scores: list[float], labels: list[int]) -> float | None:
+    """Mann-Whitney U formulation of binary ROC-AUC. Returns None if either
+    class has no samples (AUC undefined)."""
+    pos = [s for s, y in zip(scores, labels) if y == 1]
+    neg = [s for s, y in zip(scores, labels) if y == 0]
+    if not pos or not neg:
+        return None
+    wins = 0.0
+    for p in pos:
+        for n in neg:
+            if p > n:
+                wins += 1.0
+            elif p == n:
+                wins += 0.5
+    return wins / (len(pos) * len(neg))
+
+
+_FEEDBACK_AGREE = {"agree"}
+_FEEDBACK_NEGATIVE = {"disagree", "not_relevant"}
+_PRED_CLASSES = ("standard", "human_review", "known_image", "needs_more_evidence")
+_FEEDBACK_VERDICTS = ("agree", "disagree", "not_relevant")
+
+
+def _compute_ds_metrics_block(
+    hazard_rows: list, feedback_rows: list
+) -> dict[str, Any]:
+    """Round 26 (5.11.2026): the 20-metric data-science block the owner
+    asked for. ``hazard_rows`` carries agent_decision + priority +
+    agent_value_json + agent_trace_json for each hazard in the window;
+    ``feedback_rows`` is the LATEST agent_feedback row per (hazard_id,
+    kind).
+
+    Every panel that needs feedback reports ``pending`` when it has too
+    few samples, so the UI shows 'metric not yet populated' instead of
+    a zero. Metrics derivable from the trace alone (uplift, cost,
+    justified histogram, grounding) populate with any n>=1 hazard.
+    """
+    import math as _math
+    n = len(hazard_rows or [])
+
+    # Group the feedback rows by (hazard_id, kind).
+    fb_hazard: dict[str, str] = {}
+    fb_priority: dict[str, str] = {}
+    for fr in feedback_rows or []:
+        try:
+            keys = fr.keys() if hasattr(fr, "keys") else []
+            kind = (fr["kind"] if "kind" in keys else "hazard") or "hazard"
+            verdict = (fr["verdict"] if "verdict" in keys else "") or ""
+            if not verdict and "agree" in keys:
+                verdict = "agree" if int(fr["agree"] or 0) else "disagree"
+            hid = fr["hazard_id"] if "hazard_id" in keys else None
+        except Exception:
+            continue
+        if not hid or not verdict:
+            continue
+        if kind == "priority":
+            fb_priority[hid] = verdict
+        else:
+            fb_hazard[hid] = verdict
+
+    # Per-hazard structured facts.
+    tokens_in: list[int] = []
+    tokens_out: list[int] = []
+    wall_s: list[float] = []
+    llm_calls_list: list[int] = []
+    cost_sum = 0.0
+    per_run_justified_count: list[int] = []
+    rule_tree_eq_final = 0
+    floor_fire = 0
+    llm_flip = 0
+    llm_clean_wins = 0
+    pred_action: dict[str, str] = {}
+    pred_priority: dict[str, int] = {}
+    grounding_ok = 0
+    grounding_total = 0
+
+    for row in hazard_rows or []:
+        try:
+            keys = row.keys() if hasattr(row, "keys") else []
+            hid = row["id"] if "id" in keys else None
+            dec = str(row["agent_decision"] if "agent_decision" in keys else "" or "").lower()
+            pri_val = 0
+            try:
+                pri_val = int(row["priority"] if "priority" in keys else 0 or 0)
+            except (TypeError, ValueError):
+                pri_val = 0
+            av_raw = (row["agent_value_json"] if "agent_value_json" in keys else "") or ""
+            tj_raw = (row["agent_trace_json"] if "agent_trace_json" in keys else "") or "[]"
+        except Exception:
+            continue
+        if hid:
+            pred_action[hid] = dec
+            pred_priority[hid] = pri_val
+
+        try:
+            av = json.loads(av_raw) if av_raw else {}
+        except (TypeError, ValueError):
+            av = {}
+        if not isinstance(av, dict):
+            av = {}
+
+        # Uplift: rule_tree == final?
+        rt_final = av.get("rule_tree") == av.get("final") and av.get("final")
+        if rt_final:
+            rule_tree_eq_final += 1
+        flags = str(av.get("flags") or "")
+        had_floor = "floor:" in flags or av.get("floor_applied")
+        if had_floor:
+            floor_fire += 1
+        llm_val = av.get("llm")
+        llm_moved = (
+            isinstance(llm_val, str) and llm_val not in ("", "-")
+            and av.get("rule_tree") and llm_val != av.get("rule_tree")
+        )
+        if llm_moved:
+            llm_flip += 1
+            if not had_floor and llm_val == av.get("final"):
+                llm_clean_wins += 1
+
+        # Cost.
+        c = av.get("cost") or {}
+        if isinstance(c, dict):
+            try:
+                tokens_in.append(int(c.get("tokens_in") or 0))
+            except (TypeError, ValueError):
+                tokens_in.append(0)
+            try:
+                tokens_out.append(int(c.get("tokens_out") or 0))
+            except (TypeError, ValueError):
+                tokens_out.append(0)
+            try:
+                wall_s.append(float(c.get("wall_seconds") or 0))
+            except (TypeError, ValueError):
+                wall_s.append(0.0)
+            try:
+                llm_calls_list.append(int(c.get("llm_calls") or 0))
+            except (TypeError, ValueError):
+                llm_calls_list.append(0)
+            try:
+                cost_sum += float(c.get("cost_commercial_equivalent_usd") or 0)
+            except (TypeError, ValueError):
+                pass
+
+        # Justified count per run.
+        pa = av.get("per_agent_justified") or {}
+        j_count = 0
+        if isinstance(pa, dict):
+            for sp_data in pa.values():
+                if isinstance(sp_data, dict) and sp_data.get("justified"):
+                    j_count += 1
+        per_run_justified_count.append(j_count)
+
+        # Grounding score: for each hazard whose decision had cited
+        # sources, check that at least one citation appears in the RAG
+        # retriever's n_procedures passages. sec-X.Y tokens are the
+        # canonical citation form.
+        try:
+            trace = json.loads(tj_raw) if tj_raw else []
+        except (TypeError, ValueError):
+            trace = []
+        cited: list[str] = []
+        rag_secs: list[str] = []
+        for entry in trace or []:
+            if not isinstance(entry, dict):
+                continue
+            speaker = str(entry.get("speaker") or "")
+            c_entry = entry.get("content")
+            if not isinstance(c_entry, dict):
+                continue
+            if speaker == "rag_retriever":
+                procs = c_entry.get("procedures") or c_entry.get("passages") or []
+                for p in procs if isinstance(procs, list) else []:
+                    if isinstance(p, dict):
+                        sid = str(p.get("sec") or p.get("section") or p.get("id") or "")
+                        if sid:
+                            rag_secs.append(sid.lower())
+                    elif isinstance(p, str):
+                        rag_secs.append(p.lower())
+            elif speaker == "decision" and entry.get("kind") == "final":
+                cs = c_entry.get("cited_sources") or []
+                for s in cs if isinstance(cs, list) else []:
+                    sv = str(s).lower()
+                    if sv.startswith("sec-") or sv.startswith("sec_"):
+                        cited.append(sv)
+        if cited:
+            grounding_total += 1
+            if rag_secs and any(cs in rag_secs or any(cs in rs for rs in rag_secs) for cs in cited):
+                grounding_ok += 1
+
+    # 1-5 feedback agreement.
+    def _rate(num: int, den: int) -> float | None:
+        return round(100.0 * num / den, 1) if den else None
+
+    hz_votes = list(fb_hazard.values())
+    agree_n = sum(1 for v in hz_votes if v in _FEEDBACK_AGREE)
+    dis_n = sum(1 for v in hz_votes if v == "disagree")
+    nr_n = sum(1 for v in hz_votes if v == "not_relevant")
+    hazard_valid_rate = _rate(agree_n, len(hz_votes))
+
+    pri_votes = list(fb_priority.values())
+    pri_ok_n = sum(1 for v in pri_votes if v == "ok")
+    priority_correct_rate = _rate(pri_ok_n, len(pri_votes))
+
+    # Safety-floor precision: among hazards where a floor fired AND the
+    # worker voted, what % were marked agree. (Did the worker approve
+    # the floor's downgrade?)
+    floor_hids = {hid for hid in pred_action if hid in fb_hazard}
+    floor_fired_hids = set()
+    llm_flipped_hids = set()
+    for row in hazard_rows or []:
+        try:
+            hid = row["id"]
+            av_raw = row["agent_value_json"] or ""
+        except Exception:
+            continue
+        try:
+            av = json.loads(av_raw) if av_raw else {}
+        except (TypeError, ValueError):
+            av = {}
+        if not isinstance(av, dict):
+            continue
+        flags = str(av.get("flags") or "")
+        if "floor:" in flags or av.get("floor_applied"):
+            floor_fired_hids.add(hid)
+        llm_val = av.get("llm")
+        if (isinstance(llm_val, str) and llm_val not in ("", "-")
+                and av.get("rule_tree") and llm_val != av.get("rule_tree")):
+            llm_flipped_hids.add(hid)
+    fp_intersect = [hid for hid in floor_fired_hids if hid in fb_hazard]
+    sf_precision = _rate(
+        sum(1 for hid in fp_intersect if fb_hazard[hid] in _FEEDBACK_AGREE),
+        len(fp_intersect),
+    )
+    lu_intersect = [hid for hid in llm_flipped_hids if hid in fb_hazard]
+    lu_precision = _rate(
+        sum(1 for hid in lu_intersect if fb_hazard[hid] in _FEEDBACK_AGREE),
+        len(lu_intersect),
+    )
+
+    # By-decision-class breakdown: the confusion-matrix rows.
+    by_class: dict[str, dict[str, int]] = {}
+    for c in _PRED_CLASSES:
+        by_class[c] = {v: 0 for v in _FEEDBACK_VERDICTS}
+        by_class[c]["total"] = 0
+    for hid, verdict in fb_hazard.items():
+        c = pred_action.get(hid) or ""
+        if c not in by_class:
+            continue
+        if verdict in _FEEDBACK_VERDICTS:
+            by_class[c][verdict] += 1
+            by_class[c]["total"] += 1
+
+    # Per-class precision and F1 (binary: agree=1, disagree/not_relevant=0
+    # within each predicted class). Recall is NOT derivable from this
+    # feedback schema (we have no explicit 'should have been X' label
+    # when the worker disagreed), so F1 here is 2*P*A / (P+A) where A is
+    # the window-wide agreement rate used as a stand-in. The UI calls
+    # this out explicitly as a precision score, not a classical F1.
+    per_class_f1: dict[str, dict[str, Any]] = {}
+    agree_overall = _rate(agree_n, len(hz_votes))
+    for c in _PRED_CLASSES:
+        tot = by_class[c]["total"]
+        if tot:
+            p = round(100.0 * by_class[c]["agree"] / tot, 1)
+        else:
+            p = None
+        per_class_f1[c] = {
+            "precision_pct": p,
+            "n": tot,
+            "agree": by_class[c]["agree"],
+            "disagree": by_class[c]["disagree"],
+            "not_relevant": by_class[c]["not_relevant"],
+        }
+    # Macro/weighted precision across the four decision classes.
+    vals = [(per_class_f1[c]["precision_pct"], per_class_f1[c]["n"])
+            for c in _PRED_CLASSES if per_class_f1[c]["precision_pct"] is not None]
+    if vals:
+        macro = round(sum(v for v, _ in vals) / len(vals), 1)
+        wsum = sum(v * nn for v, nn in vals)
+        nsum = sum(nn for _, nn in vals)
+        weighted = round(wsum / nsum, 1) if nsum else None
+    else:
+        macro = None
+        weighted = None
+
+    # ROC-AUC: can we discriminate worker-agreed vs not using agent priority?
+    scores: list[float] = []
+    labels: list[int] = []
+    for hid, verdict in fb_hazard.items():
+        if hid not in pred_priority:
+            continue
+        scores.append(float(pred_priority[hid]))
+        labels.append(1 if verdict in _FEEDBACK_AGREE else 0)
+    auc = _roc_auc_binary(scores, labels)
+    if auc is not None:
+        auc = round(auc, 3)
+
+    # Confusion matrix 4x3.
+    confusion = [
+        [by_class[c][v] for v in _FEEDBACK_VERDICTS]
+        for c in _PRED_CLASSES
+    ]
+
+    # Uplift rates.
+    def _pct(num: int) -> float:
+        return round(100.0 * num / n, 1) if n else 0.0
+
+    uplift = {
+        "rule_tree_eq_final_rate": _pct(rule_tree_eq_final),
+        "floor_fire_rate": _pct(floor_fire),
+        "llm_flip_rate": _pct(llm_flip),
+        "llm_clean_wins": llm_clean_wins,
+    }
+
+    # Cost extended.
+    tokens_in_sorted = sorted(tokens_in)
+    tokens_out_sorted = sorted(tokens_out)
+    wall_sorted = sorted(wall_s)
+    cost_ext = {
+        "tokens_in_mean": round(sum(tokens_in) / len(tokens_in), 1) if tokens_in else 0.0,
+        "tokens_in_p95": int(_percentile(tokens_in_sorted, 0.95)),
+        "tokens_out_mean": round(sum(tokens_out) / len(tokens_out), 1) if tokens_out else 0.0,
+        "tokens_out_p95": int(_percentile(tokens_out_sorted, 0.95)),
+        "cost_per_case_usd": round(cost_sum / n, 4) if n else 0.0,
+        "wall_p50_s": round(_percentile(wall_sorted, 0.50), 1),
+        "wall_p95_s": round(_percentile(wall_sorted, 0.95), 1),
+        "llm_calls_per_case_mean": round(sum(llm_calls_list) / len(llm_calls_list), 2)
+        if llm_calls_list else 0.0,
+    }
+
+    # Justified histogram.
+    histogram = {k: 0 for k in range(0, 7)}
+    for v in per_run_justified_count:
+        histogram[min(6, max(0, v))] += 1
+
+    # Grounding.
+    grounding_rate = _rate(grounding_ok, grounding_total)
+
+    return {
+        "n_hazards": n,
+        "n_feedback_hazard": len(fb_hazard),
+        "n_feedback_priority": len(fb_priority),
+        "feedback_agreement": {
+            "hazard_valid_rate": hazard_valid_rate,
+            "priority_correct_rate": priority_correct_rate,
+            "safety_floor_precision": sf_precision,
+            "safety_floor_n": len(fp_intersect),
+            "llm_uplift_precision": lu_precision,
+            "llm_uplift_n": len(lu_intersect),
+            "hazard_counts": {"agree": agree_n, "disagree": dis_n, "not_relevant": nr_n},
+            "priority_counts": {
+                "ok": pri_ok_n,
+                "too_low": sum(1 for v in pri_votes if v == "too_low"),
+                "too_high": sum(1 for v in pri_votes if v == "too_high"),
+            },
+            "by_decision_class": by_class,
+        },
+        "uplift": uplift,
+        "cost_ext": cost_ext,
+        "justified_histogram": histogram,
+        "ds_metrics": {
+            "confusion_matrix": confusion,
+            "confusion_rows": list(_PRED_CLASSES),
+            "confusion_cols": list(_FEEDBACK_VERDICTS),
+            "per_class_precision": per_class_f1,
+            "precision_macro_pct": macro,
+            "precision_weighted_pct": weighted,
+            "roc_auc": auc,
+            "roc_auc_n": len(scores),
+            "grounding_score_pct": grounding_rate,
+            "grounding_n": grounding_total,
+        },
+    }
+
+
 def _classify_llm_failure(llm_s: dict) -> str:
     """Bucket a node's failed LLM calls by the first concrete error text,
     falling back to the exception type. Buckets: timeout, http_5xx,
@@ -4015,6 +4406,25 @@ def create_app() -> FastAPI:
         .ag-metric{display:flex;justify-content:space-between;font-size:12px}
         .ag-m-k{color:#374151}
         .ag-m-v{font-family:ui-monospace,monospace;font-weight:700;color:#111827}
+        /* Round 26 (5.11.2026): the data-science metric panels in the
+           Agent value tab. Histogram is a 7-bar block (0..6 of 6 agents
+           justified) and the confusion matrix is a plain table. */
+        .ds-hist{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:14px;min-height:110px;display:flex;align-items:flex-end;gap:8px;justify-content:space-around}
+        .ds-hist .ds-bar{display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:30px}
+        .ds-hist .ds-bar-fill{background:#2563eb;border-radius:4px 4px 0 0;width:100%;min-height:2px;transition:height 0.3s}
+        .ds-hist .ds-bar-lbl{font-size:11px;color:#374151;font-family:ui-monospace,monospace}
+        .ds-hist .ds-bar-val{font-size:12px;color:#111827;font-weight:700;font-family:ui-monospace,monospace}
+        .ds-hist-note{color:#6b7280;font-size:13px;text-align:center;width:100%}
+        .ds-conf-wrap{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:14px;overflow-x:auto}
+        .ds-conf-note{color:#6b7280;font-size:13px;text-align:center}
+        .ds-conf-table{border-collapse:collapse;font-size:13px;margin:0 auto}
+        .ds-conf-table th,.ds-conf-table td{border:1px solid #e5e7eb;padding:8px 14px;text-align:center;font-family:ui-monospace,monospace}
+        .ds-conf-table th{background:#f3f4f6;font-weight:700;color:#111827}
+        .ds-conf-table .ds-row-hdr{background:#f9fafb;font-weight:600;color:#374151;text-align:left}
+        .ds-conf-table .ds-cell-agree{background:rgba(22,163,74,0.08);color:#166534;font-weight:700}
+        .ds-conf-table .ds-cell-dis{background:rgba(220,38,38,0.08);color:#991b1b;font-weight:700}
+        .ds-conf-table .ds-cell-nr{background:rgba(234,88,12,0.08);color:#9a3412;font-weight:700}
+        .ds-conf-table .ds-cell-precision{background:#eff6ff;color:#1e40af;font-weight:700}
         /* Round 23 iter 5 (4.11.2026): rule tree canvas scrolls
            horizontally with explicit left / right arrows. The canvas
            breaks out of the tab-pane padding (negative margins of 20px
@@ -4280,6 +4690,136 @@ def create_app() -> FastAPI:
           } catch (e) { /* silent */ }
         }
         refreshAgentValue();
+        // Round 26 (5.11.2026): fetch /stats/ds_metrics and render the
+        // 20 data-science panels in the Agent value tab. A metric that
+        // comes back null displays 'pending feedback' rather than 0.
+        async function refreshDsMetrics() {
+          try {
+            const base = location.pathname.replace(/\/digest.*/, '');
+            const d = await fetch(base + '/stats/ds_metrics?window_hours=24', {cache:'no-store'})
+                      .then(r => r.json());
+            function setM(idv, idt, value, hint, suffix) {
+              const v = document.getElementById(idv);
+              const t = document.getElementById(idt);
+              if (!v) return;
+              if (value === null || value === undefined) {
+                v.textContent = '-';
+                if (t) t.textContent = hint || 'pending feedback';
+              } else {
+                v.textContent = String(value) + (suffix || '');
+                if (t && hint) t.textContent = hint;
+              }
+            }
+            const fa = d.feedback_agreement || {};
+            const upl = d.uplift || {};
+            const cx = d.cost_ext || {};
+            const ds = d.ds_metrics || {};
+            const nH = d.n_feedback_hazard || 0;
+            const nP = d.n_feedback_priority || 0;
+            // 1-5: feedback agreement
+            setM('ds-m1-v','ds-m1-t', fa.hazard_valid_rate,
+                 nH ? ('based on ' + nH + ' hazard votes') : 'pending feedback', '%');
+            // M2: compute disagree_rate from counts
+            const hc = fa.hazard_counts || {};
+            const dis_rate = (nH > 0) ? Math.round(100.0 * (hc.disagree || 0) / nH * 10) / 10 : null;
+            setM('ds-m2-v','ds-m2-t', dis_rate,
+                 nH ? ('based on ' + nH + ' hazard votes') : 'pending feedback', '%');
+            setM('ds-m3-v','ds-m3-t', fa.priority_correct_rate,
+                 nP ? ('based on ' + nP + ' priority votes') : 'pending feedback', '%');
+            setM('ds-m4-v','ds-m4-t', fa.safety_floor_precision,
+                 (fa.safety_floor_n || 0) ? ('n=' + fa.safety_floor_n + ' floor cases with feedback') : 'no floor cases voted yet', '%');
+            setM('ds-m5-v','ds-m5-t', fa.llm_uplift_precision,
+                 (fa.llm_uplift_n || 0) ? ('n=' + fa.llm_uplift_n + ' LLM-flip cases with feedback') : 'no LLM-flip cases voted yet', '%');
+            // 6-9: uplift
+            setM('ds-m6-v','ds-m6-t', upl.rule_tree_eq_final_rate, 'higher = agents added nothing', '%');
+            setM('ds-m7-v','ds-m7-t', upl.floor_fire_rate, 'how often the floor caught the LLM', '%');
+            setM('ds-m8-v','ds-m8-t', upl.llm_flip_rate, 'LLM changed rule_tree verdict', '%');
+            setM('ds-m9-v','ds-m9-t', upl.llm_clean_wins, 'flip + no floor (LLM standalone value)', '');
+            // 10-13: cost
+            const mIn = cx.tokens_in_mean, pIn = cx.tokens_in_p95;
+            const mOut = cx.tokens_out_mean, pOut = cx.tokens_out_p95;
+            document.getElementById('ds-m10-v').textContent = (mIn !== undefined)
+              ? (Math.round(mIn) + ' / ' + Math.round(mOut)) : '-';
+            document.getElementById('ds-m10-t').textContent = (pIn !== undefined)
+              ? ('p95: ' + pIn + ' in / ' + pOut + ' out') : 'pending data';
+            setM('ds-m11-v','ds-m11-t', (cx.cost_per_case_usd === undefined) ? null : cx.cost_per_case_usd,
+                 'self-hosted $0', '');
+            document.getElementById('ds-m11-v').textContent = (cx.cost_per_case_usd !== undefined)
+              ? ('$' + (cx.cost_per_case_usd).toFixed(4)) : '-';
+            document.getElementById('ds-m12-v').textContent = (cx.wall_p50_s !== undefined)
+              ? (cx.wall_p50_s + ' / ' + cx.wall_p95_s) : '-';
+            document.getElementById('ds-m12-t').textContent = 'per-case latency (s)';
+            setM('ds-m13-v','ds-m13-t', (cx.llm_calls_per_case_mean === undefined) ? null : cx.llm_calls_per_case_mean,
+                 'mean over the window', '');
+            // 14-15: justified histogram
+            const hist = d.justified_histogram || {};
+            const histWrap = document.getElementById('ds-hist');
+            if (histWrap) {
+              const total = Object.values(hist).reduce((a,b) => a+b, 0);
+              if (!total) {
+                histWrap.innerHTML = '<div class="ds-hist-note">pending data</div>';
+              } else {
+                const maxV = Math.max(...Object.values(hist));
+                let bars = '';
+                for (let k = 0; k <= 6; k++) {
+                  const v = hist[k] || 0;
+                  const h = maxV ? Math.round(80 * v / maxV) : 0;
+                  bars += '<div class="ds-bar"><div class="ds-bar-val">' + v + '</div>' +
+                          '<div class="ds-bar-fill" style="height:' + h + 'px"></div>' +
+                          '<div class="ds-bar-lbl">' + k + ' of 6</div></div>';
+                }
+                histWrap.innerHTML = bars;
+              }
+            }
+            // 16: confusion matrix + 17: per-class precision
+            const confWrap = document.getElementById('ds-conf-wrap');
+            if (confWrap) {
+              const rows = ds.confusion_rows || [];
+              const cols = ds.confusion_cols || [];
+              const mat = ds.confusion_matrix || [];
+              const perCls = ds.per_class_precision || {};
+              const totalFb = rows.reduce((a, r) => a + ((perCls[r] || {}).n || 0), 0);
+              if (!totalFb) {
+                confWrap.innerHTML = '<div class="ds-conf-note">pending feedback</div>';
+              } else {
+                let h = '<table class="ds-conf-table"><thead><tr><th>agent said \\ worker</th>';
+                for (const c of cols) h += '<th>' + c.replace(/_/g,' ') + '</th>';
+                h += '<th>total</th><th>M17 precision</th></tr></thead><tbody>';
+                for (let i = 0; i < rows.length; i++) {
+                  const r = rows[i];
+                  h += '<tr><td class="ds-row-hdr">' + r.replace(/_/g,' ') + '</td>';
+                  for (let j = 0; j < cols.length; j++) {
+                    const cls = j === 0 ? 'ds-cell-agree' : (j === 1 ? 'ds-cell-dis' : 'ds-cell-nr');
+                    h += '<td class="' + cls + '">' + ((mat[i] || [])[j] || 0) + '</td>';
+                  }
+                  const pc = perCls[r] || {};
+                  h += '<td>' + (pc.n || 0) + '</td>';
+                  h += '<td class="ds-cell-precision">' + (pc.precision_pct !== null && pc.precision_pct !== undefined
+                        ? pc.precision_pct + '%' : 'n/a') + '</td>';
+                  h += '</tr>';
+                }
+                h += '</tbody></table>';
+                confWrap.innerHTML = h;
+              }
+            }
+            // M18: macro / weighted precision
+            const pm = ds.precision_macro_pct, pw = ds.precision_weighted_pct;
+            document.getElementById('ds-m18-v').textContent = (pm !== null && pm !== undefined)
+              ? (pm + '% / ' + (pw === null ? 'n/a' : pw + '%')) : '-';
+            document.getElementById('ds-m18-t').textContent = (pm !== null && pm !== undefined)
+              ? 'macro (equal class weight) / weighted (by n)' : 'pending feedback';
+            // M19: ROC-AUC
+            const auc = ds.roc_auc, aucN = ds.roc_auc_n || 0;
+            setM('ds-m19-v','ds-m19-t', auc,
+                 aucN ? ('based on ' + aucN + ' feedback samples') : 'pending feedback', '');
+            // M20: grounding score
+            const gs = ds.grounding_score_pct, gn = ds.grounding_n || 0;
+            setM('ds-m20-v','ds-m20-t', gs,
+                 gn ? ('based on ' + gn + ' cited cases') : 'no citations yet', '%');
+          } catch (e) { /* silent */ }
+        }
+        refreshDsMetrics();
+        setInterval(refreshDsMetrics, 30000);
         setInterval(refreshVotes, 30000);
         // Silent background refresh: re-fetch the page HTML, swap in the
         // KPIs + table + timeline sections only, preserve the user's active
@@ -4446,7 +4986,92 @@ def create_app() -> FastAPI:
             "<div class='av-l'>Cases worker marked not relevant</div>"
             "<div class='av-t' id='av-nr-t'>no votes yet</div></div>"
             "</div>"
-            "<h3 class='av-h' style='margin-top:18px'>Each agent and its metrics (last 24h)</h3>"
+            # Round 26 (5.11.2026): the 20 data-science metrics the owner
+            # asked for. Five panels, all inside Agent value (no new tab).
+            # Each number renders 'pending' when there is not enough
+            # feedback yet, so a sparse day shows honestly and not a zero.
+            "<h3 class='av-h' style='margin-top:22px'>Feedback agreement (1-5)</h3>"
+            "<div class='av-grid'>"
+            "<div class='av-card' id='ds-m1-card'>"
+            "<div class='av-v' id='ds-m1-v'>-</div>"
+            "<div class='av-l'>M1 Hazard-valid rate</div>"
+            "<div class='av-t' id='ds-m1-t'>pending feedback</div></div>"
+            "<div class='av-card' id='ds-m2-card'>"
+            "<div class='av-v' id='ds-m2-v'>-</div>"
+            "<div class='av-l'>M2 Hazard-disagree rate</div>"
+            "<div class='av-t' id='ds-m2-t'>pending feedback</div></div>"
+            "<div class='av-card' id='ds-m3-card'>"
+            "<div class='av-v' id='ds-m3-v'>-</div>"
+            "<div class='av-l'>M3 Priority-correct rate</div>"
+            "<div class='av-t' id='ds-m3-t'>pending feedback</div></div>"
+            "<div class='av-card' id='ds-m4-card'>"
+            "<div class='av-v' id='ds-m4-v'>-</div>"
+            "<div class='av-l'>M4 Safety-floor precision</div>"
+            "<div class='av-t' id='ds-m4-t'>pending feedback</div></div>"
+            "<div class='av-card' id='ds-m5-card'>"
+            "<div class='av-v' id='ds-m5-v'>-</div>"
+            "<div class='av-l'>M5 LLM-uplift precision</div>"
+            "<div class='av-t' id='ds-m5-t'>pending feedback</div></div>"
+            "</div>"
+            "<h3 class='av-h' style='margin-top:22px'>Agent uplift over the rule tree (6-9)</h3>"
+            "<div class='av-grid'>"
+            "<div class='av-card' id='ds-m6-card'>"
+            "<div class='av-v' id='ds-m6-v'>-</div>"
+            "<div class='av-l'>M6 rule_tree == final</div>"
+            "<div class='av-t' id='ds-m6-t'>higher = agents added nothing</div></div>"
+            "<div class='av-card' id='ds-m7-card'>"
+            "<div class='av-v' id='ds-m7-v'>-</div>"
+            "<div class='av-l'>M7 Safety-floor fire rate</div>"
+            "<div class='av-t' id='ds-m7-t'>how often the floor caught the LLM</div></div>"
+            "<div class='av-card' id='ds-m8-card'>"
+            "<div class='av-v' id='ds-m8-v'>-</div>"
+            "<div class='av-l'>M8 LLM flip rate</div>"
+            "<div class='av-t' id='ds-m8-t'>LLM changed rule_tree verdict</div></div>"
+            "<div class='av-card' id='ds-m9-card'>"
+            "<div class='av-v' id='ds-m9-v'>-</div>"
+            "<div class='av-l'>M9 LLM clean wins</div>"
+            "<div class='av-t' id='ds-m9-t'>flip + no floor (LLM standalone value)</div></div>"
+            "</div>"
+            "<h3 class='av-h' style='margin-top:22px'>Cost and latency (10-13)</h3>"
+            "<div class='av-grid'>"
+            "<div class='av-card' id='ds-m10-card'>"
+            "<div class='av-v' id='ds-m10-v'>-</div>"
+            "<div class='av-l'>M10 Tokens in / out (mean)</div>"
+            "<div class='av-t' id='ds-m10-t'>p95 shown as well</div></div>"
+            "<div class='av-card' id='ds-m11-card'>"
+            "<div class='av-v' id='ds-m11-v'>-</div>"
+            "<div class='av-l'>M11 $ per case (commercial equiv)</div>"
+            "<div class='av-t' id='ds-m11-t'>self-hosted $0</div></div>"
+            "<div class='av-card' id='ds-m12-card'>"
+            "<div class='av-v' id='ds-m12-v'>-</div>"
+            "<div class='av-l'>M12 Wall p50 / p95 (s)</div>"
+            "<div class='av-t' id='ds-m12-t'>per-case latency</div></div>"
+            "<div class='av-card' id='ds-m13-card'>"
+            "<div class='av-v' id='ds-m13-v'>-</div>"
+            "<div class='av-l'>M13 LLM calls per case</div>"
+            "<div class='av-t' id='ds-m13-t'>mean over the window</div></div>"
+            "</div>"
+            "<h3 class='av-h' style='margin-top:22px'>Per-agent justified histogram (14-15)</h3>"
+            "<div id='ds-hist' class='ds-hist'>"
+            "<div class='ds-hist-note'>pending data</div></div>"
+            "<h3 class='av-h' style='margin-top:22px'>Confusion matrix and class-wise precision (16-20)</h3>"
+            "<div id='ds-conf-wrap' class='ds-conf-wrap'>"
+            "<div class='ds-conf-note'>pending feedback</div></div>"
+            "<div class='av-grid' style='margin-top:12px'>"
+            "<div class='av-card' id='ds-m18-card'>"
+            "<div class='av-v' id='ds-m18-v'>-</div>"
+            "<div class='av-l'>M18 Precision macro / weighted</div>"
+            "<div class='av-t' id='ds-m18-t'>pending feedback</div></div>"
+            "<div class='av-card' id='ds-m19-card'>"
+            "<div class='av-v' id='ds-m19-v'>-</div>"
+            "<div class='av-l'>M19 ROC-AUC (priority vs agree)</div>"
+            "<div class='av-t' id='ds-m19-t'>pending feedback</div></div>"
+            "<div class='av-card' id='ds-m20-card'>"
+            "<div class='av-v' id='ds-m20-v'>-</div>"
+            "<div class='av-l'>M20 Grounding score</div>"
+            "<div class='av-t' id='ds-m20-t'>citations in retrieved passages</div></div>"
+            "</div>"
+            "<h3 class='av-h' style='margin-top:22px'>Each agent and its metrics (last 24h)</h3>"
             f"<div class='ag-grid'>{per_agent_rows}</div>"
             "<h3 class='av-h' style='margin-top:18px'>Cases the worker disagreed with (last 24h)</h3>"
             "<div id='av-disagree-list' class='av-overrides'>No disagreements yet.</div>"
@@ -5017,6 +5642,49 @@ def create_app() -> FastAPI:
         if not p.is_file():
             raise HTTPException(status_code=404, detail="catalog_image_file_missing")
         return _FileResponse(str(p), media_type="image/jpeg")
+
+    @app.get("/stats/ds_metrics")
+    def stats_ds_metrics(request: Request, window_hours: int = 24) -> dict:
+        """Round 26 (5.11.2026): the 20 data-science metrics the owner
+        asked for, all computed from in-system state (hazards +
+        agent_feedback). Returns feedback-agreement, uplift, extended
+        cost, justified histogram, confusion matrix, per-class precision,
+        ROC-AUC and grounding score. A metric that lacks enough feedback
+        is returned as null with a side n= count, so the UI shows
+        'pending feedback' rather than a misleading zero.
+        """
+        if not _is_private_host(request):
+            raise HTTPException(status_code=404, detail="not found")
+        try:
+            hrs = max(1, min(720, int(window_hours)))
+        except (TypeError, ValueError):
+            hrs = 24
+        settings = get_settings()
+        import sqlite3 as _sqlite3
+        con = _sqlite3.connect(settings.roadguard_db_path)
+        con.row_factory = _sqlite3.Row
+        cutoff = time.time() - hrs * 3600
+        try:
+            hazard_rows = con.execute(
+                "SELECT id, class, confidence, priority, agent_decision, "
+                "       agent_value_json, agent_trace_json "
+                "  FROM hazards WHERE id LIKE 'hz_%' AND reported_at >= ?",
+                (cutoff,),
+            ).fetchall()
+            fb_rows = con.execute(
+                "WITH ranked AS ("
+                "  SELECT hazard_id, kind, verdict, agree, created_at, "
+                "         ROW_NUMBER() OVER (PARTITION BY hazard_id, kind ORDER BY created_at DESC) rn "
+                "  FROM agent_feedback WHERE created_at >= ?"
+                ") SELECT hazard_id, kind, verdict, agree "
+                "FROM ranked WHERE rn = 1",
+                (cutoff,),
+            ).fetchall()
+        finally:
+            con.close()
+        block = _compute_ds_metrics_block(hazard_rows, fb_rows)
+        block["window_hours"] = hrs
+        return block
 
     @app.get("/stats/kpi")
     def stats_kpi(request: Request, window_hours: int = 24) -> dict:
