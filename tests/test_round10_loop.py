@@ -73,6 +73,9 @@ def _react_state():
 
 
 def _patch_react(monkeypatch, replies, seen):
+    # The loop mechanics are checked with a two-hop cap; production runs
+    # with the module's own cap (1 since the Decision hop cut).
+    monkeypatch.setattr(ra, "DECISION_REACT_MAX_HOPS", 2)
     monkeypatch.setattr(ra, "_decision_messages", lambda state, hint: [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}])
     monkeypatch.setattr(ra, "_run_decision_tool", lambda name, args, state, tools_run: {"ok": True, "priority": 50})
     monkeypatch.setattr(ra, "_run_deadline", lambda: None)

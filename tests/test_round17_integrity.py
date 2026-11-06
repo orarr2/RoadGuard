@@ -419,7 +419,11 @@ def test_decision_node_keeps_a_corrected_verdict(monkeypatch):
             "reply_text": json.dumps(bad), "schemas": None}
     monkeypatch.setattr(ra, "_llm_decide_react", lambda state, rule_hint: (dict(bad), 100, 20, info))
     monkeypatch.setattr(ra, "chat", lambda messages, tools=None, temperature=0.0, use_panel=False, **kw: (_msg(content=json.dumps(good)), 30, 10))
-    update = ra.decision_node(_decision_state())
+    # Sufficient coverage: the round 25 RAG floor must not turn the
+    # corrected standard verdict into needs_more_evidence here.
+    state = _decision_state()
+    state["research_coverage_detail"] = {"repair_window": True, "answered": ["repair_window"], "missing": [], "sufficiency": "sufficient"}
+    update = ra.decision_node(state)
     final = [e for e in update["trace"] if e["kind"] == "final"][0]["content"]
     assert update["action"] == "standard" and final["source"] == "llm_react" and "fallback_reason" not in update
     rc = final["rationale_check"]
