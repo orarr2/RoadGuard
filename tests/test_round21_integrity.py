@@ -15,7 +15,7 @@ import roadguard_agent as ra
 # ---------------------------------------------------------------- A: phash class mismatch floor
 
 
-def _state_with_phash(live_class, live_conf, catalog_classes, pic_id=10179, distance=14):
+def _state_with_phash(live_class, live_conf, catalog_classes, pic_id=10179, distance=8):
     return {
         "hazard_profile": {"primary_class": live_class, "primary_confidence": live_conf,
                            "severity_signal": "moderate", "recurrence_count_30d": 0},
@@ -45,6 +45,17 @@ def test_phash_neighbor_class_mismatch_routes_to_human_review():
     assert decision["floor_reason"] == "phash_class_mismatch"
     assert "phash" in decision["rationale"].lower()
     assert "D40" in str(decision["floor_trigger"])
+
+
+def test_phash_neighbor_beyond_the_floor_radius_is_context_only():
+    """6.11.2026 audit F5: r23 sent 22 of 94 cases to a human on neighbours
+    at distance 12-16; beyond policy known_image.phash_floor_max_distance
+    (10) the neighbour is cited but does not decide."""
+    state = _state_with_phash(live_class="D20", live_conf=0.7, catalog_classes="D40", distance=14)
+    decision = ra._decide_rule_based(state)
+    assert decision.get("floor_reason") != "phash_class_mismatch"
+    assert decision["action"] == "standard"
+    assert "catalog:pic_id=10179" in decision["cited_sources"]
 
 
 def test_phash_neighbor_class_agreement_lets_the_tree_decide():

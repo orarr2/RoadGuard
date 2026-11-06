@@ -61,6 +61,10 @@ known_image:
   # detector readings that agree with each other but not with the labels go
   # to a human (31.10.2026 review, pic_id=13786).
   min_stored_confidence: 0.4
+  # 6.11.2026 (audit F5): a phash neighbour whose labels disagree with the
+  # live detector routes to a human only within this distance (bits). The
+  # relaxed lookup (16) still cites farther neighbours as context.
+  phash_floor_max_distance: 10
 
 grounding:
   # cited_sources must be a subset of research.tool_result_ids, unless

@@ -9479,6 +9479,26 @@ def _react_enabled() -> bool:
     return os.environ.get("AGENT_DECISION_REACT", "0") == "1"
 
 
+def _phash_floor_max_distance() -> int:
+    """known_image.phash_floor_max_distance from policy.yaml (default 10, the
+    known-image lookup radius)."""
+    try:
+        return int(((load_policy() or {}).get("known_image") or {}).get("phash_floor_max_distance", 10))
+    except (TypeError, ValueError):
+        return 10
+
+
+def _phash_within_floor_distance(match: dict | None) -> bool:
+    """6.11.2026 audit F5: in r23 the class-mismatch floor fired on neighbours
+    at phash distance 12-16 (the relaxed lookup radius), which is context,
+    not evidence about this photo. The floor fires only inside the policy
+    radius; a match without a numeric distance keeps the old behaviour."""
+    try:
+        return int((match or {}).get("distance")) <= _phash_floor_max_distance()
+    except (TypeError, ValueError):
+        return True
+
+
 def _decide_rule_based(state: RoadGuardState) -> dict:
     """Deterministic rule tree matching the Agent Contract.
 
@@ -9509,6 +9529,7 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
         _catalog_classes = _catalog_classes_set(_summary.get("classes") or "")
         if (
             str(_summary.get("match") or "") == "phash"
+            and _phash_within_floor_distance(match)
             and _live_cls is not None
             and _catalog_classes
             and _live_cls not in _catalog_classes
