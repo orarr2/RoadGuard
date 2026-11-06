@@ -1747,7 +1747,7 @@
       "location": "Allenby 60",
       "reported_at": "2026-10-11T08:50:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "evi-02",
@@ -1795,7 +1795,7 @@
       "location": "Nordau Blvd 30",
       "reported_at": "2026-10-11T09:50:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "evi-03",
@@ -1843,7 +1843,7 @@
       "location": "Agron 5",
       "reported_at": "2026-10-11T23:40:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "evi-04",
@@ -1891,7 +1891,7 @@
       "location": "Ha-Masger 20",
       "reported_at": "2026-10-11T10:50:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "evi-05",
@@ -1939,7 +1939,7 @@
       "location": "Hashalom 11",
       "reported_at": "2026-10-11T11:50:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "evi-06",
@@ -1987,7 +1987,7 @@
       "location": "Ha-Hagana 2",
       "reported_at": "2026-10-11T12:50:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "evi-07",
@@ -2035,7 +2035,7 @@
       "location": "Namir 90",
       "reported_at": "2026-10-11T13:50:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "evi-08",
@@ -2083,7 +2083,7 @@
       "location": "Sokolov 50",
       "reported_at": "2026-10-11T14:50:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "evi-09",
@@ -2131,7 +2131,7 @@
       "location": "Yefet 10",
       "reported_at": "2026-10-11T15:50:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "evi-10",
@@ -2179,7 +2179,7 @@
       "location": "Petah Tikva Rd 30",
       "reported_at": "2026-10-11T16:50:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "hum-01",
@@ -2947,7 +2947,7 @@
       "location": "Dizengoff 55",
       "reported_at": "2026-10-20T12:00:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "adv-12",
@@ -2995,7 +2995,7 @@
       "location": "Dizengoff 55",
       "reported_at": "2026-10-20T12:00:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "adv-13",
@@ -3043,7 +3043,7 @@
       "location": "Dizengoff 55",
       "reported_at": "2026-10-20T12:00:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "adv-14",
@@ -3091,7 +3091,7 @@
       "location": "Dizengoff 55",
       "reported_at": "2026-10-20T12:00:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "adv-15",
@@ -3139,7 +3139,7 @@
       "location": "Dizengoff 55",
       "reported_at": "2026-10-20T12:00:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "adv-16",
@@ -3475,7 +3475,7 @@
       "location": "Rothschild 14",
       "reported_at": "2026-10-31T09:12:00Z"
     },
-    "expected_action": "needs_more_evidence"
+    "expected_action": "human_review"
   },
   {
     "id": "pol-03",

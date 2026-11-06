@@ -96,6 +96,8 @@ def test_eval_set_coverage_summary() -> None:
     """Make the eval set shape explicit so a reviewer can see distribution."""
     assert len(SCENARIOS) >= 50, f"eval set shrank: {len(SCENARIOS)}"
     actions = {s["expected_action"] for s in SCENARIOS}
-    assert actions >= {"urgent", "standard", "needs_more_evidence", "human_review"}
+    # 6.11.2026: needs_more_evidence no longer reaches a reporter; ambiguous
+    # detections route to human_review.
+    assert actions >= {"urgent", "standard", "human_review"}
     kinds = {s["kind"] for s in SCENARIOS}
     assert "simple" in kinds and "mid" in kinds

@@ -34,7 +34,8 @@ def test_rule_tree_follows_policy_override(monkeypatch):
         "decision": {"needs_more_evidence": {"confidence_range": ["0.3", "0.5"]},
                      "urgent": {"min_confidence": 0.6}},
     })
-    assert ra._decide_rule_based(_state(0.35))["action"] == "needs_more_evidence"
+    # 6.11.2026: the ambiguous band routes to a human, not to a photo request.
+    assert ra._decide_rule_based(_state(0.35))["action"] == "human_review"
     assert ra._decide_rule_based(_state(0.55))["action"] == "standard"
 
 

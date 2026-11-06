@@ -4293,8 +4293,8 @@ def _policy_summary_for_prompt() -> str:
         f"  - D00/D10 (linear cracks) -> minor.\n"
         f"Action rules (Decision only):\n"
         f"  - urgent: D40 on main road with partial/full lane blockage and confidence>=0.6.\n"
-        f"  - needs_more_evidence: confidence in [0.4,0.6) AND no recurrence. At most ONE\n"
-        f"    evidence request per hazard; on the second pass decide or route to human_review.\n"
+        f"  - needs_more_evidence: not used; the reporter is never asked for another photo.\n"
+        f"    A detection with confidence in [0.4,0.6) and no recurrence is human_review.\n"
         f"  - human_review: perception_confidence=low, OR no_match from research, OR suspicious OCR,\n"
         f"    OR suspicious reporter text, OR non-road scene, OR the reporter's description\n"
         f"    contradicts the detector's class (intake contradiction).\n"
@@ -9423,7 +9423,9 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
 
 MAX_GROUNDING_RETRIES = 1  # one retry; the LLM rarely learns from more
 # policy.yaml decision.needs_more_evidence.max_requests_per_hazard
-MAX_EVIDENCE_REQUESTS_PER_HAZARD = 1
+# 6.11.2026 (owner): 0, the reporter is never asked for another photo; a
+# needs_more_evidence verdict becomes human_review in _apply_evidence_cap.
+MAX_EVIDENCE_REQUESTS_PER_HAZARD = 0
 # Round 25 (4.11.2026) P1 (owner's analysis of the r22 run): Decision
 # ReAct is now capped at ONE tool-call hop, not two. Previously the
 # model could call two tools before committing to a verdict; in the
@@ -9605,14 +9607,16 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
         })
 
     if pol["nme_lo"] <= confidence < pol["nme_hi"] and not profile.get("is_recurring_location"):
+        # 6.11.2026 (owner): an ambiguous detection goes to a human; the
+        # reporter is never asked for another photo.
         return _finalize({
-            "action": "needs_more_evidence",
+            "action": "human_review",
             "rationale": (
-                f"confidence {confidence:.2f} in ambiguous band for {hazard_class}"
+                f"confidence {confidence:.2f} in ambiguous band for {hazard_class}; routed to a human"
             ),
             "priority": priority,
             "cited_sources": [],
-            "missing_evidence": ["second_angle"],
+            "missing_evidence": [],
         })
 
     if coverage == "no_match":
@@ -10454,13 +10458,16 @@ def _apply_evidence_cap(decision: dict, state: RoadGuardState) -> tuple[dict, bo
     if int(state.get("evidence_round", 0) or 0) < MAX_EVIDENCE_REQUESTS_PER_HAZARD:
         return decision, False
     capped = dict(decision)
+    if MAX_EVIDENCE_REQUESTS_PER_HAZARD == 0:
+        why = "the reporter is not asked for more photos (policy), routed to human review"
+    else:
+        why = (
+            f"the evidence request cap ({MAX_EVIDENCE_REQUESTS_PER_HAZARD} per hazard) "
+            "is spent on this path, routed to human review"
+        )
     capped.update({
         "action": "human_review",
-        "rationale": (
-            f"ambiguous ({decision['rationale']}); the evidence request cap "
-            f"({MAX_EVIDENCE_REQUESTS_PER_HAZARD} per hazard) is spent on this path, "
-            "routed to human review"
-        ),
+        "rationale": f"ambiguous ({decision['rationale']}); {why}",
         "cited_sources": [],
         "missing_evidence": [],
     })
@@ -11506,7 +11513,9 @@ def decision_node(state: RoadGuardState) -> dict:
         and not state.get("dataset_match")
     ):
         severity = str(((state.get("hazard_profile") or {}).get("severity_signal")) or "").lower()
-        upgrade_to = "human_review" if severity == "severe" else "needs_more_evidence"
+        # 6.11.2026 (owner): the reporter is never asked for another photo;
+        # a standard the sources do not support goes to a human.
+        upgrade_to = "human_review"
         rag_override = {
             "pre_override_action": decision.get("action"),
             "pre_override_priority": decision.get("priority"),
@@ -11517,11 +11526,11 @@ def decision_node(state: RoadGuardState) -> dict:
         decision = {
             **decision,
             "action": upgrade_to,
-            "priority": max(int(decision.get("priority") or 0), 40 if upgrade_to == "needs_more_evidence" else 55),
+            "priority": max(int(decision.get("priority") or 0), 55),
             "rationale": (
                 f"RAG floor: the retrieved standards did not answer "
                 f"{', '.join(rag_override['missing']) or 'the decision questions'}; "
-                f"standard is a leap. {upgrade_to} picked by severity={severity or 'n/a'}."
+                f"standard is a leap. Routed to a human (severity={severity or 'n/a'})."
             )[:500],
             "floor_reason": "rag_insufficient_coverage",
             "floor_trigger": ",".join(rag_override["missing"]) or "insufficient_coverage",
@@ -12674,7 +12683,10 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
         elif c.get("missing_evidence"):
             out.append(f"{_INDENT}missing_evidence={c['missing_evidence']}")
         if c.get("evidence_cap_applied"):
-            out.append(f"{_INDENT}evidence cap reached: one request per hazard")
+            out.append(
+                f"{_INDENT}evidence cap reached: {MAX_EVIDENCE_REQUESTS_PER_HAZARD} request(s) per hazard; "
+                "needs_more_evidence became human_review"
+            )
         # 27.10.2026 trace enrichment: expose model fallback error so a
         # degraded LLM call is visible in the trace, not only in the
         # internal llm_summary blob. ok_calls=0 + failed_calls>0 means

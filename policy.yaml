@@ -9,7 +9,7 @@
 # is included in the Decision prompt and in each trace entry so a
 # reviewer can tell which policy produced a given verdict.
 
-version: "2026.10.31"
+version: "2026.11.06"
 charter_grounding_target_pct: 90
 
 severity:
@@ -29,15 +29,19 @@ decision:
     lane_blocked: ["partial", "full"]
     min_confidence: 0.6
   needs_more_evidence:
+    # 6.11.2026 (owner): the reporter is never asked for another photo. A
+    # detection inside confidence_range goes to human_review in the rule
+    # tree, and a needs_more_evidence verdict the Decision LLM still
+    # proposes becomes human_review because the request cap is 0.
     confidence_range: [0.4, 0.6]
     requires_no_recurrence: true
-    # One request per hazard. A second needs_more_evidence verdict on the
-    # resumed run becomes human_review (roadmap section 2).
-    max_requests_per_hazard: 1
+    max_requests_per_hazard: 0
   human_review:
     triggers:
       - "perception_confidence == low"
       - "research_coverage == no_match"
+      - "confidence in needs_more_evidence.confidence_range (ambiguous detection, 6.11.2026)"
+      - "research_sufficiency == insufficient_coverage AND llm action == standard (RAG floor, 6.11.2026)"
       - "ocr_suspicious == true"
       - "reporter_text_suspicious == true"
       - "scene_not_road == true"

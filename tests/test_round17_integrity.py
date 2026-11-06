@@ -439,17 +439,22 @@ def test_model_priority_zero_takes_the_severity_check(monkeypatch):
     monkeypatch.setattr(ra, "_react_enabled", lambda: True)
     monkeypatch.setattr(ra, "_deadline_blocks_hop", lambda d: False)
     zero = {"action": "needs_more_evidence", "priority": 0,
-            "rationale": "D40 pothole at moderate detector confidence; a second angle is needed.",
+            "rationale": "D40 pothole at high detector confidence; a second angle is needed.",
             "cited_sources": [], "missing_evidence": ["second_angle"], "assessment": "Ask for another photo."}
     info = {"tools_run": {"request_additional_evidence": {"request_id": "er_t", "missing_field": "second_angle", "message_to_reporter": "Another angle please."}},
             "hops": 1, "calls": [], "steps": [], "messages": [], "reply_text": json.dumps(zero), "schemas": None}
     monkeypatch.setattr(ra, "_llm_decide_react", lambda state, rule_hint: (dict(zero), 100, 20, info))
+    # 6.11.2026: outside the ambiguous band (0.7) the rule tree says standard,
+    # so the model's needs_more_evidence at priority 0 is what reaches the
+    # cap: the priority comes from the severity check and the verdict becomes
+    # human_review (request cap 0, the reporter is not asked for photos).
     state = _decision_state()
-    state["hazard_profile"]["primary_confidence"] = 0.5
-    state["yolo_output"]["top1_confidence"] = 0.5
+    state["hazard_profile"]["primary_confidence"] = 0.7
+    state["yolo_output"]["top1_confidence"] = 0.7
     update = ra.decision_node(state)
-    expected = ra.check_hazard_severity("D40", 0.5, "main", "none")["priority"]
-    assert update["action"] == "needs_more_evidence" and update["priority"] == expected and expected > 0
+    expected = ra.check_hazard_severity("D40", 0.7, "main", "none")["priority"]
+    assert update["action"] == "human_review" and update["priority"] == expected and expected > 0
     final = [e for e in update["trace"] if e["kind"] == "final"][0]["content"]
     assert final["priority_from_severity_check"] is True
+    assert final["evidence_cap_applied"] is True
     assert "priority_from=severity_check" in "\n".join(ra._entry_lines({"speaker": "decision", "kind": "final", "content": final}, []))
