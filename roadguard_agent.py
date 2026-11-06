@@ -1870,6 +1870,11 @@ class RoadGuardState(TypedDict, total=False):
     # Round 17: the reporter re-sent the original photo with a note (no
     # other photo); the case goes to a human without a second model pass.
     evidence_declined: bool
+    # Round 29 (6.11.2026 audit F12): sanitize already knows the verdict is
+    # fixed by the catalogue (a sealed sha256 match, or a phash neighbour
+    # inside the floor radius whose labels disagree with the detector); the
+    # workers run their rule paths and skip their LLM passes.
+    deterministic_workers_reason: str | None
 
 
 def initial_state(
@@ -4216,6 +4221,14 @@ def _policy_latency() -> dict[str, Any]:
         "min_blur_score": _f(fp, "min_blur_score", 100.0),
         "worker_time_cap_s": _f(lat, "worker_time_cap_s", 45.0),
     }
+
+
+def _deterministic_workers_reason(state: dict | None) -> str | None:
+    """Round 29 (6.11.2026 audit F12): the reason sanitize recorded when the
+    verdict is already fixed by the catalogue, in the shape the workers use
+    for llm_skipped_reason. None when the workers' LLM passes may matter."""
+    reason = (state or {}).get("deterministic_workers_reason")
+    return f"verdict_fixed:{reason}" if reason else None
 
 
 def _clear_case_fast_path(yolo: dict, iq: dict, md: dict) -> str | None:
@@ -7706,6 +7719,32 @@ def sanitize_node(state: RoadGuardState) -> dict:
         catalog_hit, _yolo.get("top1_class"), None, _yolo.get("top1_confidence")
     )
     shortcut = bool(catalog_hit) and match_status["short_circuit_ok"]
+    # Round 29 (6.11.2026 audit F12): the workers' LLM passes cannot move a
+    # verdict the catalogue has already fixed: a sealed sha256 match ends as
+    # known_image (or, if the frame turns out severe, in the rule tree), and
+    # a phash neighbour inside the floor radius whose labels disagree with
+    # the live detector is routed to a human by the rule tree before any
+    # model text is read. In r23 these cases cost 45% of the round's LLM
+    # time for no change of verdict. The workers read this flag and run
+    # their rule paths; a detection at 0.00 is a placeholder, not evidence.
+    deterministic_reason: str | None = None
+    if shortcut:
+        deterministic_reason = "known_image_shortcut"
+    elif catalog_hit and str(catalog_hit.get("match") or "") == "phash":
+        try:
+            _live_conf = float(_yolo.get("top1_confidence") or 0.0)
+        except (TypeError, ValueError):
+            _live_conf = 0.0
+        _live_cls = str(_yolo.get("top1_class") or "").upper() or None
+        _labels = _catalog_classes_set(catalog_hit.get("classes") or "")
+        if (
+            _live_cls is not None
+            and _live_conf > 0.0
+            and _labels
+            and _live_cls not in _labels
+            and _phash_within_floor_distance(catalog_hit)
+        ):
+            deterministic_reason = "phash_class_mismatch_floor"
 
     trace_entry = {
         "iter": 0,
@@ -7718,6 +7757,7 @@ def sanitize_node(state: RoadGuardState) -> dict:
             "reporter_text_suspicious": reporter["is_suspicious_pattern"],
             "known_image_shortcut": shortcut,
             "image_match_reason": match_status.get("reason"),
+            "deterministic_workers": deterministic_reason,
         },
     }
 
@@ -7728,6 +7768,7 @@ def sanitize_node(state: RoadGuardState) -> dict:
         "trace": [trace_entry],
         "last_speaker": "sanitize",
         "next_hop": "decision" if shortcut else "profile_builder",
+        "deterministic_workers_reason": deterministic_reason,
     }
     if catalog_hit:
         update["dataset_match"] = catalog_hit
@@ -8162,6 +8203,10 @@ def signal_extractor_node(state: RoadGuardState) -> dict:
     skip_reason: str | None = None
     if state.get("evidence_declined"):
         skip_reason = "evidence_declined"
+    elif _deterministic_workers_reason(state):
+        # Round 29 (audit F12): the catalogue has fixed the verdict; the
+        # keyword extractor still records what the reporter claimed.
+        skip_reason = _deterministic_workers_reason(state)
     elif _text_is_no_new_info(text):
         # The text says "no other photo is available" and nothing else;
         # the keyword extractor would return null for every field, and the
@@ -8743,7 +8788,7 @@ def profile_builder_node(state: RoadGuardState) -> dict:
     if iq.get("brightness_mean", 0.5) < 0.2:
         base_missing.append("lighting")
 
-    fast_path = _clear_case_fast_path(yolo, iq, md)
+    fast_path = _clear_case_fast_path(yolo, iq, md) or _deterministic_workers_reason(state)
     llm_enabled = _profile_llm_enabled() and fast_path is None
     if llm_enabled:
         refined, in_tok, out_tok = _llm_refine(
@@ -9158,7 +9203,7 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
 
     fast_path = _clear_case_fast_path(
         state.get("yolo_output") or {}, state.get("image_quality") or {}, md
-    )
+    ) or _deterministic_workers_reason(state)
     llm_enabled = _rag_llm_enabled() and fast_path is None
     autonomous = llm_enabled and worker_autonomy_enabled()
     auto_label: dict | None = None
