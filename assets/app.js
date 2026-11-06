@@ -855,11 +855,12 @@ function setUploadSubmitLabel(waiting) {
 // the server until the reporter answers it or it expires.
 const PENDING_EVIDENCE_KEY = "roadguard.pendingEvidence";
 
-// Stale pending-evidence requests (older than 10 minutes) are discarded on
+// Stale pending-evidence requests (older than an hour) are discarded on
 // restore so the webapp does not try to fulfil an expired case and surface
 // the "already answered or expired" error to the next upload. Each pending
-// request carries the client-side timestamp of when it was stored.
-const PENDING_EVIDENCE_TTL_MS = 10 * 60 * 1000;
+// request carries the client-side timestamp of when it was stored. The
+// server keeps the request for queues.evidence_ttl_hours (72 h).
+const PENDING_EVIDENCE_TTL_MS = 60 * 60 * 1000;
 
 function setPendingEvidence(req) {
   const stamped = { ...req, _stored_at: Date.now() };
