@@ -3966,12 +3966,14 @@ def create_app() -> FastAPI:
         NOW = datetime.now(timezone.utc)
         CUT = NOW - timedelta(hours=window_hours)
         cutoff_epoch = CUT.timestamp()
-        con = sqlite3.connect("/var/lib/roadguard/roadguard.db")
+        # The hazards table the API writes (ROADGUARD_DB_PATH), not a fixed
+        # path: the digest showed nothing when the two differed.
+        con = sqlite3.connect(get_settings().roadguard_db_path)
         con.row_factory = sqlite3.Row
         rows = con.execute(
             "SELECT id, class, confidence, agent_decision, priority, agent_rationale, "
             "       reported_at, location, status, cited_sources_json, agent_trace_json, "
-            "       agent_value_json, bboxes_json "
+            "       agent_value_json, bboxes_json, reporter_text "
             "FROM hazards WHERE reported_at >= ? ORDER BY reported_at DESC",
             (cutoff_epoch,),
         ).fetchall()
@@ -4081,6 +4083,7 @@ def create_app() -> FastAPI:
                 "priority": r["priority"],
                 "status": r["status"] or "open",
                 "location": r["location"] or "(not provided)",
+                "reporter_text": r["reporter_text"] or "",
                 "reported_at": r["reported_at"] or 0,
                 "rationale": r["agent_rationale"] or "",
                 "speakers": speakers,
@@ -4547,6 +4550,7 @@ def create_app() -> FastAPI:
             <div class="d-row"><b>Priority</b><span>${c.priority ?? 'n/a'}</span></div>
             <div class="d-row"><b>Status</b><span>${c.status}</span></div>
             <div class="d-row"><b>Location</b><span>${c.location}</span></div>
+            ${c.reporter_text ? '<div class="d-row"><b>Reporter wrote</b><span>' + String(c.reporter_text).replace(/[&<>]/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[ch])) + '</span></div>' : ''}
             <div class="d-row"><b>Pipeline</b><span class="d-sources">${c.speakers || '(empty)'}</span></div>
             <div class="d-rat">${c.rationale || '<i>empty rationale</i>'}</div>
             <div class="d-row"><b>Cited sources</b><span class="d-sources">${cited}</span></div>
@@ -6392,6 +6396,9 @@ def create_app() -> FastAPI:
             agent_trace_json="[]",
             status="queued",
             work_order_id=None,
+            # 6.11.2026 audit F11: the citizen's description was kept only
+            # inside the trace; the supervisor pages read this column.
+            reporter_text=sanitize_reporter_text(body.reporter_text or "")["text"],
         ))
         background.add_task(
             _run_graph_and_persist,

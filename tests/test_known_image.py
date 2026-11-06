@@ -427,3 +427,30 @@ def test_phash_neighbour_with_other_labels_is_not_a_contradiction(seeded_db):
     assert out2["floor_reason"] == "known_image_catalog_detector_contradiction"
     assert out2["image_match_status"]["match"] == "sha256"
 
+
+def test_submit_async_stores_the_sanitised_reporter_text(client):
+    """6.11.2026 audit F11: the async path created the hazards row without
+    the citizen's description, so the supervisor pages (which read the
+    column, not the trace) showed none. The text is stored on creation,
+    survives the verdict update at the end of the run, and the digest
+    shows it."""
+    from roadguard_agent import Database, get_settings
+
+    body = {
+        "class": "D20", "confidence": 0.8,
+        "bboxes": [[0, 0, 100, 100, "D20", 0.8]],
+        "road_type": "main", "lane_blocked": "none", "location": "x",
+        "image_sha256": "b" * 64, "image_phash": "0000ffff0000ffff",
+        "reporter_text": "deep hole next to the bus stop",
+    }
+    r = client.post("/hazards/submit-async", json=body)
+    assert r.status_code == 202, r.text
+    hazard_id = r.json()["hazard_id"]
+    with Database(get_settings().roadguard_db_path) as db:
+        row = db.get_hazard(hazard_id)
+    assert row is not None
+    assert row.reporter_text == "deep hole next to the bus stop"
+    page = client.get("/digest/latest", headers={"host": "127.0.0.1"})
+    assert page.status_code == 200
+    assert "deep hole next to the bus stop" in page.text
+    assert "Reporter wrote" in page.text
