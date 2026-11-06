@@ -196,6 +196,8 @@ def main() -> int:
 
     def _category(name: str) -> str:
         n = name.lower()
+        if n.startswith(("train_images_", "valid_images_", "test_images_")):
+            return "Ovad RDD2022 subset"
         if n.startswith("firc_") or "roadcrack" in n:
             return "baseline (RDD2022 catalog)"
         if n.startswith("web_"):

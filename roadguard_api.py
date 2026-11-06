@@ -2655,6 +2655,72 @@ def _roc_auc_binary(scores: list[float], labels: list[int]) -> float | None:
     return wins / (len(pos) * len(neg))
 
 
+# The owner picked these eight D Classes exemplars on 6.11.2026 from a
+# sheet of catalogue candidates ranked by labelled-box size with the
+# detector agreeing on the class. A pinned id that is no longer a
+# single-label row of its class falls back to that ranking.
+_DC_PINNED_EXEMPLARS: dict[str, tuple[int, ...]] = {
+    "D00": (17029, 2920),
+    "D10": (5794, 11482),
+    "D20": (3396, 14438),
+    "D40": (10370, 7981),
+}
+
+
+def _dclass_exemplars(con, cls_code: str, pinned=(), n: int = 2) -> list[tuple[int, dict]]:
+    """(pic_id, box) pairs for one D class from the catalogue: the pinned
+    ids first, then the largest labelled boxes the detector agrees on,
+    one per photo. box is the first label as {cx, cy, w, h} in [0, 1]."""
+    def _box(labels_json) -> dict | None:
+        try:
+            labels = json.loads(labels_json or "[]")
+        except (TypeError, ValueError):
+            return None
+        if not labels or not isinstance(labels[0], dict):
+            return None
+        try:
+            return {k: float(labels[0][k]) for k in ("cx", "cy", "w", "h")}
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _stem(file_name) -> str:
+        return str(file_name or "").split("_jpg")[0]
+
+    out: list[tuple[int, dict]] = []
+    seen_stems: set[str] = set()
+    for pid in pinned:
+        row = con.execute(
+            "SELECT pic_id, file_name, labels_json FROM dataset_images "
+            "WHERE pic_id = ? AND classes = ? AND n_labels = 1",
+            (int(pid), cls_code),
+        ).fetchone()
+        box = _box(row[2]) if row else None
+        if box:
+            out.append((int(row[0]), box))
+            seen_stems.add(_stem(row[1]))
+    if len(out) >= n:
+        return out[:n]
+    ranked = []
+    for pid, file_name, labels_json in con.execute(
+        "SELECT pic_id, file_name, labels_json FROM dataset_images "
+        "WHERE classes = ? AND n_labels = 1 AND model_top1_class = ?",
+        (cls_code, cls_code),
+    ).fetchall():
+        box = _box(labels_json)
+        if box:
+            ranked.append((-(box["w"] * box["h"]), int(pid), _stem(file_name), box))
+    ranked.sort(key=lambda t: (t[0], t[1]))
+    seen_pids = {p for p, _ in out}
+    for _neg_area, pid, stem, box in ranked:
+        if pid in seen_pids or stem in seen_stems:
+            continue
+        seen_stems.add(stem)
+        out.append((pid, box))
+        if len(out) >= n:
+            break
+    return out
+
+
 _FEEDBACK_AGREE = {"agree"}
 _FEEDBACK_NEGATIVE = {"disagree", "not_relevant"}
 _PRED_CLASSES = ("standard", "human_review", "known_image", "needs_more_evidence")
@@ -4320,11 +4386,11 @@ def create_app() -> FastAPI:
         .detail h3{margin:0 0 8px;font-size:15px;letter-spacing:-0.01em}
         .detail .d-img{width:100%;max-height:280px;object-fit:cover;border-radius:8px;background:#f1f5f9;display:block}
         .detail .d-img-wrap{position:relative;margin-bottom:12px;border-radius:8px;overflow:hidden}
-        .detail .d-bbox{position:absolute;border:2px solid #22d3ee;box-shadow:0 0 0 1px rgba(0,0,0,0.4);box-sizing:border-box;pointer-events:none}
-        .detail .d-bbox.d-bbox-D00{border-color:#f59e0b}
-        .detail .d-bbox.d-bbox-D10{border-color:#a855f7}
-        .detail .d-bbox.d-bbox-D20{border-color:#ef4444}
-        .detail .d-bbox.d-bbox-D40{border-color:#22d3ee}
+        .detail .d-bbox,.dc-imgwrap .d-bbox{position:absolute;border:2px solid #22d3ee;box-shadow:0 0 0 1px rgba(0,0,0,0.4);box-sizing:border-box;pointer-events:none}
+        .detail .d-bbox.d-bbox-D00,.dc-imgwrap .d-bbox.d-bbox-D00{border-color:#f59e0b}
+        .detail .d-bbox.d-bbox-D10,.dc-imgwrap .d-bbox.d-bbox-D10{border-color:#a855f7}
+        .detail .d-bbox.d-bbox-D20,.dc-imgwrap .d-bbox.d-bbox-D20{border-color:#ef4444}
+        .detail .d-bbox.d-bbox-D40,.dc-imgwrap .d-bbox.d-bbox-D40{border-color:#22d3ee}
         .detail .d-bbox-lbl{position:absolute;top:-18px;left:0;background:rgba(17,24,39,0.85);color:#fff;font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 5px;border-radius:3px;white-space:nowrap}
         .detail .d-row{display:flex;justify-content:space-between;gap:12px;margin:6px 0;font-size:13px}
         .detail .d-row b{color:#6b7280;font-weight:500}
@@ -4375,11 +4441,13 @@ def create_app() -> FastAPI:
         .dc-wrap{max-width:100%}
         .dc-h{margin:0 0 6px;font-size:16px;font-weight:700;color:#111827}
         .dc-sub{color:#6b7280;font-size:13px;margin:0 0 18px}
-        .dc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+        .dc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:14px}
         .dc-card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:6px}
         .dc-code{font-family:ui-monospace,monospace;font-size:12px;color:#6b7280;font-weight:700}
         .dc-name{font-size:14px;font-weight:700;color:#111827}
-        .dc-img{width:100%;height:170px;object-fit:cover;border-radius:6px;background:#f3f4f6}
+        .dc-pair{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+        .dc-imgwrap{position:relative;aspect-ratio:1/1;border-radius:6px;overflow:hidden;background:#f3f4f6}
+        .dc-img{width:100%;height:100%;object-fit:contain;display:block}
         .dc-img-missing{display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:12px;font-style:italic}
         .dc-desc{font-size:12px;color:#374151;line-height:1.4}
         /* Agent value tab */
@@ -4427,26 +4495,13 @@ def create_app() -> FastAPI:
         .ds-conf-table .ds-cell-dis{background:rgba(220,38,38,0.08);color:#991b1b;font-weight:700}
         .ds-conf-table .ds-cell-nr{background:rgba(234,88,12,0.08);color:#9a3412;font-weight:700}
         .ds-conf-table .ds-cell-precision{background:#eff6ff;color:#1e40af;font-weight:700}
-        /* Round 23 iter 5 (4.11.2026): rule tree canvas scrolls
-           horizontally with explicit left / right arrows. The canvas
-           breaks out of the tab-pane padding (negative margins of 20px
-           both sides) so the scroll region covers the full viewport
-           width and the right-hand leaves do not clip against the
-           pane's own padding. */
+        /* Rule tree: the SVG scales to the canvas width, so the whole
+           tree is visible without panning. */
         .rt-wrap{max-width:100%}
         .rt-h{margin:0 0 6px;font-size:16px;font-weight:700;color:#111827}
         .rt-sub{color:#6b7280;font-size:13px;margin:0 0 10px}
-        .rt-scrollbar-wrap{display:flex;gap:8px;align-items:center;margin-bottom:8px;position:sticky;left:0}
-        .rt-scroll-btn{appearance:none;background:#fff;border:1px solid #d1d5db;border-radius:8px;padding:6px 14px;font-size:16px;font-weight:700;cursor:pointer;color:#1f2937;min-width:48px}
-        .rt-scroll-btn:hover{background:#f3f4f6}
-        .rt-scroll-btn:active{background:#e5e7eb}
-        .rt-scroll-hint{font-size:11px;color:#6b7280;margin-left:4px}
-        .rt-canvas{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;overflow-x:scroll;overflow-y:hidden;scroll-behavior:smooth;margin-right:-20px;margin-left:0}
-        .rt-canvas::-webkit-scrollbar{height:14px}
-        .rt-canvas::-webkit-scrollbar-track{background:#f3f4f6;border-radius:7px}
-        .rt-canvas::-webkit-scrollbar-thumb{background:#9ca3af;border-radius:7px;border:2px solid #f3f4f6}
-        .rt-canvas::-webkit-scrollbar-thumb:hover{background:#6b7280}
-        .rt-svg{min-width:2000px;width:2000px;height:auto;display:block}
+        .rt-canvas{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;overflow:hidden}
+        .rt-svg{width:100%;height:auto;display:block}
         """
 
         script = """
@@ -4566,22 +4621,6 @@ def create_app() -> FastAPI:
             ACTIVE_CLASSES.forEach(c => b.classList.remove(c));
           });
         }
-        // Round 23 iter 5: Rule tree pan arrows. Clicking the chevron
-        // buttons scrolls the canvas by ~85% of its visible width so
-        // two clicks typically cover the whole tree.
-        function bindRuleTreeScroll() {
-          const canvas = document.getElementById('rt-canvas');
-          const l = document.getElementById('rt-scroll-left');
-          const r = document.getElementById('rt-scroll-right');
-          if (!canvas || !l || !r) return;
-          l.addEventListener('click', () => {
-            canvas.scrollBy({left: -Math.round(canvas.clientWidth * 0.85), behavior: 'smooth'});
-          });
-          r.addEventListener('click', () => {
-            canvas.scrollBy({left: Math.round(canvas.clientWidth * 0.85), behavior: 'smooth'});
-          });
-        }
-        bindRuleTreeScroll();
         // Round 23 iter 4: class-filter chips above the Cases table.
         function bindClassChips() {
           const chips = document.querySelectorAll('.cls-chip');
@@ -4849,20 +4888,14 @@ def create_app() -> FastAPI:
         setInterval(refreshAgentValue, 30000);
         """.replace("__CASES__", cases_json)
 
-        # Round 23 iter 5 (4.11.2026): the D Classes tab. The owner
-        # asked for a reference grid - one clean exemplar per class
-        # (D00 / D10 / D20 / D40) with name and image, grid layout, no
-        # scroll. The exemplar pic_ids are picked by looking up the
-        # catalog for a single-class labelled sample of each class.
-        with sqlite3.connect("/var/lib/roadguard/roadguard.db") as _dc_con:
-            def _exemplar(cls_code: str) -> int | None:
-                r = _dc_con.execute(
-                    "SELECT pic_id FROM dataset_images WHERE classes = ? AND n_labels = 1 "
-                    "ORDER BY pic_id LIMIT 1",
-                    (cls_code,),
-                ).fetchone()
-                return int(r[0]) if r else None
-            _dc_pics = {c: _exemplar(c) for c in ("D00", "D10", "D20", "D40")}
+        # The D Classes tab: two exemplars per class (D00 / D10 / D20 /
+        # D40) from the labelled catalog, each with its labelled box
+        # drawn, so the worker sees the damage the class name means.
+        with sqlite3.connect(get_settings().roadguard_db_path) as _dc_con:
+            _dc_pics = {
+                c: _dclass_exemplars(_dc_con, c, _DC_PINNED_EXEMPLARS.get(c, ()))
+                for c in ("D00", "D10", "D20", "D40")
+            }
         _DC_DESCRIPTIONS = {
             "D00": ("D00 Longitudinal crack",
                     "A single crack running along the direction of travel. "
@@ -4880,11 +4913,23 @@ def create_app() -> FastAPI:
         dc_cards: list[str] = []
         for code in ("D00", "D10", "D20", "D40"):
             name, desc = _DC_DESCRIPTIONS[code]
-            pic_id = _dc_pics.get(code)
+            tiles: list[str] = []
+            for pic_id, box in _dc_pics.get(code) or []:
+                box_style = (
+                    f"left:{100 * (box['cx'] - box['w'] / 2):.2f}%;"
+                    f"top:{100 * (box['cy'] - box['h'] / 2):.2f}%;"
+                    f"width:{100 * box['w']:.2f}%;height:{100 * box['h']:.2f}%"
+                )
+                tiles.append(
+                    f"<div class='dc-imgwrap'>"
+                    f"<img class='dc-img' src='/roadguard/catalog_image/{pic_id}' "
+                    f"alt='{html.escape(name)}' onerror=\"this.style.display='none';\">"
+                    f"<div class='d-bbox d-bbox-{code}' style='{box_style}'></div>"
+                    f"</div>"
+                )
             img_html = (
-                f"<img class='dc-img' src='/roadguard/catalog_image/{pic_id}' "
-                f"alt='{name}' onerror=\"this.style.display='none';\">"
-                if pic_id else
+                f"<div class='dc-pair'>{''.join(tiles)}</div>"
+                if tiles else
                 "<div class='dc-img dc-img-missing'>no exemplar in catalog</div>"
             )
             dc_cards.append(
@@ -4898,7 +4943,7 @@ def create_app() -> FastAPI:
         d_classes_html = (
             "<div class='dc-wrap'>"
             "<h3 class='dc-h'>D-class reference</h3>"
-            "<p class='dc-sub'>Four examples from the labelled catalog, one per class. "
+            "<p class='dc-sub'>Two examples per class from the labelled catalog, the labelled box drawn on each. "
             "Use as a side-by-side reference when voting on the hazard the agents saw.</p>"
             f"<div class='dc-grid'>{''.join(dc_cards)}</div>"
             "</div>"
@@ -5091,14 +5136,9 @@ def create_app() -> FastAPI:
         rule_tree_html = """
         <div class='rt-wrap'>
           <h3 class='rt-h'>Rule tree the agent is compared against</h3>
-          <p class='rt-sub'>Deterministic baseline. Every agent verdict is scored against the leaf this tree would have picked. Use the arrows below to pan the whole tree left / right.</p>
-          <div class='rt-scrollbar-wrap'>
-            <button class='rt-scroll-btn' id='rt-scroll-left' aria-label='scroll left'>&larr;</button>
-            <button class='rt-scroll-btn' id='rt-scroll-right' aria-label='scroll right'>&rarr;</button>
-            <span class='rt-scroll-hint'>tree is wider than the screen; use the arrows or drag the scrollbar</span>
-          </div>
+          <p class='rt-sub'>Deterministic baseline. Every agent verdict is scored against the leaf this tree would have picked.</p>
           <div class='rt-canvas' id='rt-canvas'>
-            <svg viewBox='0 0 1800 1150' xmlns='http://www.w3.org/2000/svg' class='rt-svg' preserveAspectRatio='xMinYMin meet'>
+            <svg viewBox='0 0 2180 1150' xmlns='http://www.w3.org/2000/svg' class='rt-svg' preserveAspectRatio='xMinYMin meet'>
               <style>
                 .rt-svg .n rect{fill:#fff;stroke:#334155;stroke-width:1.5;rx:8;ry:8}
                 .rt-svg .n text{font:600 13px -apple-system,Segoe UI,Roboto,sans-serif;fill:#111827}
@@ -5165,7 +5205,7 @@ def create_app() -> FastAPI:
               <text class='edge-lbl' x='2140' y='813'>high conf</text>
 
               <!-- Divider + safety net -->
-              <line class='divider' x1='40' y1='960' x2='1760' y2='960'/>
+              <line class='divider' x1='40' y1='960' x2='2140' y2='960'/>
               <text class='section-lbl' x='900' y='983'>SAFETY NET (applies to any leaf above)</text>
 
               <!-- LLM failed? -->
