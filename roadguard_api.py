@@ -1254,12 +1254,12 @@ function applyNodeStates(nodeState) {
 // ---------------------------------------------------------------------------
 function updatePanel(hazard) {
   if (!hazard) {
-    el("kv-id").textContent = "—";
-    el("kv-class").textContent = "—";
-    el("kv-conf").textContent = "—";
-    el("kv-road").textContent = "—";
-    el("kv-lane").textContent = "—";
-    el("kv-status").textContent = "—";
+    el("kv-id").textContent = "-";
+    el("kv-class").textContent = "-";
+    el("kv-conf").textContent = "-";
+    el("kv-road").textContent = "-";
+    el("kv-lane").textContent = "-";
+    el("kv-status").textContent = "-";
     el("verdict-action").textContent = "WAITING";
     el("verdict-rationale").textContent = "No hazard being processed.";
     el("verdict-box").className = "verdict-box";
@@ -1269,12 +1269,12 @@ function updatePanel(hazard) {
   }
   const md = hazard.metadata || {};
   const v = hazard.verdict || {};
-  el("kv-id").textContent = hazard.hazard_id || "—";
-  el("kv-class").textContent = md.class || "—";
-  el("kv-conf").textContent = md.confidence != null ? Number(md.confidence).toFixed(2) : "—";
-  el("kv-road").textContent = md.road_type || "—";
-  el("kv-lane").textContent = md.lane_blocked || "—";
-  el("kv-status").textContent = v.status || "—";
+  el("kv-id").textContent = hazard.hazard_id || "-";
+  el("kv-class").textContent = md.class || "-";
+  el("kv-conf").textContent = md.confidence != null ? Number(md.confidence).toFixed(2) : "-";
+  el("kv-road").textContent = md.road_type || "-";
+  el("kv-lane").textContent = md.lane_blocked || "-";
+  el("kv-status").textContent = v.status || "-";
   const action = v.action || "WAITING";
   el("verdict-action").textContent = String(action).toUpperCase();
   el("verdict-rationale").textContent = v.rationale || v.assessment || "Still processing.";
@@ -5847,7 +5847,7 @@ def create_app() -> FastAPI:
                 "numerator": rule_tree_eq_final,
                 "denominator": n,
                 "status": "ok" if (rule_tree_eq_final / max(1, n)) >= 0.85 else "fail",
-                "note": "no ground truth yet - fill expected_verdicts.csv to switch to real accuracy",
+                "note": "agreement with the deterministic tree, not accuracy: accuracy is measured from the supervisor feedback (agent_feedback, /stats/feedback)",
             },
             {
                 "key": "grounded_citations",
