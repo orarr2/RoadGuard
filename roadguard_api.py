@@ -226,15 +226,19 @@ async function banner() {
 }
 
 async function replayHistory() {
-  // On first open, print the trace of every recent hazard oldest-first,
-  // then let the live tick() keep following new ones. Without this the
-  // page shows a greeting + empty terminal when nothing new is being
-  // submitted RIGHT NOW, which hides the whole last batch run.
+  // On first open, print the traces of the recent hazards newest first:
+  // the last 24 hours, at most 20 cases (round 29, audit F15: the old
+  // oldest-first replay of 200 cases showed the previous batch and none
+  // of today's), then let the live tick() keep following new ones.
   try {
-    const h = await get("/hazards/history?limit=200");
-    const items = (h.items || []).slice().reverse();  // oldest first
-    if (!items.length) return;
-    print("--- replaying " + items.length + " recent hazard(s) ---", "hdr");
+    const h = await get("/hazards/history?limit=20");
+    const cutoff = Date.now() - 24 * 3600 * 1000;
+    const items = (h.items || []).filter(it => {
+      const t = Date.parse(it.reported_at || "");
+      return !Number.isFinite(t) || t >= cutoff;
+    });
+    if (!items.length) { print("--- no hazards in the last 24 hours; following live ---", "hdr"); return; }
+    print("--- replaying " + items.length + " hazard(s) from the last 24 hours, newest first ---", "hdr");
     // Count the ones we actually render vs the ones with empty / failing
     // traces so the header never claims more than the operator sees.
     let rendered = 0, emptyTrace = 0, failed = 0;
@@ -260,7 +264,7 @@ async function replayHistory() {
     }
     // Mark the newest as "already seen" so the live tick does not
     // reprint it. tick() uses `current` + `printed` to resume.
-    const newest = items[items.length - 1];
+    const newest = items[0];
     current = newest.hazard_id;
     try {
       const rep = await get("/report/" + encodeURIComponent(current));
@@ -451,8 +455,9 @@ async function tick() {
   if (!token) return;
   try {
     const d = await fetchJson("/report", token);
+    const win = d.window_hours ? ' (last ' + d.window_hours + 'h)' : '';
     el("counts").innerHTML =
-      '<span><b>Total:</b> ' + (d.total_hazards ?? 0) + '</span>' +
+      '<span><b>Total' + win + ':</b> ' + (d.total_hazards ?? 0) + '</span>' +
       '<span><b>Urgent:</b> ' + (d.by_action?.urgent ?? 0) + '</span>' +
       '<span><b>Standard:</b> ' + (d.by_action?.standard ?? 0) + '</span>' +
       '<span><b>Needs evidence:</b> ' + (d.by_action?.needs_more_evidence ?? 0) + '</span>' +
@@ -2044,6 +2049,17 @@ def _route_to_human(db: Database, hazard: Any, kind: str, reason: str) -> None:
         priority=priority,
         rationale=reason,
         cited_sources_json="[]",
+    )
+
+
+def _trace_has_event(trace: list | None, kind: str) -> bool:
+    """True when a pipeline event of this kind is on the stored trace.
+    Round 29 (6.11.2026 audit F3): a run the service restart killed is
+    shown as such to the citizen and in the digest, not as an ordinary
+    supervisor review with no analysis behind it."""
+    return any(
+        isinstance(e, dict) and e.get("speaker") == "pipeline" and e.get("kind") == kind
+        for e in (trace or [])
     )
 
 
@@ -4084,6 +4100,7 @@ def create_app() -> FastAPI:
                 "status": r["status"] or "open",
                 "location": r["location"] or "(not provided)",
                 "reporter_text": r["reporter_text"] or "",
+                "interrupted": _trace_has_event(trace, "graph_interrupted"),
                 "reported_at": r["reported_at"] or 0,
                 "rationale": r["agent_rationale"] or "",
                 "speakers": speakers,
@@ -4210,13 +4227,18 @@ def create_app() -> FastAPI:
                     f"<button class='fb-btn fb-pri-hi' data-id='{hid}' data-kind='priority' data-verdict='too_high' title='Priority should be lower'>Too high</button>"
                 )
                 score_text = f"{c['score']:.2f}" if c.get("score") is not None else "-"
+                int_tag = (
+                    " <span class='tag-int' title='the service restarted during the run; "
+                    "no agent analysis, routed to a human'>interrupted</span>"
+                    if c.get("interrupted") else ""
+                )
                 rows_html_parts.append(
                     f"<tr data-idx='{i-1}' data-hzc='{cls_code}' class='row'>"
                     f"<td>{i}</td>"
                     f"<td><code>{html.escape(c['id'][:12])}</code></td>"
                     f"<td class='td-hazard'>{hazard_label}</td>"
                     f"<td class='td-score'>{score_text}</td>"
-                    f"<td class='{cls}'>{d}</td>"
+                    f"<td class='{cls}'>{d}{int_tag}</td>"
                     f"<td>{c['priority'] or ''}</td>"
                     f"<td class='td-act' data-hid='{hid}' data-kind='hazard'>{hazard_cell}</td>"
                     f"<td class='td-act' data-hid='{hid}' data-kind='priority'>{priority_cell}</td>"
@@ -4505,6 +4527,7 @@ def create_app() -> FastAPI:
         .rt-sub{color:#6b7280;font-size:13px;margin:0 0 10px}
         .rt-canvas{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;overflow:hidden}
         .rt-svg{width:100%;height:auto;display:block}
+        .tag-int{display:inline-block;margin-left:6px;padding:0 7px;border-radius:999px;background:#fef3c7;color:#92400e;font-size:11px;font-weight:600;vertical-align:middle}
         """
 
         script = """
@@ -4547,6 +4570,7 @@ def create_app() -> FastAPI:
             <h3>Case <code>${c.id}</code></h3>
             ${img}
             <div class="d-row"><b>Decision</b><span class="${decCls}">${c.decision}</span></div>
+            ${c.interrupted ? '<div class="d-row"><b>Run</b><span class="human">interrupted by a service restart: no agent analysis behind this verdict, routed to a human</span></div>' : ''}
             <div class="d-row"><b>Priority</b><span>${c.priority ?? 'n/a'}</span></div>
             <div class="d-row"><b>Status</b><span>${c.status}</span></div>
             <div class="d-row"><b>Location</b><span>${c.location}</span></div>
@@ -5735,7 +5759,7 @@ def create_app() -> FastAPI:
     @app.get("/stats/kpi")
     def stats_kpi(request: Request, window_hours: int = 24) -> dict:
         """Round 23 (4.11.2026): live KPI board matching the presentation's
-        targets table. Returns the four KPIs - correct_action,
+        targets table. Returns the four KPIs - rule_tree_agreement,
         grounded_citations, rag_relevance, median_latency - each with its
         target, current value, pass/fail flag and a plain-language reason.
         Private: gated to Tailscale / loopback like /digest and /stats/
@@ -5814,8 +5838,10 @@ def create_app() -> FastAPI:
         median_lat = (sorted(latencies)[len(latencies) // 2] if latencies else 0.0)
         kpis = [
             {
-                "key": "correct_action",
-                "label": "Agreement with rule tree",
+                # Round 29 (6.11.2026 audit F15): named for what it measures;
+                # there is no ground truth behind it.
+                "key": "rule_tree_agreement",
+                "label": "Agreement with rule tree (not accuracy)",
                 "target_pct": 85,
                 "value_pct": round(100.0 * rule_tree_eq_final / max(1, n), 1),
                 "numerator": rule_tree_eq_final,
@@ -6684,6 +6710,7 @@ def create_app() -> FastAPI:
                 "priority": r.priority,
                 "status": r.status,
                 "assessment": r.agent_assessment or "",
+                "interrupted": _trace_has_event(trace, "graph_interrupted"),
             },
             "evidence_request": evidence_request,
             "grounded_sources": cited,
@@ -6710,12 +6737,23 @@ def create_app() -> FastAPI:
 
     @app.get("/report")
     def report_recent(
+        request: Request,
         user: dict[str, Any] = Depends(get_current_user),
         db=Depends(get_db),
     ) -> dict:
-        """Operator overview: last 50 hazards for this user, counts by
-        action and class, pending approvals and evidence requests."""
-        rows = db.list_user_hazards(_user_id_of(user), limit=50)
+        """Operator overview: counts by action and class, pending approvals
+        and evidence requests. Round 29 (6.11.2026 audit F15): on a private
+        operator host the counts cover the fleet's last 24 hours, the same
+        population the pending list is drawn from (the supervisor page said
+        "Total: 0" next to 43 pending approvals); the per-user last 50 stay
+        for the citizen API."""
+        window_hours: int | None = None
+        if _is_private_host(request):
+            window_hours = 24
+            cutoff = time.time() - window_hours * 3600
+            rows = [r for r in db.list_recent_hazards(limit=500) if float(r.reported_at or 0) >= cutoff]
+        else:
+            rows = db.list_user_hazards(_user_id_of(user), limit=50)
         by_action: dict[str, int] = {}
         by_class: dict[str, int] = {}
         for r in rows:
@@ -6729,6 +6767,7 @@ def create_app() -> FastAPI:
         now = time.time()
         return {
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            "window_hours": window_hours,
             "total_hazards": len(rows),
             "by_action": by_action,
             "by_class": by_class,

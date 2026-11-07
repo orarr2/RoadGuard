@@ -59,6 +59,36 @@ const HAZARD_CLASS_LABELS = {
   D40: "Pothole",
 };
 
+// Plain-language labels for the citizen (6.11.2026 audit F14): the API's
+// internal slugs stay internal.
+const DECISION_LABELS = {
+  urgent: "Urgent",
+  standard: "Routine maintenance",
+  human_review: "Supervisor review",
+  needs_more_evidence: "More evidence requested",
+  known_image: "Already known",
+  pending: "Processing",
+};
+const STATUS_LABELS = {
+  queued: "In queue",
+  processing: "Processing",
+  open: "Open",
+  waiting_for_evidence: "Waiting for evidence",
+  evidence_expired: "Evidence expired",
+  done: "Done",
+  closed: "Closed",
+  approved: "Approved",
+  rejected: "Rejected",
+};
+const SEVERITY_LABELS = { minor: "minor", moderate: "moderate", severe: "severe" };
+const NEXT_STEP_BY_ACTION = {
+  urgent: "A municipal supervisor has been notified and handles it as urgent.",
+  standard: "The municipality queues it for routine road maintenance.",
+  human_review: "A municipal supervisor reviews the report personally.",
+  known_image: "The hazard is already tracked; nothing more is needed from you.",
+  needs_more_evidence: "A municipal supervisor reviews the report personally.",
+};
+
 // ============================================================ BOOT
 window.addEventListener("DOMContentLoaded", async () => {
   wireLanding();
@@ -112,13 +142,18 @@ async function loadMyReports() {
       const dec = it.agent_decision || "pending";
       const stat = (it.status || "open").toLowerCase();
       const label = HAZARD_CLASS_LABELS[it.class] || it.class || "unknown";
+      // 6.11.2026 audit F14: words instead of slugs; a known report or a
+      // case still processing has no priority worth showing.
+      const decLabel = DECISION_LABELS[dec] || dec.replace(/_/g, " ");
+      const statLabel = STATUS_LABELS[stat] || stat.replace(/_/g, " ");
+      const prio = (dec === "known_image" || dec === "pending") ? "-" : (it.priority ?? "-");
       return `<tr>
         <td>${escapeHtml(reported)}</td>
         <td>${escapeHtml(label)}</td>
         <td>${escapeHtml(it.road_type || "-")}</td>
-        <td>${it.priority ?? "-"}</td>
-        <td><span class="my-reports-decision ${escapeHtml(dec)}">${escapeHtml(dec)}</span></td>
-        <td><span class="my-reports-status ${escapeHtml(stat)}">${escapeHtml(stat)}</span></td>
+        <td>${prio}</td>
+        <td><span class="my-reports-decision ${escapeHtml(dec)}">${escapeHtml(decLabel)}</span></td>
+        <td><span class="my-reports-status ${escapeHtml(stat)}">${escapeHtml(statLabel)}</span></td>
       </tr>`;
     }).join("");
   } catch (err) {
@@ -1172,6 +1207,7 @@ async function submitUploadedImage() {
       renderEvidenceRequest(resp);
     } else {
       clearPendingEvidence();
+      resp.metadata = resp.metadata || { class: body.class, confidence: body.confidence };
       renderUploadVerdict(resp);
     }
   } catch (err) {
@@ -1241,6 +1277,10 @@ async function pollAsyncHazard(hazardId, verdictBox) {
           provider: "multiagent",
           fallback_reason: null,
           status: v.status,
+          // 6.11.2026 audit F14 / F3: the fields the citizen summary reads.
+          metadata: report.metadata || {},
+          severity: severityFromTrace(report.trace),
+          interrupted: !!v.interrupted,
         };
         renderUploadVerdict(resp);
         return false;
@@ -1370,12 +1410,63 @@ const CITIZEN_COPY = {
     headline: "Thank you - we already know about this one",
     body:     "This hazard has already been reported and is being tracked. No action needed from you.",
   },
+  // 6.11.2026 audit F3: the run was killed by a server restart; there is
+  // no analysis behind the verdict and the citizen is told so.
+  interrupted: {
+    headline: "Thank you - your report has been received",
+    body:     "The automatic analysis was interrupted by a server restart, so a municipal supervisor will look at the report itself.",
+  },
 };
+
+// 6.11.2026 audit F14: the detector's confidence in words, the same bands
+// the server's policy uses (decision.needs_more_evidence.confidence_range).
+function confidenceWord(conf) {
+  const c = Number(conf);
+  if (!Number.isFinite(c) || c <= 0) return null;
+  if (c < 0.4) return "low";
+  if (c < 0.6) return "moderate";
+  return "high";
+}
+
+function severityFromTrace(trace) {
+  for (const e of (trace || []).slice().reverse()) {
+    if (e && e.speaker === "profile_builder" && e.content && e.content.severity) return String(e.content.severity);
+  }
+  return null;
+}
+
+// A short deterministic account of what the agents found and why the
+// case goes where it goes, built from the stored fields only (never from
+// free model text): what was detected, how sure the detector was, the
+// severity, the next step and who takes it.
+function citizenSummary(resp) {
+  const md = resp.metadata || {};
+  const action = resp.verdict.action;
+  const conf = Number(md.confidence);
+  const label = HAZARD_CLASS_LABELS[md.class] || md.class || "";
+  const word = confidenceWord(conf);
+  const lines = [];
+  const detected = (word && label);
+  lines.push(["Detected", detected ? `${label} (${word} detector confidence)` : "No road damage was detected in the photo"]);
+  if (resp.severity && SEVERITY_LABELS[resp.severity]) lines.push(["Severity", SEVERITY_LABELS[resp.severity]]);
+  lines.push(["Next step", NEXT_STEP_BY_ACTION[action] || "The municipality reviews the report."]);
+  let why = "";
+  if (resp.interrupted) why = "The automatic analysis was interrupted by a server restart.";
+  else if (action === "known_image") why = "The photo matches a report already in the system.";
+  else if (action === "urgent") why = "A pothole on a main road with a blocked lane is handled as urgent.";
+  else if (action === "standard") why = "The damage was identified clearly enough to be queued for routine maintenance.";
+  else if (!detected) why = "With no damage detected in the photo, a person checks the report.";
+  else if (word === "moderate") why = "The detector was not sure enough (moderate confidence), so a person checks it.";
+  else if (word === "low") why = "The detector's confidence was low, so a person checks it.";
+  else why = "The case did not meet the rules for an automatic decision, so a person checks it.";
+  lines.push(["Why", why]);
+  return lines;
+}
 
 function renderUploadVerdict(resp) {
   const action = resp.verdict.action;
   const level = LEVEL_BY_ACTION[action] || "info";
-  const copy  = CITIZEN_COPY[action] || {
+  const copy  = (resp.interrupted && CITIZEN_COPY.interrupted) || CITIZEN_COPY[action] || {
     headline: "Thank you - your report has been received",
     body:     "The municipality will review it.",
   };
@@ -1390,12 +1481,16 @@ function renderUploadVerdict(resp) {
     ? String((resp.evidence_request && resp.evidence_request.message) || copy.body)
     : copy.body;
 
+  const summary = citizenSummary(resp)
+    .map(([k, v]) => `<li><b>${escapeHtml(k)}:</b> ${escapeHtml(v)}</li>`)
+    .join("");
   const html = `
     <div class="upload-verdict-card" data-level="${level}">
       <div class="upload-verdict-head">
         <span class="upload-verdict-action">${copy.headline}</span>
       </div>
       <div class="upload-verdict-rationale" style="margin-top:8px">${bodyText.replace(/[<>]/g, "")}</div>
+      <ul class="upload-verdict-summary" style="margin:8px 0 0;padding-left:18px;font-size:0.95em;line-height:1.45">${summary}</ul>
       <div class="upload-verdict-footer">
         <span>Reference <strong>#${caseRef}</strong></span>
         <span>Received at ${timeNow}</span>

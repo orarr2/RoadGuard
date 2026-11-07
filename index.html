@@ -178,12 +178,12 @@
         <div class="how-card">
           <div class="how-num">02</div>
           <h3>5 AI agents triage your report</h3>
-          <p>On the server, a pipeline of five cooperating agents, each running a different open-source language model, analyses the report: an <strong>intake</strong> agent reads your description, a <strong>perception</strong> agent interprets the detector output, a <strong>research</strong> agent looks up the matching municipal repair standard, a <strong>decision</strong> agent picks one of four actions, and a <strong>supervisor</strong> agent short-circuits obviously-hard cases straight to a human. The whole chain is logged step by step.</p>
+          <p>On the server, a pipeline of five cooperating agents, running small open-source language models (qwen2.5 and llama3.2, 3B parameters) on the city server, analyses the report: an <strong>intake</strong> agent reads your description, a <strong>perception</strong> agent interprets the detector output, a <strong>research</strong> agent looks up relevant road-maintenance guidance in the standards corpus, a <strong>decision</strong> agent picks the action, and a <strong>supervisor</strong> routes the case between the agents and enforces the time budget. Fixed safety rules send ambiguous or contradictory cases straight to a human. The whole chain is logged step by step.</p>
         </div>
         <div class="how-card">
           <div class="how-num">03</div>
           <h3>Humans stay in the loop</h3>
-          <p>The agent recommends: <strong>urgent dispatch</strong> (crew notified now), <strong>standard queue</strong> (routine maintenance), <strong>needs more evidence</strong> (we ask you for one more photo) or <strong>human review</strong> (a municipal supervisor decides). Nothing is ever dispatched automatically. Every urgent and human-review case is a recommendation the supervisor must approve, and the approval is tracked against the case for accountability.</p>
+          <p>The agent recommends: <strong>urgent dispatch</strong> (crew notified now), <strong>standard queue</strong> (routine maintenance) or <strong>human review</strong> (a municipal supervisor decides); a photo already in the system is marked as a known report. You are never asked for another photo. Nothing is ever dispatched automatically. Every urgent and human-review case is a recommendation the supervisor must approve, and the approval is tracked against the case for accountability.</p>
         </div>
       </div>
     </section>
