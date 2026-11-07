@@ -57,6 +57,13 @@ def test_every_node_call_is_bounded_by_the_run_deadline(monkeypatch):
         return _reply(), 1, 1, "ollama", "fake"
 
     monkeypatch.setattr(ra, "call_provider", fake_call_provider)
+    # Round 29 (audit F8): the research LLM runs only when the deterministic
+    # retrieval is not direct_match; an empty retrieval keeps it on so the
+    # deadline check covers that node too.
+    monkeypatch.setitem(ra.RESEARCH_TOOLS, "query_repair_standards",
+                        (lambda **kw: {"procedures": [], "tool_result_ids": [], "coverage": "no_match"},
+                         ra.RESEARCH_TOOLS["query_repair_standards"][1]))
+    ra._clear_retrieval_cache()
     final = ra.run_graph(
         "hz_deadline_test",
         {

@@ -29,6 +29,8 @@ def _hazard(hid: str, status: str = "open") -> ra.Hazard:
 
 def _on(monkeypatch):
     monkeypatch.setenv("AGENT_WORKER_AUTONOMY", "1")
+    # Round 29 (audit F7): the lessons tool is offered once a lesson exists.
+    monkeypatch.setattr(ra, "_agent_notes_count", lambda: 1)
     monkeypatch.delenv("AGENT_WORKER_REACT_MAX_HOPS", raising=False)
     monkeypatch.setenv("AGENT_SIGNAL_LLM", "ollama:fake")
     monkeypatch.setenv("AGENT_PERCEPTION_LLM", "ollama:fake")
@@ -91,7 +93,10 @@ def test_signal_numbers_without_the_tool_are_recomputed_by_regex(monkeypatch):
     monkeypatch.setattr(ra, "_llm_react_worker", lambda **_: (raw, 5, 2, {"hops": 0, "tools_run": {}}))
     parsed, _, _, autonomy = ra._extract_by_llm("deep hole here", {"location": ""}, {}, state={})
     assert parsed["reporter_signals"]["size_cm"] is None
-    assert "required_not_called:extract_measurements" in autonomy["violations"]
+    # Round 29 (6.11.2026 audit F6): "deep hole here" carries no digit, so
+    # extract_measurements is neither offered nor required; the number the
+    # model invented is still dropped by the regex check.
+    assert "required_not_called:extract_measurements" not in autonomy["violations"]
     assert "unverified_number_dropped:size_cm" in autonomy["violations"]
     assert autonomy["auto_ran"] == ["extract_measurements"]
 
@@ -181,12 +186,18 @@ def test_rag_agent_retrieval_feeds_the_handoff(monkeypatch):
     info = {"hops": 1, "tools_run": {"query_repair_standards": {
         "ok": True, "procedures": [PASSAGE], "tool_result_ids": ["p1"], "coverage": "direct_match"}}}
     monkeypatch.setattr(ra, "_llm_react_worker", lambda **_: (raw, 9, 4, info))
+    # Round 29 (audit F8): the deterministic retrieval runs first (cached)
+    # and gates the agent; here it finds nothing, so the agent retrieves.
+    calls: list = []
 
-    def boom(**_):
-        raise AssertionError("the deterministic query must not run when the agent retrieved")
+    def det(hazard_class, road_type, k=3):
+        calls.append((hazard_class, road_type))
+        return {"procedures": [], "tool_result_ids": [], "coverage": "no_match"}
 
-    monkeypatch.setitem(ra.RESEARCH_TOOLS, "query_repair_standards", (boom, ra.RESEARCH_TOOLS["query_repair_standards"][1]))
+    monkeypatch.setitem(ra.RESEARCH_TOOLS, "query_repair_standards", (det, ra.RESEARCH_TOOLS["query_repair_standards"][1]))
+    ra._clear_retrieval_cache()
     upd = ra.rag_retriever_node(_rag_state())
+    assert calls == [("D40", "main")]
     assert upd["tool_result_ids"] == ["p1"] and upd["research_coverage"] == "direct_match"
     c = upd["trace"][0]["content"]
     assert c["autonomy"]["tools_used"] == ["query_repair_standards"]
@@ -205,9 +216,13 @@ def test_rag_agent_that_never_retrieves_falls_back_to_the_tool_query(monkeypatch
 
     def det(hazard_class, road_type, k=3):
         calls.append((hazard_class, road_type))
-        return {"procedures": [PASSAGE], "tool_result_ids": ["p1"], "coverage": "direct_match"}
+        # Round 29 (audit F8): a road mismatch grades partial_match, so the
+        # research agent still runs; the deterministic result is its fallback.
+        return {"procedures": [dict(PASSAGE, road_types=["secondary"])], "tool_result_ids": ["p1"],
+                "coverage": "partial_match"}
 
     monkeypatch.setitem(ra.RESEARCH_TOOLS, "query_repair_standards", (det, ra.RESEARCH_TOOLS["query_repair_standards"][1]))
+    ra._clear_retrieval_cache()
     upd = ra.rag_retriever_node(_rag_state())
     assert calls == [("D40", "main")]
     c = upd["trace"][0]["content"]
@@ -217,7 +232,7 @@ def test_rag_agent_that_never_retrieves_falls_back_to_the_tool_query(monkeypatch
     assert c["autonomy"]["agent_retrieved"] is False
     assert c["autonomy"]["fallback"].startswith("deterministic_query (")
     assert c["autonomy"]["auto_ran"] == ["query_repair_standards"]
-    assert upd["research_coverage"] == "direct_match"  # the tool's coverage, not the agent's claim
+    assert upd["research_coverage"] == "partial_match"  # the tool's coverage, not the agent's direct_match claim
 
 
 def test_react_worker_stops_at_time_cap(monkeypatch):
@@ -277,6 +292,7 @@ def test_record_decision_lesson_writes_the_note(tmp_path):
 
 
 def test_lessons_tool_offered_only_under_autonomy(monkeypatch):
+    monkeypatch.setattr(ra, "_agent_notes_count", lambda: 1)
     monkeypatch.setenv("AGENT_WORKER_AUTONOMY", "0")
     assert "recall_agent_notes" not in {s["function"]["name"] for s in ra._decision_tool_schemas()}
     assert "recall_agent_notes" not in ra._worker_tools("profile_builder", ra.PERCEPTION_WORKER_TOOLS)

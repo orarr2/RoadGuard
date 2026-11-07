@@ -124,6 +124,7 @@ def get_settings() -> Settings:
 def reset_settings_cache() -> None:
     """Clear the lru_cache so tests can override environment between runs."""
     get_settings.cache_clear()
+    _RETRIEVAL_CACHE.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -3652,15 +3653,23 @@ def _worker_tool_call_is_other_tools_reply(
     agent_name: str, called_name: str, args: dict | None, registry: dict
 ) -> bool:
     """Round 18: True when a lookup tool got a final-answer JSON as its
-    arguments. The current tool's own final-answer shape is handled by
-    _worker_final_in_tool_call (round 11 path); this helper fires only on
-    read-only tools, where a final JSON cannot be the legitimate input."""
+    arguments; a final JSON cannot be the legitimate input of a read-only
+    tool. Round 29 (6.11.2026 audit F6): the worker's OWN final answer in
+    a tool call is its reply in the wrong envelope, accepted first by
+    _worker_final_in_tool_call (in r23 the Intake model sent its reply as
+    extract_measurements two to three times per case and every reply was
+    thrown away until the 90 s cap); this helper fires only for the final
+    keys of a different worker, which stay a misroute."""
     if not isinstance(args, dict) or not args:
         return False
     if not any(called_name.startswith(p) for p in _WORKER_LOOKUP_PREFIXES):
         return False
     this_schema = (registry.get(called_name) or (None, None))[1]
-    return _worker_final_in_tool_call(agent_name, args, this_schema)
+    return any(
+        _worker_final_in_tool_call(other, args, this_schema)
+        for other in _WORKER_FINAL_KEYS
+        if other != agent_name
+    )
 
 
 def _worker_final_in_tool_call(agent_name: str, args: dict | None, schema: dict | None) -> bool:
@@ -3842,13 +3851,23 @@ def _react_worker_rounds(
                 result = {"ok": False, "error": "arguments were not a JSON object"}
             elif name not in tool_registry:
                 result = {"ok": False, "error": f"unknown tool {name!r}"}
+            elif _worker_final_in_tool_call(agent_name, parsed_args, tool_registry[name][1]):
+                # Round 11: the reply JSON arrived as a tool call; the
+                # arguments are the reply, nothing runs. Round 29 (audit
+                # F6): checked before the cross-tool test, whatever the tool
+                # name, so the worker's own reply is never thrown away.
+                misrouted_final = parsed_args
+                misrouted_now = True
+                # Round 16: not a failed tool. The reply came in the wrong
+                # envelope; it is used as the reply and labelled as such.
+                result = {"ok": False, "reply_in_tool_call": True, "error": "final reply arrived as a tool call; used as the reply"}
             elif _worker_tool_call_is_other_tools_reply(
                 agent_name, name, parsed_args, tool_registry
             ):
                 # Round 18: the arguments carry the final-answer shape of a
-                # DIFFERENT tool (r11 hz_8b3da7a17132). Not a reply, not a
-                # tool call: recorded as a failed tool call and the loop
-                # keeps going so the model may answer as plain JSON next.
+                # DIFFERENT worker (r11 hz_8b3da7a17132 shape). Not a reply,
+                # not a tool call: recorded as a failed tool call and the
+                # loop keeps going so the model may answer as plain JSON next.
                 result = {
                     "ok": False,
                     "error": (
@@ -3856,14 +3875,6 @@ def _react_worker_rounds(
                         "reply with the final JSON content, not as a tool call"
                     ),
                 }
-            elif _worker_final_in_tool_call(agent_name, parsed_args, tool_registry[name][1]):
-                # Round 11: the reply JSON arrived as a tool call; the
-                # arguments are the reply, nothing runs.
-                misrouted_final = parsed_args
-                misrouted_now = True
-                # Round 16: not a failed tool. The reply came in the wrong
-                # envelope; it is used as the reply and labelled as such.
-                result = {"ok": False, "reply_in_tool_call": True, "error": "final reply arrived as a tool call; used as the reply"}
             else:
                 fn, schema = tool_registry[name]
                 code = getattr(fn, "__code__", None)
@@ -3959,12 +3970,22 @@ def _react_worker_rounds(
 # that actually ran, numeric claims against the tools' own results). All
 # of it is deterministic; the LLM calls stay where they were.
 
+_MEASURE_CALL_SENTENCE = (
+    "Before filling reporter_signals, call extract_measurements with the raw text "
+    "and copy its numbers; never estimate centimetres yourself. "
+)
+_NO_MEASURE_SENTENCE = (
+    "The text states no number, so size_cm and depth_cm are null; never "
+    "estimate centimetres yourself. "
+)
+
+
 _AUTONOMY_ADDENDA = {
     "signal_extractor": (
         "\n\nAUTONOMOUS MODE. The detector class and the form values are not "
-        "given to you; only the reporter's text and the location are. Before "
-        "filling reporter_signals, call extract_measurements with the raw text "
-        "and copy its numbers; never estimate centimetres yourself. If the text "
+        "given to you; only the reporter's text and the location are. "
+        + _MEASURE_CALL_SENTENCE +
+        "If the text "
         "or the location names a place, call lookup_prior_reports(location, "
         "hazard_class) and mention the result in summary. Add to your JSON: "
         '"tools_used": [names of the tools you called].'
@@ -4033,10 +4054,24 @@ def _autonomy_record(parsed: dict | None, info: dict, required: tuple[str, ...])
     }
 
 
+def _agent_notes_count() -> int:
+    """Rows in agent_notes (a supervisor's lessons); 0 on any error."""
+    try:
+        with Database(get_settings().roadguard_db_path) as db:
+            row = db._conn.execute("SELECT COUNT(*) FROM agent_notes").fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
 def _worker_tools(agent: str, base: dict) -> dict:
     """The worker's registry; under autonomy perception and research also
-    get the shared lessons tool (recall_agent_notes)."""
+    get the shared lessons tool (recall_agent_notes), once a lesson exists.
+    Round 29 (6.11.2026 audit F7): in r23 the tool answered 0 lessons in
+    48 of 48 calls on an empty table, a hop spent for nothing."""
     if not worker_autonomy_enabled() or agent not in ("profile_builder", "rag_retriever"):
+        return base
+    if _agent_notes_count() <= 0:
         return base
     registry = dict(base)
     registry["recall_agent_notes"] = (recall_agent_notes, NOTES_SCHEMA)
@@ -4229,6 +4264,40 @@ def _deterministic_workers_reason(state: dict | None) -> str | None:
     for llm_skipped_reason. None when the workers' LLM passes may matter."""
     reason = (state or {}).get("deterministic_workers_reason")
     return f"verdict_fixed:{reason}" if reason else None
+
+
+def _perception_llm_no_signal(yolo: dict, md: dict) -> str | None:
+    """Round 29 (6.11.2026 audit F7): the Perception LLM runs only on a
+    signal the rule profile does not read: reporter text, a detector
+    confidence inside the ambiguous band (policy
+    decision.needs_more_evidence.confidence_range) or more than one class
+    in the frame. In r23 it ran 89 times, 63 of its proposals were blocked
+    by the gates and the rule tree moved in 6 cases; on a single clear
+    class with no text its measured effect was a lower confidence (audit
+    22.10 said the same). Returns the skip reason, or None when the LLM
+    pass may matter."""
+    if (md.get("reporter_text") or "").strip():
+        return None
+    try:
+        conf = float(yolo.get("top1_confidence") or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    try:
+        band = (((load_policy() or {}).get("decision") or {}).get("needs_more_evidence") or {}).get("confidence_range") or [0.4, 0.6]
+        lo, hi = float(band[0]), float(band[1])
+    except (TypeError, ValueError, IndexError):
+        lo, hi = 0.4, 0.6
+    if lo <= conf < hi:
+        return None
+    classes = {
+        str(d.get("class") or "").upper()
+        for d in (yolo.get("detections") or [])
+        if isinstance(d, dict) and d.get("class")
+    }
+    classes |= {str(c).upper() for c in (yolo.get("n_detections_by_class") or {}) if c}
+    if len(classes) > 1:
+        return None
+    return "no_llm_signal (one class, confidence outside the ambiguous band, no reporter text)"
 
 
 def _clear_case_fast_path(yolo: dict, iq: dict, md: dict) -> str | None:
@@ -8097,6 +8166,19 @@ def _parse_intake_json(text: str) -> dict | None:
     }
 
 
+def _signal_worker_offer(text: str) -> tuple[dict, str]:
+    """Round 29 (6.11.2026 audit F6): the tools and the system prompt the
+    Intake agent gets. extract_measurements is a regex over digits; on
+    text without one it returned null in every field (8 of 8 in r23) and
+    the model still had to call it. It is offered, and required, only when
+    the text carries a digit; the prompt sentence changes with it."""
+    prompt = _autonomy_prompt("signal_extractor", SIGNAL_EXTRACTOR_SYSTEM_PROMPT)
+    if re.search(r"\d", text or ""):
+        return SIGNAL_WORKER_TOOLS, prompt
+    tools = {k: v for k, v in SIGNAL_WORKER_TOOLS.items() if k != "extract_measurements"}
+    return tools, prompt.replace(_MEASURE_CALL_SENTENCE, _NO_MEASURE_SENTENCE)
+
+
 def _extract_by_llm(
     text: str, md: dict, yolo: dict, state: dict | None = None
 ) -> tuple[dict | None, int, int, dict | None]:
@@ -8120,11 +8202,12 @@ def _extract_by_llm(
     # ReAct path: when enabled AND a per-worker LLM is set, the Intake agent
     # may call extract_measurements / lookup_prior_reports before replying.
     if worker_react_enabled() and provider:
+        tools, system_prompt = _signal_worker_offer(text)
         raw, in_tok, out_tok, info = _llm_react_worker(
             agent_name="signal_extractor",
-            system_prompt=_autonomy_prompt("signal_extractor", SIGNAL_EXTRACTOR_SYSTEM_PROMPT),
+            system_prompt=system_prompt,
             user_payload=payload,
-            tool_registry=SIGNAL_WORKER_TOOLS,
+            tool_registry=tools,
             state=state or {},
             provider_override=provider,
             time_cap_s=_policy_latency()["worker_time_cap_s"] if autonomous else None,
@@ -8135,7 +8218,9 @@ def _extract_by_llm(
         parsed = _parse_intake_json(json.dumps(raw)) if isinstance(raw, dict) else None
         autonomy = None
         if autonomous:
-            autonomy = _autonomy_record(raw, info, required=("extract_measurements",))
+            autonomy = _autonomy_record(
+                raw, info, required=("extract_measurements",) if "extract_measurements" in tools else (),
+            )
             if parsed is not None:
                 parsed["reporter_signals"] = _verified_signals(
                     text, parsed.get("reporter_signals"), info, autonomy
@@ -8788,7 +8873,11 @@ def profile_builder_node(state: RoadGuardState) -> dict:
     if iq.get("brightness_mean", 0.5) < 0.2:
         base_missing.append("lighting")
 
-    fast_path = _clear_case_fast_path(yolo, iq, md) or _deterministic_workers_reason(state)
+    fast_path = (
+        _clear_case_fast_path(yolo, iq, md)
+        or _deterministic_workers_reason(state)
+        or _perception_llm_no_signal(yolo, md)
+    )
     llm_enabled = _profile_llm_enabled() and fast_path is None
     if llm_enabled:
         refined, in_tok, out_tok = _llm_refine(
@@ -8947,6 +9036,70 @@ def profile_builder_node(state: RoadGuardState) -> dict:
 
 
 _VALID_COVERAGE = {"direct_match", "partial_match", "no_match"}
+
+
+_RETRIEVAL_CACHE: dict[tuple, tuple[float, dict]] = {}
+_RETRIEVAL_CACHE_TTL_S = 3600.0
+
+
+def _clear_retrieval_cache() -> None:
+    _RETRIEVAL_CACHE.clear()
+
+
+def _cached_repair_standards(hazard_class: str, road_type: str, k: int = 3) -> tuple[dict, str]:
+    """Round 29 (6.11.2026 audit F8): query_repair_standards through a
+    per-process cache. In r23 the 94 runs asked four distinct queries (the
+    query is derived from class and road type) and embedded each one 94
+    times. Keyed by the tool function (a test stub gets its own entries),
+    the corpus path, class, road type and k; an entry lives an hour, and
+    the caller gets a copy, so the filters downstream never touch the
+    cached passages. Returns (result, "hit" | "miss")."""
+    import copy as _copy
+    fn = RESEARCH_TOOLS["query_repair_standards"][0]
+    try:
+        corpus = str(get_settings().roadguard_rag_path)
+    except Exception:
+        corpus = ""
+    key = (id(fn), corpus, str(hazard_class), str(road_type), int(k))
+    now = time.time()
+    hit = _RETRIEVAL_CACHE.get(key)
+    if hit and hit[0] > now:
+        return _copy.deepcopy(hit[1]), "hit"
+    result = fn(hazard_class=hazard_class, road_type=road_type, k=k)
+    _RETRIEVAL_CACHE[key] = (now + _RETRIEVAL_CACHE_TTL_S, _copy.deepcopy(result))
+    return result, "miss"
+
+
+def _drop_non_road_passages(result: dict, hazard_class: str, road_type: str, perception_conf: str) -> None:
+    """27.10.2026 relevance filter: non-road passages (safety-non-road-* in
+    mini_corpus) were being returned for every D40/D20 road query, and the
+    LLM's own key_findings called them "non-applicable". Drop them unless
+    the current frame actually reads as a non-road scene; in that case the
+    perception_confidence floor already routes to human_review, which uses
+    the passage directly. Coverage is regraded on what is left (the
+    tool's own label is replaced whenever passages remain)."""
+    if perception_conf == "low":
+        return
+    filtered_procs = []
+    filtered_ids: set[str] = set()
+    for p in result["procedures"]:
+        ids = p.get("article_ids") or []
+        drop = any(
+            str(aid).lower().startswith(("safety-non-road", "non-road"))
+            for aid in ids
+        )
+        if drop:
+            for aid in ids:
+                filtered_ids.add(str(aid))
+            continue
+        filtered_procs.append(p)
+    if filtered_procs or filtered_ids:
+        result["procedures"] = filtered_procs
+        result["tool_result_ids"] = [
+            aid for aid in result.get("tool_result_ids", [])
+            if aid not in filtered_ids
+        ]
+        result["coverage"] = _coverage(filtered_procs, hazard_class, road_type)
 
 
 def _rag_llm_enabled() -> bool:
@@ -9205,6 +9358,18 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
         state.get("yolo_output") or {}, state.get("image_quality") or {}, md
     ) or _deterministic_workers_reason(state)
     llm_enabled = _rag_llm_enabled() and fast_path is None
+    # Round 29 (6.11.2026 audit F8): the deterministic retrieval comes first
+    # (cached per class and road type), and the research LLM, relabel or
+    # autonomous retrieval, runs only when the tool-graded coverage is not
+    # direct_match. In r23 it ran 94 times, changed 44 labels and no
+    # verdict; the direct_match cases it relabelled read to the operator
+    # as if something had changed.
+    perception_conf = state.get("perception_confidence", "medium")
+    det_result, rag_cache = _cached_repair_standards(hazard_class, road_type, k=3)
+    _drop_non_road_passages(det_result, hazard_class, road_type, perception_conf)
+    if llm_enabled and det_result.get("coverage") == "direct_match":
+        llm_enabled = False
+        fast_path = "coverage_direct_match"
     autonomous = llm_enabled and worker_autonomy_enabled()
     auto_label: dict | None = None
     autonomy: dict | None = None
@@ -9218,44 +9383,17 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
             hazard_class, road_type, profile, md, state
         )
     if result is None:
-        result = RESEARCH_TOOLS["query_repair_standards"][0](
-            hazard_class=hazard_class, road_type=road_type, k=3
-        )
+        result = det_result
         if autonomy is not None:
             autonomy["fallback"] = (
                 f"deterministic_query ({len(result.get('procedures') or [])} passages)"
             )
             autonomy["auto_ran"] = ["query_repair_standards"]
 
-    # 27.10.2026 relevance filter: non-road passages (safety-non-road-* in
-    # mini_corpus) were being returned for every D40/D20 road query, and
-    # the LLM's own key_findings called them "non-applicable". Drop them
-    # unless the current frame actually reads as a non-road scene; in
-    # that case the perception_confidence floor already routes to
-    # human_review, which uses the passage directly.
-    perception_conf = state.get("perception_confidence", "medium")
-    if perception_conf != "low":
-        filtered_procs = []
-        filtered_ids: set[str] = set()
-        for p in result["procedures"]:
-            ids = p.get("article_ids") or []
-            drop = any(
-                str(aid).lower().startswith(("safety-non-road", "non-road"))
-                for aid in ids
-            )
-            if drop:
-                for aid in ids:
-                    filtered_ids.add(str(aid))
-                continue
-            filtered_procs.append(p)
-        if filtered_procs or filtered_ids:
-            result["procedures"] = filtered_procs
-            result["tool_result_ids"] = [
-                aid for aid in result.get("tool_result_ids", [])
-                if aid not in filtered_ids
-            ]
-            # Recompute coverage based on what is actually left.
-            result["coverage"] = _coverage(filtered_procs, hazard_class, road_type)
+    # 27.10.2026 relevance filter (see _drop_non_road_passages); the
+    # deterministic result was already graded before the LLM gate above,
+    # the agent's own retrieval is graded here.
+    _drop_non_road_passages(result, hazard_class, road_type, perception_conf)
 
     # Trace enrichment (27.10.2026): the batch log hid WHAT the RAG actually
     # retrieved - only ids and findings were printed, so an auditor could
@@ -9379,6 +9517,7 @@ def rag_retriever_node(state: RoadGuardState) -> dict:
             # dump. passage_previews are already truncated per-chunk.
             "rag_query": rag_query_str,
             "rag_filter": {"hazard_class": hazard_class, "road_type": road_type, "k": 3},
+            "rag_cache": rag_cache,
             "passage_previews": passage_previews,
         },
     }
@@ -10042,7 +10181,7 @@ def _llm_decide(
 def _decision_tools() -> dict:
     """DECISION_TOOLS, plus the shared lessons tool when the workers run
     autonomously (one memory for every agent)."""
-    if not worker_autonomy_enabled():
+    if not worker_autonomy_enabled() or _agent_notes_count() <= 0:
         return DECISION_TOOLS
     tools = dict(DECISION_TOOLS)
     tools["recall_agent_notes"] = (recall_agent_notes, NOTES_SCHEMA)

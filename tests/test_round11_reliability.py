@@ -49,24 +49,22 @@ def _run_worker(monkeypatch, replies, registry):
     return out, seen
 
 
-def test_worker_reply_sent_as_a_tool_call_through_a_lookup_tool_is_retried(monkeypatch):
-    """Round 18 (2.11.2026): the final JSON cannot ride a lookup tool call.
-    The first attempt is rejected as a failed tool call, the model is asked
-    again, and a plain-content reply the second time is accepted."""
+def test_worker_reply_sent_as_a_tool_call_through_a_lookup_tool_is_the_reply(monkeypatch):
+    """Round 18 (2.11.2026) rejected a final JSON riding a lookup tool call
+    and asked again; round 29 (6.11.2026 audit F6) uses the worker's own
+    reply as the reply at once (the retry threw it away in r23) and still
+    runs nothing with the reply as arguments."""
     record = []
     reply = {"severity_signal": "severe", "severity_rationale": "D40 pothole", "confidence": "high",
              "needs_more_evidence": False, "missing_fields": [], "tools_used": ["inspect_image_quality"]}
     replies = [
         _msg(tool_calls=[_call("lookup_similar_cases", reply)]),
-        _msg(content=json.dumps(reply)),
     ]
     (parsed, _, _, info), seen = _run_worker(monkeypatch, replies, _registry(record))
-    assert parsed == reply and len(seen) == 2
+    assert parsed == reply and len(seen) == 1
     assert record == [], "nothing may run with the reply as arguments"
-    # First call: rejected as a failed tool call with the new error wording.
     first = info["calls"][0]
-    assert first["ok"] is False  # round 18: executed as a failed tool call (validation failed before run)
-    assert "look like another tool" in (first.get("error") or "")
+    assert first["ok"] is False and first.get("reply_in_tool_call") is True
 
 
 def test_worker_tool_arguments_are_validated_and_unknown_keys_dropped(monkeypatch):

@@ -16,10 +16,11 @@ def _call(name, args, call_id="c1"):
     return {"id": call_id, "function": {"name": name, "arguments": json.dumps(args)}}
 
 
-def test_worker_reply_through_a_lookup_tool_is_retried_once(monkeypatch):
-    """Round 18 (2.11.2026): a lookup tool cannot carry the final answer;
-    the first tool-call reply is rejected and the retry round's plain
-    content is accepted. Supersedes the round 16 reply-in-envelope test."""
+def test_worker_reply_through_a_lookup_tool_is_the_reply(monkeypatch):
+    """Round 18 (2.11.2026) retried a final answer that rode a lookup tool;
+    round 29 (6.11.2026 audit F6) uses the worker's own reply as the reply
+    (reply_in_tool_call, the round 16 label), nothing runs, and the autonomy
+    record does not count it as a failed tool."""
     ran = []
 
     def similar(location: str, hazard_class: str, state: dict | None = None) -> dict:
@@ -31,7 +32,6 @@ def test_worker_reply_through_a_lookup_tool_is_retried_once(monkeypatch):
              "needs_more_evidence": False, "missing_fields": []}
     replies = iter([
         _msg(tool_calls=[_call("lookup_similar_cases", reply)]),
-        _msg(content=json.dumps(reply)),
     ])
     monkeypatch.setattr(ra, "chat", lambda messages, tools=None, temperature=0.0, use_panel=False, provider_override=None, **kw: (next(replies), 10, 5))
     parsed, _, _, info = ra._llm_react_worker(
@@ -40,10 +40,9 @@ def test_worker_reply_through_a_lookup_tool_is_retried_once(monkeypatch):
     )
     assert parsed == reply and ran == []
     first = info["calls"][0]
-    assert first["ok"] is False  # round 18: executed as a failed tool call (validation failed before run)
-    assert "look like another tool" in (first.get("error") or "")
+    assert first["ok"] is False and first.get("reply_in_tool_call") is True
     rec = ra._autonomy_record(parsed, info, required=("inspect_image_quality",))
-    assert "tool_call_failed:lookup_similar_cases" in rec["violations"]
+    assert "tool_call_failed:lookup_similar_cases" not in rec["violations"]
 
 def test_result_lines_carry_tool_failures_and_reply_via():
     prof = {"speaker": "profile_builder", "kind": "handoff_out", "content": {

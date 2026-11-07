@@ -204,16 +204,27 @@ def test_grounded_rationale_passes_untouched():
 
 def test_worker_tool_call_is_other_tools_reply_detects_cross_tool_schema():
     registry = ra.PERCEPTION_WORKER_TOOLS
-    # profile_builder final keys include severity_signal, severity_rationale, confidence
+    # Round 29 (6.11.2026 audit F6): the helper fires on ANOTHER worker's
+    # final keys (here rag_retriever's) riding a lookup tool; the worker's
+    # own final keys are its reply and are accepted before this check.
     bad_args = {
+        "coverage": "direct_match",
+        "key_findings": ["patch within 48h"],
+        "cited_ids": ["p1"],
+        "confidence": "medium",
+    }
+    assert ra._worker_tool_call_is_other_tools_reply(
+        "profile_builder", "lookup_similar_cases", bad_args, registry,
+    ) is True
+    own_args = {
         "severity_signal": "minor",
         "severity_rationale": "D20 crack",
         "confidence": "medium",
         "needs_more_evidence": False,
     }
     assert ra._worker_tool_call_is_other_tools_reply(
-        "profile_builder", "lookup_similar_cases", bad_args, registry,
-    ) is True
+        "profile_builder", "lookup_similar_cases", own_args, registry,
+    ) is False
 
 
 def test_worker_tool_call_is_other_tools_reply_false_for_actual_input():

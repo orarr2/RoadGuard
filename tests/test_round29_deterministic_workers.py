@@ -102,10 +102,12 @@ def test_signal_extractor_llm_still_runs_without_the_flag(monkeypatch):
 
 
 def _profile_state(reason):
+    # confidence 0.5 sits in the ambiguous band, so the F7 gate lets the
+    # LLM run and only the verdict-fixed flag decides here
     return {
-        "yolo_output": {"top1_class": "D20", "top1_confidence": 0.6,
+        "yolo_output": {"top1_class": "D20", "top1_confidence": 0.5,
                         "n_detections_by_class": {"D20": 1},
-                        "detections": [{"class": "D20", "confidence": 0.6, "area_ratio": 0.1}]},
+                        "detections": [{"class": "D20", "confidence": 0.5, "area_ratio": 0.1}]},
         "image_quality": {"blur_score": 120, "is_road_scene": True},
         "metadata": {"road_type": "main", "lane_blocked": "none", "location": "x",
                      "reporter_text": ""},

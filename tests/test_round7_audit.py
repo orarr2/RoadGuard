@@ -143,6 +143,12 @@ def test_rag_node_trace_carries_the_worker_steps_before_the_handoff(monkeypatch)
             "ok": True, "procedures": [passage], "tool_result_ids": ["p1"], "coverage": "direct_match"}}}
 
     monkeypatch.setattr(ra, "_llm_react_worker", fake_worker)
+    # Round 29 (audit F8): the research LLM runs only when the deterministic
+    # retrieval is not direct_match; an empty retrieval keeps it on here.
+    monkeypatch.setitem(ra.RESEARCH_TOOLS, "query_repair_standards",
+                        (lambda **kw: {"procedures": [], "tool_result_ids": [], "coverage": "no_match"},
+                         ra.RESEARCH_TOOLS["query_repair_standards"][1]))
+    ra._clear_retrieval_cache()
     state = {"hazard_profile": {"primary_class": "D40", "primary_confidence": 0.5, "severity_signal": "moderate"},
              "metadata": {"road_type": "main", "lane_blocked": "none"}, "yolo_output": {"top1_class": "D40", "top1_confidence": 0.5},
              "image_quality": {"blur_score": 60}, "iterations": 2, "perception_confidence": "medium"}
