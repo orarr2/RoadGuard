@@ -49,7 +49,7 @@
 ה־Charter של הפרויקט ([`../CHARTER.md`](../CHARTER.md)) מגדיר ארבעה כללים שלא ניתן לפרוץ:
 
 1. **ארבע מחלקות סיווג בלבד:** D00 (סדק אורכי), D10 (סדק רוחבי), D20 (סדקי עור תנין), D40 (בור). כל מה שחורג - `human_review`.
-2. **ארבע פעולות בלבד:** `urgent`, `standard`, `needs_more_evidence`, `human_review`. אין פעולות אחרות.
+2. **ארבע פעולות בלבד:** `urgent`, `standard`, `needs_more_evidence`, `human_review` (ו-`known_image` לתמונה שכבר בקטלוג). מאז 6.11.2026 `needs_more_evidence` אינה מגיעה לאזרח: רצועת הביטחון 0.4-0.6 וכיסוי תקנים חסר מנותבים ל-`human_review` (סעיף א.4).
 3. **כל `urgent` ו־`human_review` חייבת אישור אדם לפני ביצוע** (5-6).
 4. **כל ציטוט חייב להיות מבוסס.** היעד: 90% ציטוטים מבוססים.
 
@@ -65,13 +65,27 @@
 
 ---
 
+### א.4 מה השתנה מאז 1.11.2026 (סבבים 25-29, עד 7.11.2026)
+
+המסמך שלהלן נכתב ב-1.11.2026. הנקודות הבאות גוברות על כל ניסוח ישן בהמשך המסמך (הקוד ו-`policy.yaml` הם מקור האמת):
+
+- **אין בקשת תמונה נוספת מהאזרח (6.11.2026, סבב 28).** `MAX_EVIDENCE_REQUESTS_PER_HAZARD = 0` ו-`policy.yaml` גרסה 2026.11.06: רצועת הביטחון 0.4-0.6 ללא חזרתיות מנותבת ל-`human_review` בעץ הכללים; verdict של `needs_more_evidence` שה-LLM עדיין מציע הופך ל-`human_review` ב-`_apply_evidence_cap`; רצפת ה-RAG (סבב 25: `standard` על `insufficient_coverage`) מנתבת ל-`human_review` ולא ל-`needs_more_evidence`. המסלול `await_evidence` / `evidence_requests` נשאר בקוד ואינו מופעל. בדפדפן: TTL של בקשה ממתינה שעה (היסטורי), סף הגלאי 0.25.
+- **רצפת phash עם רדיוס (7.11.2026, F5).** שכן phash שהתוויות שלו סותרות את הגלאי מנתב ל-`human_review` רק עד מרחק `known_image.phash_floor_max_distance` (10 ביטים); שכנים רחוקים יותר (החיפוש המורחב עד 16) מצוטטים כהקשר בלבד. `known_image` נחתם רק על זהות sha256.
+- **עובדים דטרמיניסטיים כשהקטלוג קבע (7.11.2026, F12).** `sanitize_node` רושם `deterministic_workers_reason` (`known_image_shortcut` או `phash_class_mismatch_floor`); Intake, Perception ו-Research מריצים את מסלול הכללים שלהם ומדלגים על קריאת ה-LLM (`llm_skipped_reason=verdict_fixed:*`).
+- **קריאת ה-LLM של העובדים מותנית באות (7.11.2026, F7/F8).** Perception קורא ל-LLM רק כשיש טקסט מדווח, ביטחון ברצועה 0.4-0.6 או יותר ממחלקה אחת בתמונה (`_perception_llm_no_signal`); Research רק כשהכיסוי הדטרמיניסטי אינו `direct_match`, והשליפה נשמרת במטמון לפי (מחלקה, סוג כביש, קורפוס) לשעה (`rag_cache` hit/miss בטרייס). `recall_agent_notes` מוצע לעובדים ול-Decision רק כשבטבלת `agent_notes` יש לקחים.
+- **תשובת עובד בתוך קריאת כלי מתקבלת (7.11.2026, F6).** תשובה סופית שהגיעה כארגומנטים של כלי (למשל `extract_measurements`) היא התשובה; רק מפתחות של עובד אחר דרך כלי קריאה נדחים (סבב 18). `extract_measurements` מוצע ונדרש רק כשהטקסט מכיל ספרה.
+- **Decision (7.11.2026, F9/F10/F16).** `DECISION_REACT_MAX_HOPS = 1` מאז 4.11.2026, ומתחת לשתי קפיצות לא נשלחות סכמות כלים כלל (`tools_offered=0` ברשומת ה-react); תוצאות הכלים הדטרמיניסטיים (`check_hazard_severity`, `lookup_dataset_image`) נמצאות בפרומפט. תשובה שאינה JSON תקין עוברת תיקון דטרמיניסטי (`_repair_json_object`: חיתוך פרוזה, פסיקים עודפים, סגירת סוגריים ומחרוזות) לפני שהיא נחשבת unparseable. הערת ה-Supervisor (`pipeline_concern`, `expected_difficulty`, `note`) נכנסת ל-payload כ-`supervisor_note`, "with high confidence" נתפס כמילת ביטחון, וקריאת ה-Supervisor נספרת בעלות הריצה. priority 0 מהמודל מתמלא מ-`check_hazard_severity` גם אחרי סבב התיקון.
+- **מה האזרח רואה (7.11.2026, F14/F3).** מתחת לאישור הקבלה מופיע פירוט דטרמיניסטי משדות התוצאה: מה זוהה, ביטחון הגלאי במילים (רצועות המדיניות), חומרה, הצעד הבא ולמה; בטבלת "My reports" תוויות במקום slugs. ריצה שנקטעה בהפעלה מחדש של השירות מסומנת (`verdict.interrupted` ב-`/report`, תג `interrupted` ב-digest, הודעה נפרדת לאזרח), ו-`rg-restart` ב-VM מסרב להפעיל מחדש בזמן ריצה.
+- **דפי המפעיל והמדדים (7.11.2026, F15/F18/F11).** `/roadguard/trace` מציג ב-replay את 24 השעות האחרונות מהחדש לישן (עד 20 מקרים); `/report` במארח פרטי סופר את הצי ב-24 השעות (`window_hours`); ה-KPI `correct_action` נקרא עכשיו `rule_tree_agreement` ("Agreement with rule tree (not accuracy)"): הדיוק עצמו נמדד ממשוב עובד העירייה ב-digest (`agent_feedback`), לא מתיוג חיצוני. "agents justified" סופר כלי כערך רק כשהחזיר תוצאה לא ריקה. טקסט המדווח נשמר גם במסלול submit-async ומוצג ב-digest.
+- **מספרים.** סוויטת הבדיקות: 426 (7.11.2026). הקורפוס: 4,663 קטעים (v2 של בני, חי מאז 3.11.2026). ריצת r23 (5.11.2026, 94 תמונות): הסכמה עם עץ הכללים 76/94 (81%; הפערים הם שינויי ה-LLM וה-floors, לא שגיאות), חציון 96 שניות למקרה ב-batch (P90 181).
+
 ## פרק ב' - הגרף
 
 הזרימה:
 
 ```
 sanitize -> Intake -> Perception -> Research -> Decision --┬---> END
-                                     (needs_more_evidence) --> await_evidence (pause; resumed by /evidence_requests/{id}/fulfill)
+                                     (needs_more_evidence) --> await_evidence (pause; resumed by /evidence_requests/{id}/fulfill)  [לא מופעל מאז 6.11.2026: תקרת הבקשות 0]
                                               │
                             (urgent / human_review)
                                               │
@@ -86,7 +100,7 @@ sanitize -> Intake -> Perception -> Research -> Decision --┬---> END
 - **Intake** - קורא את `reporter_text` (אם יש) ורושם מה הטקסט טוען, אילו רמזי חומרה הוא מציין (`reporter_signals`: גודל, עומק, רכבים עוקפים, מים עומדים) ואיפה הוא סותר את YOLO או את הטופס. הטופס לא נדרס.
 - **Perception** - מפרש את ה־YOLO ל־`HazardProfile` בכללים; קריאת ה-LLM שלו opt-in (`AGENT_PROFILE_BUILDER_LLM=1`, כבוי כברירת מחדל).
 - **Research** - שליפת תקנים מ־RAG, עם ניטרול regex וחיתוך ל-160 תווים על ה-passage הגולמי (אין מודל שני); תיוג ה-coverage ב-LLM opt-in (`AGENT_RAG_RETRIEVER_LLM=1`, כבוי כברירת מחדל).
-- **Decision** - בוחר אחת מארבע הפעולות; ציטוטיו חייבים להיות מבוססים. על `needs_more_evidence` מנסח בקשת ראיות אחת. כותב גם `assessment` - טקסט מודל למפקח בלבד.
+- **Decision** - בוחר אחת מהפעולות; ציטוטיו חייבים להיות מבוססים. מאז 6.11.2026 אינו מבקש ראיות (תקרה 0): מקרה מעורפל עובר ל-`human_review`. כותב גם `assessment` - טקסט מודל למפקח בלבד.
 - **Approval gate** - רץ רק על `urgent`/`human_review`. כותב ל־`approvals` ועוצר עד לאישור אדם.
 - **await_evidence** - נקודת העצירה וההמשך של סבב הראיות (`interrupt_before`); הריצה חוזרת ל-sanitize כשהמדווח עונה.
 - **Supervisor (לא LLM)** - אוכף את ה־budget guard לפני כל צומת.
@@ -207,7 +221,7 @@ class ResearchHandoff(TypedDict):
 |---|---|---|
 | recall על D40 | 80% | תלוי במודל YOLO |
 | mAP@0.5 כולל | ≥0.55 | תלוי במודל YOLO |
-| נכונות החלטות על 70 תסריטים | ≥85% | 70/70 בעץ הדטרמיניסטי |
+| הסכמה עם עץ הכללים (`rule_tree_agreement`; אינה דיוק) | ≥85% | r23 (5.11.2026): 76/94 (81%); הדיוק נמדד ממשוב עובד העירייה (`agent_feedback`) |
 | ציטוטים מבוססים | ≥90% | נאכף runtime ב־`assert_decision_grounded` |
 
 ה־73 התסריטים הסינתטיים ב־[`tests/multiagent_eval_scenarios.json`](../tests/multiagent_eval_scenarios.json): 50 baseline + 20 adversarial (OCR injection, location injection, scene לא-כביש, confidence גבולי, וקטורים משולבים) + 3 תרחישי קצה של policy (31.10.2026: סף urgent ב-0.60 בדיוק, 0.59 מתחתיו, ומסלול fast path), ויחד עם 27 התרחישים המתויגים ב-`tests/labeled_scenarios.json` הסט מונה 100. ה-eval harness ב־[`tests/test_eval_scenarios.py`](../tests/test_eval_scenarios.py) מריץ `run_graph` על כל אחד ובודק `final.action == expected_action`. המדידה החיה נעשית ב-`scripts/agent_eval.py` (דיוק, P50/P95, מדדים לכל סוכן) וב-`scripts/rag_relevance_eval.py` (רלוונטיות RAG על 16 צמדי class x road); דיוק מול התוויות הסינתטיות הוא הסכמה עם עץ הכללים שייצר אותן, לא אמת-קרקע.
@@ -236,7 +250,7 @@ class ResearchHandoff(TypedDict):
 
 הנתיב קבוע: הגרף. נקודת הכניסה: `agent.multiagent.adapter.multiagent_decide`.
 
-התשובה (`HazardSubmitResponse`) נושאת `status`: `decided` (verdict סופי) או `waiting_for_evidence` (verdict `needs_more_evidence` + `evidence_request` עם `id`, `missing_field`, `message`; הגרף ממתין על checkpoint). במקרה השני המדווח שולח את ההעלאה החדשה באותו מבנה ל-`POST /evidence_requests/{id}/fulfill` (`agent.multiagent.adapter.multiagent_resume`), שמחזיר את אותו מבנה עם `status: decided`. רק בעל המפגע (אותו `sub` ב-JWT) רשאי לרשום (`GET /evidence_requests`) או למלא את הבקשה; הבקשה מסומנת `fulfilled` רק אחרי שה-resume הצליח; סבב ראיות אחד למפגע נאכף גם ב-API.
+התשובה (`HazardSubmitResponse`) נושאת `status`: `decided` (verdict סופי; מאז 6.11.2026 תמיד, כי תקרת בקשות הראיה היא 0) או, היסטורית, `waiting_for_evidence` (verdict `needs_more_evidence` + `evidence_request` עם `id`, `missing_field`, `message`; הגרף ממתין על checkpoint). במקרה השני המדווח שולח את ההעלאה החדשה באותו מבנה ל-`POST /evidence_requests/{id}/fulfill` (`agent.multiagent.adapter.multiagent_resume`), שמחזיר את אותו מבנה עם `status: decided`. רק בעל המפגע (אותו `sub` ב-JWT) רשאי לרשום (`GET /evidence_requests`) או למלא את הבקשה; הבקשה מסומנת `fulfilled` רק אחרי שה-resume הצליח; סבב ראיות אחד למפגע נאכף גם ב-API.
 
 ### ט.2 `/hazards/live` (streaming)
 
@@ -387,7 +401,7 @@ guard_fired, final, last_speaker, next_hop          # control + supervisor routi
 שלוש תוספות מה-roadmap:
 
 - **אות Intake.** `reporter_intake` נכנס ל-payload של ה-LLM כעדות (תקציר, סתירות, `urgency_claimed`, `suspicious`). בעץ הכללים, סתירת מחלקה מול YOLO מנתבת ל-`human_review`; סתירות בחסימה/סוג כביש הן הקשר בלבד. `urgency_claimed` לעולם לא משנה priority.
-- **בקשת ראיות אחת.** על `needs_more_evidence` Decision מנסח את הבקשה בקריאת LLM (`EVIDENCE_REQUEST_SYSTEM_PROMPT`; הרשימה הסגורה של `missing_field` נשארת, offline משפט ברירת מחדל), כותב שורת `evidence_requests` ומחזיר `evidence_request` ב-state. אם `evidence_round >= 1` (ריצה מחודשת), verdict שני של `needs_more_evidence` הופך ל-`human_review` (cap 1, `policy.yaml`).
+- **בקשת ראיות: אפס מאז 6.11.2026.** `MAX_EVIDENCE_REQUESTS_PER_HAZARD = 0`: כל `needs_more_evidence` הופך ל-`human_review` ב-`_apply_evidence_cap`, והמסלול שלהלן נשאר בקוד ואינו מופעל. היסטורית: על `needs_more_evidence` Decision מנסח את הבקשה בקריאת LLM (`EVIDENCE_REQUEST_SYSTEM_PROMPT`; הרשימה הסגורה של `missing_field` נשארת, offline משפט ברירת מחדל), כותב שורת `evidence_requests` ומחזיר `evidence_request` ב-state. אם `evidence_round >= 1` (ריצה מחודשת), verdict שני של `needs_more_evidence` הופך ל-`human_review` (cap 1, `policy.yaml`).
 - **ReAct אופציונלי** (`AGENT_DECISION_REACT=1`): פירוט בסעיף 16.
 
 שתי תוספות מהאודיט (הוחלטו 23.10):
@@ -1112,7 +1126,7 @@ python scripts/rag_relevance_eval.py --json rag_eval.json
 |---|---|---|---|---|
 | `urgent` | D40 + main + partial/full + confidence≥0.6 | חובה (≥1 מקור) | כן (approval_gate) | `create_draft_work_order` |
 | `standard` | הכל שאינו חד־משמעית אחר | חובה (≥1 מקור) | לא | `create_draft_work_order` |
-| `needs_more_evidence` | confidence 0.4-0.6 ללא recurrence, ורק בסבב הראשון (cap 1) | אסור | לא; הגרף נעצר לפני `await_evidence` עד שהמדווח עונה | `request_additional_evidence` (בקשה שהסוכן ניסח) |
+| `needs_more_evidence` | לא מופעלת מאז 6.11.2026 (cap 0): הרצועה 0.4-0.6 → `human_review`; היסטורית: confidence 0.4-0.6 ללא recurrence בסבב הראשון | אסור | לא; הגרף נעצר לפני `await_evidence` עד שהמדווח עונה | `request_additional_evidence` (בקשה שהסוכן ניסח) |
 | `human_review` | perception_confidence=low (כולל OCR חשוד, טקסט מדווח חשוד, scene לא-כביש) - סתירת מחלקה מול YOLO ב-Intake - coverage=no_match - guard fired - grounding נכשל (ה-LLM נשאל פעם אחת) - `needs_more_evidence` שני אחרי ראיה. על שלושת הטריגרים הראשונים זה גם floor דטרמיניסטי מעל verdict `standard` של ה-LLM | אסור | כן (approval_gate) | - |
 
 `flag_for_urgent_review` נשאר זמין לקוראים חיצוניים ולמודל במצב ReAct (שם הוא נרשם ולא מורץ, כי ה-approval_gate פותח את שורת המפקח היחידה).
@@ -1226,7 +1240,7 @@ python scripts/rag_relevance_eval.py --json rag_eval.json
 
 ### פעיל
 
-- 174 טסטים (`pytest -q`, 31.10.2026) אחרי איחוד הקוד לשני קבצים, מתוכם 100 תרחישי eval end-to-end (73 סינתטיים + 27 מתויגים); טסטי Stage A/B, התורים והאוטונומיה ב-`tests/test_stage_a_correctness.py`, `tests/test_stage_b_latency.py`, `tests/test_queues.py`, `tests/test_worker_autonomy.py`.
+- 426 טסטים (`pytest -q`, 7.11.2026; 174 ב-31.10.2026) אחרי איחוד הקוד לשני קבצים, מתוכם 100 תרחישי eval end-to-end (73 סינתטיים + 27 מתויגים); טסטי Stage A/B, התורים והאוטונומיה ב-`tests/test_stage_a_correctness.py`, `tests/test_stage_b_latency.py`, `tests/test_queues.py`, `tests/test_worker_autonomy.py`.
 - Intake / Perception / Research / Decision על offline stub (CI, eval).
 - Perception ו-Research על הכללים הדטרמיניסטיים (ה-LLM שלהם opt-in: `AGENT_PROFILE_BUILDER_LLM` / `AGENT_RAG_RETRIEVER_LLM`, כבוי בפרודקשן); Intake, ניסוח בקשת הראיות וסוכן Pattern על Groq (ספק יחיד); Decision על פאנל של שלושה ספקים (פרודקשן).
 - Sanitize על וקטורים 1, 2 ו-4 (markers מורחבים: `user:`, `<|`, `drop table`; `reporter_text` מסומן suspicious).

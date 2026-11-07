@@ -3,17 +3,25 @@
 **Live site: https://orarr2.github.io/RoadGuard/**
 
 Status: delivered end-to-end on the Agent track. Last agent-layer
-update 2026-10-31 (worker autonomy behind `AGENT_WORKER_AUTONOMY`,
-agent_notes memory, queue management, evidence-based RAG grading,
-KNOWN_IMAGE gate, policy-driven thresholds). The audit log with the
-status of every item is `docs/agent-architecture-audit-2026-10-31.md`.
+update 2026-11-07 (round 29: the engineering audit's recommendations;
+no citizen is asked for another photo since 2026-11-06, phash floor
+within a radius, workers skip their LLM when the catalogue fixed the
+verdict or no signal needs a model, Decision without tool schemas and
+with JSON repair, a deterministic summary for the citizen, operator
+pages that count the fleet's 24 hours). The audit with the status of
+every finding is `docs/agent-audit-2026-11-06.md`; the earlier one is
+`docs/agent-architecture-audit-2026-10-31.md`; the change list by date
+is section א.4 of `docs/agents-architecture.md`.
 
 Road-damage triage for a smart city. A citizen photographs road damage with a
 phone; YOLOv8n detects the four RDD2022 classes (D00 longitudinal cracks, D10
 transverse cracks, D20 alligator cracking, D40 potholes) inside the browser; the
-agent layer on the server recommends one of four actions - `urgent`, `standard`,
-`needs_more_evidence`, `human_review` - with a priority and a rationale grounded in
-the municipal repair standards. Nothing closes a road or dispatches a contractor:
+agent layer on the server recommends `urgent`, `standard` or `human_review` (a
+photo already in the catalogue is `known_image`; `needs_more_evidence` exists in
+the policy but no citizen has been asked for another photo since 2026-11-06)
+with a priority and a rationale grounded in the municipal repair standards.
+The citizen sees a short deterministic summary: what was detected, how sure the
+detector was, the severity, the next step and why. Nothing closes a road or dispatches a contractor:
 every `urgent` or `human_review` verdict waits for a human on the approval page.
 
 ## Screenshots

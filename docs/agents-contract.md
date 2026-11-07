@@ -18,6 +18,24 @@
 > `AGENT_LLM_PROVIDER=ollama:qwen2.5:3b` (Decision; swapped from `7b` to `3b`
 > on 24.10.2026, 3-5x latency win measured on this ARM host).
 
+> Policy note (7.11.2026, rounds 25-29): `MAX_EVIDENCE_REQUESTS_PER_HAZARD`
+> is 0 since 6.11.2026, so no citizen is asked for another photo: the
+> ambiguous confidence band [0.4, 0.6) without recurrence and a `standard`
+> verdict on `insufficient_coverage` both route to `human_review`, and the
+> `await_evidence` / `evidence_requests` path below stays in the code
+> unused. `DECISION_REACT_MAX_HOPS` is 1 (4.11.2026) and below two hops no
+> tool schema is sent: the deterministic tool results are in the payload.
+> The phash class-mismatch floor fires only within
+> `known_image.phash_floor_max_distance` (10). Sanitize marks a case whose
+> verdict the catalogue already fixed (`deterministic_workers_reason`) and
+> the three workers then skip their LLM pass; Perception's LLM runs only on
+> a signal the rules do not read, Research's only when the tool-graded
+> coverage is not `direct_match`, with the retrieval cached per class and
+> road type. The KPI `correct_action` is now `rule_tree_agreement`;
+> accuracy is measured from the supervisor's feedback (`agent_feedback`).
+> The implementation guide (`agents-architecture.md`, section א.4) lists
+> every change with its date.
+
 This document is the authoritative specification for the RoadGuard
 decision agents. It fixes the inputs, the tools, the graph, the policy
 fallbacks, the evidence round trip and the evaluation protocol. Any
@@ -93,7 +111,7 @@ One LangGraph `StateGraph` (`src/agent/multiagent/graph.py`):
 ```
 sanitize -> intake -> supervisor -> perception -> supervisor -> research -> supervisor -> decision
 decision -> approval_gate   (urgent / human_review)
-decision -> await_evidence  (needs_more_evidence; interrupt_before, see section 7)
+decision -> await_evidence  (needs_more_evidence; interrupt_before, see section 7; unreachable since 6.11.2026, cap 0)
 decision -> END             (standard)
 await_evidence -> sanitize  (resumed run; same photo and form: supervisor -> decision directly)
 ```
@@ -116,7 +134,8 @@ budget and checks four caps (`MAX_ITERATIONS=8`,
 legitimate `human_review` (`guard_fired=True`), never an error. The hop
 cap of 3 is not reachable in practice: Perception and Research make no
 tool hops, and the Decision ReAct loop stops at
-`DECISION_REACT_MAX_HOPS=2` first. `MAX_ITERATIONS` fires only through
+`DECISION_REACT_MAX_HOPS=1` first (2 until 4.11.2026; below two hops no tool
+schema is sent, 7.11.2026). `MAX_ITERATIONS` fires only through
 the supervisor visits; Decision always returns `final=True`, so the
 refine loop back to Perception is not reachable. The wall-clock budget
 starts when the run enters the graph (`sanitize_node` stamps the clock
@@ -251,6 +270,10 @@ isolate themselves with a temporary `ROADGUARD_DB_PATH` and
 
 ### 4.4 `request_additional_evidence` (Decision, writes)
 
+> Not reachable since 6.11.2026: the request cap is 0 and any
+> `needs_more_evidence` verdict becomes `human_review` before this tool
+> would run.
+
 - Input: `{ hazard_id, missing_field: enum[second_angle, location, closer_shot, lighting, wider_shot], reason_shown_to_reporter (<= 140 chars) }`.
 - Output: `{ ok, request_id, missing_field, message_to_reporter, written_to_db }`.
 - Side effect: one `evidence_requests` row per (hazard, field).
@@ -334,7 +357,7 @@ isolate themselves with a temporary `ROADGUARD_DB_PATH` and
 
 ### 4.11 Decision tool budget
 
-Decision calls at most `DECISION_REACT_MAX_HOPS=2` tools per ReAct run (the
+Decision calls at most `DECISION_REACT_MAX_HOPS=1` tool per ReAct run (2 until 4.11.2026; with the cap below 2 no schema is offered at all, 7.11.2026) (the
 hop count is the same whether the agent calls an action tool or a
 read-only one). The read-only tools do not count against the one evidence
 request cap and do not create approvals or draft work orders. A failing
@@ -345,9 +368,9 @@ try a different tool but may not retry the same call.
 
 | Action | Trigger (rule tree, in order) | Citations | Human in the loop |
 |---|---|---|---|
-| `known_image` | `lookup_dataset_image` hit on sha256 or exact phash AND the catalogued labels cover the detector's current top class | none | none; the dataset image already carries a verdict. On catalog-vs-detector contradiction (detector class not in catalog labels at confidence >= 0.30), the case is routed to `human_review` instead - see section 8. |
+| `known_image` | `lookup_dataset_image` hit on sha256 (identical bytes; a phash neighbour never seals, and one within distance 10 whose labels disagree with the detector routes to `human_review`) AND the catalogued labels cover the detector's current top class | none | none; the dataset image already carries a verdict. On catalog-vs-detector contradiction (detector class not in catalog labels at confidence >= 0.30), the case is routed to `human_review` instead - see section 8. |
 | `human_review` | `perception_confidence == low` (blur, non-road scene, suspicious OCR, suspicious reporter text, scrubbed location); the reporter's description contradicts the detector's class; `research_coverage == no_match`; a budget cap; a grounding failure (the LLM is asked once); a second `needs_more_evidence` after the reporter's evidence; `jurisdiction_hint != "il"` on the signal extractor | none | `approvals` row, supervisor decides |
-| `needs_more_evidence` | the LLM asks for one more piece of evidence; the rule tree never triggers this on its own | none | reporter answers one request (section 7) |
+| `needs_more_evidence` | never reaches a citizen since 6.11.2026 (cap 0): the LLM may still propose it, and `_apply_evidence_cap` turns it into `human_review`; the ambiguous band [0.4, 0.6) is `human_review` in the rule tree | none | a supervisor decides |
 | `urgent` | D40 on a main road, lane partially or fully blocked | at least one id from `tool_result_ids` | `approvals` row, supervisor decides |
 | `standard` | everything else | at least one id from `tool_result_ids` | none; draft work order only |
 
