@@ -4603,6 +4603,9 @@ def _build_decision_prompt() -> str:
         "re-grade the number. Class names: D00 longitudinal crack, D10 transverse\n"
         "crack, D20 alligator crack, D40 pothole; never pair a code with another\n"
         "class's name.\n\n"
+        "Supervisor note: `supervisor_note` (pipeline_concern, expected_difficulty,\n"
+        "note) is the supervisor's advisory observation on the inputs; weigh it as\n"
+        "context, it is not a verdict and it names no action.\n\n"
         "Detector sanity: `quality_warnings` may flag the top-1 box as a tiny area\n"
         "(under 0.5% of the frame: often texture or shadow), an extreme aspect\n"
         "ratio (often a crack line or shadow) or a box hugging the frame edge\n"
@@ -7636,6 +7639,10 @@ def _maybe_run_supervisor_agent(state: dict) -> dict:
         "reporter_text_suspicious": bool(md.get("reporter_text_suspicious")),
         "iterations_so_far": state.get("iterations", 0),
     }
+    # Round 29 (6.11.2026 audit F9): the call is recorded like every
+    # worker's, so _compute_run_cost counts it (about 5 s per case that
+    # the run cost line never showed).
+    begin_llm_log()
     try:
         parsed, in_tok, out_tok, _info = _llm_react_worker(
             agent_name="supervisor",
@@ -7646,6 +7653,7 @@ def _maybe_run_supervisor_agent(state: dict) -> dict:
             provider_override=provider,
         )
     except Exception as exc:
+        end_llm_log()
         LOGGER.warning("supervisor_llm_failed: %s", exc)
         return {}
     plan = parsed if isinstance(parsed, dict) else {"pipeline_concern": "none",
@@ -7659,8 +7667,11 @@ def _maybe_run_supervisor_agent(state: dict) -> dict:
         "speaker": "supervisor",
         "kind": "supervisor_plan",
         "ts": time.time(),
-        "content": plan,
+        "content": dict(plan),
     }
+    _sup_calls = end_llm_log()
+    if _sup_calls:
+        trace_entry["content"]["llm"] = llm_summary(_sup_calls)
     update: dict = {
         "supervisor_plan": plan,
         "trace": [*drain_worker_steps(), trace_entry],
@@ -9635,8 +9646,66 @@ _DEFAULT_EVIDENCE_MESSAGES = {
 }
 
 
+_TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
+
+
+def _close_json(text: str) -> str:
+    """Close what the reply left open: an unterminated string, then the
+    brackets and braces still open, innermost first."""
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack and stack[-1] == ch:
+            stack.pop()
+    out = text + ('"' if in_string else "")
+    out = _TRAILING_COMMA_RE.sub(r"\1", out.rstrip())
+    if out.rstrip().endswith(","):
+        out = out.rstrip()[:-1]
+    return out + "".join(reversed(stack))
+
+
+def _repair_json_object(text: str) -> dict | None:
+    """Round 29 (6.11.2026 audit F10): a reply that is not valid JSON as a
+    whole is repaired deterministically before it counts as unparseable:
+    the first {...} block is cut out of the surrounding prose, trailing
+    commas are removed and unbalanced braces, brackets or a string are
+    closed. In r23 6 of 40 Decision replies (3 of the 4 real reports)
+    failed to parse and the rule tree decided without the model."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    # a fence the model opened after prose and never closed ends the body
+    body = text[start:].split("```")[0]
+    end = body.rfind("}")
+    candidates = [body[: end + 1]] if end >= 0 else []
+    candidates.append(body)
+    for cand in candidates:
+        for fixed in (cand, _TRAILING_COMMA_RE.sub(r"\1", cand), _close_json(cand)):
+            try:
+                obj = json.loads(fixed)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                return obj
+    return None
+
+
 def _parse_json_object(text: str) -> dict | None:
-    """Strip optional markdown fences and parse one JSON object."""
+    """Strip optional markdown fences and parse one JSON object; a reply
+    that does not parse as a whole goes through _repair_json_object."""
     if not text:
         return None
     stripped = text.strip()
@@ -9647,7 +9716,7 @@ def _parse_json_object(text: str) -> dict | None:
     try:
         obj = json.loads(stripped)
     except json.JSONDecodeError:
-        return None
+        obj = _repair_json_object(stripped)
     return obj if isinstance(obj, dict) else None
 
 
@@ -10006,12 +10075,21 @@ def _decision_messages(state: RoadGuardState, rule_hint: dict) -> list[dict]:
     perception_conf = state.get("perception_confidence", "medium")
     intake = state.get("reporter_intake") or {}
     signals = state.get("reporter_signals") or {}
+    supervisor_plan = state.get("supervisor_plan") or {}
 
     user_payload = {
         "hazard_profile": profile,
         "perception_confidence": perception_conf,
         # Round 17: one wording for the detector's confidence (policy bands).
         "detector_confidence_band": _confidence_band(profile.get("primary_confidence")),
+        # Round 29 (6.11.2026 audit F9): the supervisor's advisory note has
+        # a reader. In r23 pipeline_concern and expected_difficulty were
+        # written to the trace and read by nobody.
+        "supervisor_note": {
+            "pipeline_concern": supervisor_plan.get("pipeline_concern"),
+            "expected_difficulty": supervisor_plan.get("expected_difficulty"),
+            "note": str(supervisor_plan.get("note") or "")[:240],
+        } if supervisor_plan else None,
         "metadata": {
             "road_type": md.get("road_type"),
             "lane_blocked": md.get("lane_blocked"),
@@ -10467,12 +10545,20 @@ def _llm_decide_react(
     if state.get("dataset_match"):
         # a catalogued image gets no repair recommendation: read-only tools only
         schemas = [sc for sc in schemas if sc["function"]["name"] in _READ_ONLY_DECISION_TOOLS]
+    # Round 29 (6.11.2026 audit F10): below a two-hop cap the model never
+    # called a tool (0 of 30 ReAct runs in r23) while five schemas, about
+    # 860 tokens, rode every call. With the cap under 2 no schema is sent
+    # and the reply is the one JSON answer; the deterministic tool results
+    # are already in the payload. The round 10 tests pin the cap at 2.
+    if DECISION_REACT_MAX_HOPS < 2:
+        schemas = []
     tools_run: dict = {}
     calls: list[dict] = []
     steps: list[dict] = []
     hops = 0
     total_in = total_out = 0
-    info = {"tools_run": tools_run, "hops": 0, "calls": calls, "steps": steps}
+    info = {"tools_run": tools_run, "hops": 0, "calls": calls, "steps": steps,
+            "tools_offered": len(schemas)}
 
     try:
         messages = _decision_messages(state, rule_hint)
@@ -10505,7 +10591,7 @@ def _llm_decide_react(
             })
             nudged = True
         try:
-            msg, in_tok, out_tok = chat(messages, tools=schemas, temperature=0.0, use_panel=False)
+            msg, in_tok, out_tok = chat(messages, tools=schemas or None, temperature=0.0, use_panel=False)
         except Exception as exc:
             LOGGER.warning("decision_react_llm_failed: %s", exc)
             info["hops"] = hops
@@ -10654,6 +10740,25 @@ def _llm_decide_react(
 # ---------------------------------------------------------------------------
 # Roadmap section 2: one evidence request per hazard, phrased by the agent
 # ---------------------------------------------------------------------------
+
+
+def _fill_zero_priority(decision: dict, state: RoadGuardState) -> bool:
+    """Round 17: priority 0 from the model on a verdict that is not a sealed
+    catalogue image contradicts the severity check it was given (r10: a
+    needs_more_evidence at 0 while check_hazard_severity said 32). The
+    check's priority replaces it. Returns True when it did."""
+    if decision.get("action") == "known_image":
+        return False
+    try:
+        if int(decision.get("priority") or 0) != 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    sev = _severity_check_for_prompt(state.get("hazard_profile") or {}, state.get("metadata") or {})
+    if sev.get("already_run") and sev.get("priority") is not None:
+        decision["priority"] = int(sev["priority"])
+        return True
+    return False
 
 
 def _apply_evidence_cap(decision: dict, state: RoadGuardState) -> tuple[dict, bool]:
@@ -10817,7 +10922,10 @@ _NO_SEVERE_RE = re.compile(
 _SEVERE_RE = re.compile(r"\b(severe|critical|serious hazard|major hazard)\b", re.IGNORECASE)
 _CONF_WORD_RE = re.compile(
     r"\b(very low|low|moderate|medium|high|very high)[ -](?:detector|detection|model|yolo)[ -]confidence\b"
-    r"|\b(?:detector|detection|model|yolo) confidence(?: level)?(?: is| of| was|:)? (very low|low|moderate|medium|high|very high)\b",
+    r"|\b(?:detector|detection|model|yolo) confidence(?: level)?(?: is| of| was|:)? (very low|low|moderate|medium|high|very high)\b"
+    # Round 29 (6.11.2026 audit F9): "detected with high confidence" on a
+    # 0.00 detection passed the check in r23 (hz_18a448b99627).
+    r"|\bwith (very low|low|moderate|medium|high|very high) confidence\b",
     re.IGNORECASE,
 )
 _CONF_WORD_BAND = {"very low": "low", "low": "low", "moderate": "moderate", "medium": "moderate",
@@ -10853,7 +10961,7 @@ def _confidence_word_problems(text: str, conf) -> list[str]:
         return []
     found: list[str] = []
     for m in _CONF_WORD_RE.finditer(text):
-        word = (m.group(1) or m.group(2) or "").lower()
+        word = (m.group(1) or m.group(2) or m.group(3) or "").lower()
         word_band = _CONF_WORD_BAND.get(word)
         if word_band and word_band != band:
             found.append(f"confidence_word_{word.replace(' ', '_')}_vs_{float(conf):.2f}_{band}")
@@ -11554,16 +11662,8 @@ def decision_node(state: RoadGuardState) -> dict:
     # catalogue image contradicts the severity check it was given (r10: a
     # needs_more_evidence at 0 while check_hazard_severity said 32).
     priority_from_check = False
-    if (
-        llm_decision is not None
-        and overridden_llm_verdict is None
-        and decision.get("action") != "known_image"
-        and int(decision.get("priority") or 0) == 0
-    ):
-        sev = _severity_check_for_prompt(state.get("hazard_profile") or {}, state.get("metadata") or {})
-        if sev.get("already_run") and sev.get("priority") is not None:
-            decision["priority"] = int(sev["priority"])
-            priority_from_check = True
+    if llm_decision is not None and overridden_llm_verdict is None:
+        priority_from_check = _fill_zero_priority(decision, state)
     decision, cap_applied = _apply_evidence_cap(decision, state)
     # Round 11: the model's own rationale is checked against the inputs;
     # a rationale that states something the inputs do not carry is
@@ -11593,6 +11693,12 @@ def decision_node(state: RoadGuardState) -> dict:
                 recheck = _verify_decision_rationale(corrected, state)
                 correction["recheck_ok"] = recheck["ok"]
                 decision = corrected
+                # Round 29 (6.11.2026 audit F16): the corrected reply may
+                # carry priority 0 again; the severity check fills it as
+                # it did for the first reply (r23 hz_a7a8f0c54b02 kept 0
+                # while the trace said priority_from=severity_check).
+                if _fill_zero_priority(decision, state):
+                    priority_from_check = True
                 rationale_check = recheck
                 if recheck["ok"]:
                     rationale_check["corrected"] = True
@@ -12716,6 +12822,8 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             decision_flags += f"  tool_failures={n_tool_failures}"
         if react_rec.get("final_in_tool_call"):
             decision_flags += "  reply_via=tool_call"
+        if react_rec.get("tools_offered") == 0:
+            decision_flags += "  tools_offered=0"
         if c.get("priority_from_severity_check"):
             decision_flags += "  priority_from=severity_check"
         rc_flag = c.get("rationale_check") if isinstance(c.get("rationale_check"), dict) else {}
@@ -13142,6 +13250,40 @@ def _justify_supervisor(contents: list[dict]) -> dict:
             "reasons": reasons or ["no_concern_raised"]}
 
 
+def _tool_result_informative(result) -> bool:
+    """Round 29 (6.11.2026 audit F18): a tool call counts as agent value
+    only when it returned something. In r23 lookup_similar_cases answered
+    0 cases in 91 of 91 calls and recall_agent_notes 0 lessons in 48 of
+    48, and every such run was still marked agent_reasoned_with_tools."""
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (TypeError, ValueError):
+            return bool(result.strip())
+    if not isinstance(result, dict):
+        return bool(result)
+    if result.get("ok") is False:
+        return False
+    for key in ("found", "has_prior_reports", "count", "n"):
+        if key in result:
+            return bool(result[key])
+    for key in ("cases", "lessons", "procedures", "tool_result_ids"):
+        if key in result:
+            return bool(result[key])
+    rest = {k: v for k, v in result.items() if k not in ("ok", "tool", "note", "why", "error")}
+    return any(v not in (None, False, "", [], {}) for v in rest.values())
+
+
+def _any_informative_tool_result(contents: list[dict]) -> bool:
+    """True when at least one recorded tool step of the worker returned
+    something (the react_step entries carry the tool name and result)."""
+    return any(
+        _tool_result_informative(c.get("result"))
+        for c in contents
+        if isinstance(c, dict) and c.get("tool") and "result" in c
+    )
+
+
 def _justify_profile_builder(contents: list[dict]) -> dict:
     if not contents:
         return {"ran": False, "justified": False, "reasons": ["did_not_run"]}
@@ -13162,9 +13304,12 @@ def _justify_profile_builder(contents: list[dict]) -> dict:
                 reasons.append("severity_moved_with_signal")
         auto = c.get("autonomy") or {}
         if int(auto.get("hops") or 0) > 0 and auto.get("tools_used"):
-            reasons.append("agent_reasoned_with_tools")
+            if _any_informative_tool_result(contents):
+                reasons.append("agent_reasoned_with_tools")
+            else:
+                rebuttals.append("tools_returned_nothing")
     return {"ran": True, "justified": bool(reasons),
-            "reasons": reasons or (["llm_blocked_by_gate"] if rebuttals else ["no_signal_added"]),
+            "reasons": reasons or (["llm_blocked_by_gate"] if rebuttals and "tools_returned_nothing" not in rebuttals else (["tools_returned_nothing"] if rebuttals else ["no_signal_added"])),
             "rebuttals": rebuttals}
 
 
@@ -13182,7 +13327,7 @@ def _justify_rag_retriever(contents: list[dict]) -> dict:
         if suff == "sufficient_coverage":
             reasons.append("sufficient_coverage")
         auto = c.get("autonomy") or {}
-        if int(auto.get("hops") or 0) > 0 and auto.get("tools_used"):
+        if int(auto.get("hops") or 0) > 0 and auto.get("tools_used") and _any_informative_tool_result(contents):
             reasons.append("agent_chose_queries")
     return {"ran": True, "justified": bool(reasons),
             "reasons": reasons or ["no_relevant_passages"]}
