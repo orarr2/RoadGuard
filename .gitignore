@@ -125,3 +125,9 @@ docs/team-meeting/
 /chroma_db-charter_grounded_corpus.zip
 /chromadb_dist/
 /rag_notebook/chroma_db/
+
+# Local material that stays out of the repository: the team members' test sets,
+# the owner's accident-video analysis and the team-repo upload plan.
+data/ovad_sets/
+/תאונה/
+docs/team-repo-upload-plan-*.md
