@@ -9,7 +9,7 @@
 # is included in the Decision prompt and in each trace entry so a
 # reviewer can tell which policy produced a given verdict.
 
-version: "2026.11.06"
+version: "2026.11.09"
 charter_grounding_target_pct: 90
 
 severity:
@@ -65,6 +65,13 @@ known_image:
   # live detector routes to a human only within this distance (bits). The
   # relaxed lookup (16) still cites farther neighbours as context.
   phash_floor_max_distance: 10
+  # 9.11.2026: the browser's sha256 claim is kept only when the photo the
+  # server received hashes to within this many bits of the catalogued row's
+  # phash. Measured on the 50 catalogue images of the batch set: a resized
+  # 1600 px JPEG of the same photo is at most 2 bits away, any other photo
+  # at least 9. A claim that fails the check is dropped and the case is
+  # triaged as a new photo.
+  claim_phash_max_distance: 4
 
 grounding:
   # cited_sources must be a subset of research.tool_result_ids, unless

@@ -310,12 +310,50 @@ def test_status_banner_shows_dataset_counts(client):
     assert "dataset   2 / 10,000" in text and "with model predictions" in text
 
 
+def jpeg_with_dhash(bits_hex: str) -> bytes:
+    """A JPEG whose difference hash is exactly `bits_hex`: a 9x8 grid of
+    24 px cells whose brightness steps down (bit 1) or up (bit 0) from
+    each cell to its right neighbour."""
+    import io
+
+    from PIL import Image
+
+    from roadguard_agent import dhash_bytes
+
+    bits = int(bits_hex, 16)
+    cell = 24
+    img = Image.new("L", (9 * cell, 8 * cell))
+    px = img.load()
+    for y in range(8):
+        vals = [128]
+        for x in range(8):
+            bit = (bits >> (63 - (y * 8 + x))) & 1
+            vals.append(vals[-1] - 14 if bit else vals[-1] + 14)
+        for cx in range(9):
+            for i in range(cell):
+                for j in range(cell):
+                    px[cx * cell + i, y * cell + j] = vals[cx]
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    data = buf.getvalue()
+    assert dhash_bytes(data) == bits_hex, dhash_bytes(data)
+    return data
+
+
+def _jpeg_field(data: bytes) -> str:
+    import base64
+
+    return "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
+
+
 def test_submit_async_carries_image_hashes_and_catalogue_hit_yields_known_image(client):
+    # 9.11.2026: the claim seals only with the photo that confirms it.
     body = {
         "class": "D20", "confidence": 0.8,
         "bboxes": [[0, 0, 100, 100, "D20", 0.8]],
         "road_type": "main", "lane_blocked": "none", "location": "x",
         "image_sha256": "a" * 64, "image_phash": "ffff0000ffff0000",
+        "image_jpeg_base64": _jpeg_field(jpeg_with_dhash("ffff0000ffff0000")),
     }
     r = client.post("/hazards/submit-async", json=body)
     assert r.status_code == 202, r.text
@@ -454,3 +492,90 @@ def test_submit_async_stores_the_sanitised_reporter_text(client):
     assert page.status_code == 200
     assert "deep hole next to the bus stop" in page.text
     assert "Reporter wrote" in page.text
+
+
+# ---------------------------------------------------------------------------
+# Round 30 (9.11.2026): the server verifies the browser's fingerprints instead
+# of trusting them (gap open since 31.10.2026: any client could name a
+# catalogued file and have its photo sealed as known_image without triage).
+
+
+def test_round30_dhash_bytes_matches_dhash_image(tmp_path):
+    from roadguard_agent import dhash_bytes, dhash_image
+
+    data = jpeg_with_dhash("ffff0000ffff0000")
+    probe = tmp_path / "probe.jpg"
+    probe.write_bytes(data)
+    assert dhash_image(probe)[0] == dhash_bytes(data) == "ffff0000ffff0000"
+
+
+def test_round30_verify_keeps_a_catalogue_claim_the_photo_confirms(seeded_db):
+    from roadguard_agent import verify_image_fingerprints
+
+    fp = verify_image_fingerprints("A" * 64, "ffff0000ffff0001", jpeg_with_dhash("ffff0000ffff0000"))
+    assert fp == {"sha256": "a" * 64, "phash": "ffff0000ffff0000", "check": "verified:phash_distance=0"}
+
+
+def test_round30_verify_drops_a_catalogue_claim_the_photo_denies(seeded_db):
+    from roadguard_agent import verify_image_fingerprints
+
+    fp = verify_image_fingerprints("a" * 64, "ffff0000ffff0000", jpeg_with_dhash("00ff00ff00ff00ff"))
+    assert fp["sha256"] == ""
+    assert fp["phash"] == "00ff00ff00ff00ff", "the server's own hash replaces the browser's"
+    assert fp["check"] == "sha256_claim_rejected:phash_distance=32"
+
+
+def test_round30_verify_drops_a_catalogue_claim_without_a_photo(seeded_db):
+    from roadguard_agent import verify_image_fingerprints
+
+    fp = verify_image_fingerprints("a" * 64, "ffff0000ffff0000", None)
+    assert fp == {"sha256": "", "phash": "ffff0000ffff0000", "check": "sha256_claim_rejected:no_photo"}
+
+
+def test_round30_verify_keeps_a_sha256_that_names_nothing_catalogued(seeded_db):
+    from roadguard_agent import verify_image_fingerprints
+
+    fp = verify_image_fingerprints("c" * 64, "", jpeg_with_dhash("ffff0000ffff0000"))
+    assert fp == {"sha256": "c" * 64, "phash": "ffff0000ffff0000", "check": "sha256_not_in_catalogue"}
+
+
+def test_round30_claim_distance_comes_from_policy(seeded_db, monkeypatch):
+    import roadguard_agent as ra
+
+    monkeypatch.setattr(ra, "load_policy", lambda: {"known_image": {"claim_phash_max_distance": 40}})
+    fp = ra.verify_image_fingerprints("a" * 64, "", jpeg_with_dhash("00ff00ff00ff00ff"))
+    assert fp["check"] == "verified:phash_distance=32"
+    assert fp["sha256"] == "a" * 64
+
+
+def test_round30_submit_async_forged_catalogue_claim_is_not_sealed(client):
+    """A browser that names a catalogued file for a different photo gets a
+    regular triage, the server's phash goes on the record and the trace
+    says the claim was dropped."""
+    body = {
+        "class": "D20", "confidence": 0.8,
+        "bboxes": [[0, 0, 100, 100, "D20", 0.8]],
+        "road_type": "main", "lane_blocked": "none", "location": "x",
+        "image_sha256": "a" * 64, "image_phash": "ffff0000ffff0000",
+        "image_jpeg_base64": _jpeg_field(jpeg_with_dhash("00ff00ff00ff00ff")),
+    }
+    r = client.post("/hazards/submit-async", json=body)
+    assert r.status_code == 202, r.text
+    rep = client.get(f"/report/{r.json()['hazard_id']}").json()
+    assert rep["verdict"]["action"] != "known_image"
+    assert any("the claim was dropped (sha256_claim_rejected:phash_distance=32)" in line for line in rep["trace_lines"]), rep["trace_lines"]
+    assert not any("KNOWN IMAGE" in line for line in rep["trace_lines"])
+
+
+def test_round30_submit_async_catalogue_claim_without_a_photo_is_not_sealed(client):
+    body = {
+        "class": "D20", "confidence": 0.8,
+        "bboxes": [[0, 0, 100, 100, "D20", 0.8]],
+        "road_type": "main", "lane_blocked": "none", "location": "x",
+        "image_sha256": "a" * 64, "image_phash": "ffff0000ffff0000",
+    }
+    r = client.post("/hazards/submit-async", json=body)
+    assert r.status_code == 202, r.text
+    rep = client.get(f"/report/{r.json()['hazard_id']}").json()
+    assert rep["verdict"]["action"] != "known_image"
+    assert any("sha256_claim_rejected:no_photo" in line for line in rep["trace_lines"]), rep["trace_lines"]

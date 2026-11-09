@@ -6282,20 +6282,37 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def dhash_image(path: Path) -> tuple[str, int, int]:
+def _dhash_of_pil(im: Any) -> str:
     """64-bit difference hash (9x8 grey, each bit: left pixel brighter than
-    its right neighbour), plus the image size. Same recipe as the webapp."""
+    its right neighbour). Same recipe as the webapp."""
     from PIL import Image
 
-    with Image.open(path) as im:
-        width, height = im.size
-        grey = im.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
-        px = list(grey.getdata())
+    grey = im.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
+    px = list(grey.getdata())
     bits = 0
     for y in range(8):
         for x in range(8):
             bits = (bits << 1) | (1 if px[y * 9 + x] > px[y * 9 + x + 1] else 0)
-    return f"{bits:016x}", width, height
+    return f"{bits:016x}"
+
+
+def dhash_image(path: Path) -> tuple[str, int, int]:
+    """The difference hash of an image file, plus the image size."""
+    from PIL import Image
+
+    with Image.open(path) as im:
+        width, height = im.size
+        return _dhash_of_pil(im), width, height
+
+
+def dhash_bytes(data: bytes) -> str:
+    """The difference hash of encoded image bytes, as a client uploaded them."""
+    import io
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as im:
+        return _dhash_of_pil(im)
 
 
 def _read_yolo_labels(path: Path, class_map: dict[int, str]) -> list[dict]:
@@ -6446,11 +6463,64 @@ def lookup_dataset_image(
         "split": hit["split"],
         "width": hit.get("width"),
         "height": hit.get("height"),
+        "phash": hit.get("phash"),
         "classes": hit.get("classes") or "",
         "n_labels": hit.get("n_labels") or 0,
         "labels": labels[:20],
         "model_prediction": prediction,
     }
+
+
+def _known_image_claim_max_distance() -> int:
+    """known_image.claim_phash_max_distance from policy.yaml (default 4)."""
+    try:
+        return int(((load_policy() or {}).get("known_image") or {}).get("claim_phash_max_distance", 4))
+    except (TypeError, ValueError):
+        return 4
+
+
+def verify_image_fingerprints(
+    sha256_claim: str | None, phash_claim: str | None, image_bytes: bytes | None
+) -> dict[str, str]:
+    """The photo fingerprints the server can vouch for (9.11.2026).
+
+    The browser sends the sha256 of the original file and a phash of its
+    pixels but uploads a resized JPEG, so the file hash cannot be recomputed
+    here. Until now both values were trusted as sent, and a client could name
+    a catalogued file to have any photo sealed as known_image without triage.
+    Now the server hashes the pixels it received and uses that phash; a
+    sha256 that names a catalogue row is kept only when the row's phash is
+    within policy distance of the received pixels (on the batch set a 1600 px
+    JPEG of the same photo is at most 2 bits away, any other photo at least
+    9). A catalogue sha256 with no photo to check it against is dropped. A
+    sha256 that names nothing in the catalogue cannot seal anything and is
+    kept as the client sent it. `check` names the outcome for the trace."""
+    sha = (sha256_claim or "").lower()
+    phash = (phash_claim or "").lower()
+    server_phash = ""
+    if image_bytes:
+        try:
+            server_phash = dhash_bytes(image_bytes)
+        except Exception as exc:
+            LOGGER.warning("image_fingerprint_undecodable: %s", type(exc).__name__)
+    if server_phash:
+        phash = server_phash
+    if not sha:
+        return {"sha256": "", "phash": phash, "check": "no_sha256_claim"}
+    row = lookup_dataset_image(sha256=sha)
+    if not row.get("found") or str(row.get("match") or "") != "sha256":
+        return {"sha256": sha, "phash": phash, "check": "sha256_not_in_catalogue"}
+    if not image_bytes:
+        return {"sha256": "", "phash": phash, "check": "sha256_claim_rejected:no_photo"}
+    if not server_phash:
+        return {"sha256": "", "phash": phash, "check": "sha256_claim_rejected:undecodable_photo"}
+    try:
+        distance = bin(int(server_phash, 16) ^ int(str(row.get("phash") or ""), 16)).count("1")
+    except (TypeError, ValueError):
+        distance = 64
+    if distance <= _known_image_claim_max_distance():
+        return {"sha256": sha, "phash": phash, "check": f"verified:phash_distance={distance}"}
+    return {"sha256": "", "phash": phash, "check": f"sha256_claim_rejected:phash_distance={distance}"}
 
 
 RECENT_CLUSTER_SCHEMA = {
@@ -7838,6 +7908,7 @@ def sanitize_node(state: RoadGuardState) -> dict:
             "known_image_shortcut": shortcut,
             "image_match_reason": match_status.get("reason"),
             "deterministic_workers": deterministic_reason,
+            "fingerprint_check": md.get("image_fingerprint_check") or "",
         },
     }
 
@@ -12702,6 +12773,11 @@ def _entry_lines(entry: dict, tool_ids: list[str]) -> list[str]:
             f"ocr_suspicious={c.get('ocr_suspicious')}  "
             f"reporter_text_suspicious={c.get('reporter_text_suspicious')}"
         )
+        if str(c.get("fingerprint_check") or "").startswith("sha256_claim_rejected"):
+            out.append(
+                f"{_INDENT}fingerprint: the browser's sha256 names a catalogued file but the "
+                f"photo received does not match it; the claim was dropped ({c['fingerprint_check']})"
+            )
     elif speaker == "signal_extractor":
         out.append(
             f"{lbl} reporter text  has_text={c.get('has_text')}  "
@@ -13875,6 +13951,8 @@ def _normalize_metadata(src: dict[str, Any], *, extra_keys: tuple[str, ...] = ()
         # empty on clients that do not compute them.
         "image_sha256": (src.get("image_sha256") or "").lower(),
         "image_phash": (src.get("image_phash") or "").lower(),
+        # 9.11.2026: how the server settled the fingerprints (verify_image_fingerprints).
+        "image_fingerprint_check": src.get("image_fingerprint_check") or "",
     }
     for key in extra_keys:
         out[key] = src.get(key) or ""

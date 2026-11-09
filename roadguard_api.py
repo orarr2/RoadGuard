@@ -56,6 +56,7 @@ from roadguard_agent import (
     verify_password,
     sanitize_reporter_text,
     verify_approval,
+    verify_image_fingerprints,
     verify_google_id_token,
     verify_passphrase,
 )
@@ -3397,8 +3398,21 @@ def _dump_image_quality(body: Any, *, missing: Any) -> Any:
     return body.image_quality.model_dump(exclude_none=True)
 
 
-def _hazard_input_from_batch(body: Any, hazard_id: str, reported_at: str) -> dict[str, Any]:
-    """Build the flat hazard dict for /hazards/submit (batch flow)."""
+def _hazard_input_from_batch(
+    body: Any, hazard_id: str, reported_at: str, image_bytes: bytes | None = None
+) -> dict[str, Any]:
+    """Build the flat hazard dict for /hazards/submit (batch flow).
+
+    9.11.2026: the photo fingerprints are what the server can vouch for from
+    the bytes it received, not what the browser claimed
+    (verify_image_fingerprints)."""
+    fingerprints = verify_image_fingerprints(
+        getattr(body, "image_sha256", None), getattr(body, "image_phash", None), image_bytes
+    )
+    if fingerprints["check"].startswith("sha256_claim_rejected"):
+        LOGGER.warning(
+            "image_sha256_claim_rejected hazard_id=%s check=%s", hazard_id, fingerprints["check"]
+        )
     return {
         "hazard_id": hazard_id,
         "class": body.hazard_class,
@@ -3416,8 +3430,9 @@ def _hazard_input_from_batch(body: Any, hazard_id: str, reported_at: str) -> dic
         "image_quality": _dump_image_quality(body, missing=None),
         # Roadmap section 1: free text from the reporter, read by Intake.
         "reporter_text": body.reporter_text or "",
-        "image_sha256": (body.image_sha256 or "").lower(),
-        "image_phash": (body.image_phash or "").lower(),
+        "image_sha256": fingerprints["sha256"],
+        "image_phash": fingerprints["phash"],
+        "image_fingerprint_check": fingerprints["check"],
     }
 
 
@@ -6334,21 +6349,36 @@ def create_app() -> FastAPI:
             emit_trace(hazard_id, final_state, source="api_async",
                        elapsed_s=time.time() - started_at)
 
-    def _save_hazard_image(hazard_id: str, b64: str | None) -> None:
-        """Decode and save a webapp-uploaded JPEG. Enforces a 5 MB raw cap
-        plus the 5 GB total-store cap (oldest files purged on overflow).
-        Silent on any error - the pipeline continues without the image."""
+    def _decode_hazard_image(hazard_id: str, b64: str | None) -> bytes | None:
+        """The uploaded JPEG bytes, or None when the client sent none, the
+        base64 is malformed or the raw size is over the 5 MB cap."""
         if not b64:
-            return
+            return None
         try:
-            import base64, os, re as _re
-            if not _re.fullmatch(r"hz_[0-9a-f]{6,32}", hazard_id or ""):
-                return
+            import base64
             payload = b64.split(",", 1)[-1]  # strip "data:image/jpeg;base64,"
             raw = base64.b64decode(payload, validate=False)
-            if len(raw) == 0 or len(raw) > 5 * 1024 * 1024:
-                LOGGER.warning("hazard_image_rejected hazard_id=%s bytes=%d", hazard_id, len(raw))
-                return
+        except Exception as exc:
+            LOGGER.warning("hazard_image_undecodable hazard_id=%s err=%s", hazard_id, exc)
+            return None
+        if len(raw) == 0 or len(raw) > 5 * 1024 * 1024:
+            LOGGER.warning("hazard_image_rejected hazard_id=%s bytes=%d", hazard_id, len(raw))
+            return None
+        return raw
+
+    def _save_hazard_image(hazard_id: str, b64: str | None) -> bytes | None:
+        """Decode and save a webapp-uploaded JPEG; returns the raw bytes so the
+        server can fingerprint what it received (9.11.2026). Enforces a 5 MB
+        raw cap plus the 5 GB total-store cap (oldest files purged on
+        overflow). Silent on any save error - the pipeline continues without
+        the file."""
+        raw = _decode_hazard_image(hazard_id, b64)
+        if raw is None:
+            return None
+        try:
+            import os, re as _re
+            if not _re.fullmatch(r"hz_[0-9a-f]{6,32}", hazard_id or ""):
+                return raw
             os.makedirs("/var/lib/roadguard/images", exist_ok=True)
             path = f"/var/lib/roadguard/images/{hazard_id}.jpg"
             with open(path, "wb") as fh:
@@ -6383,6 +6413,7 @@ def create_app() -> FastAPI:
             print(f"[IMAGE    ] hazard_id={hazard_id}  bytes={len(raw)}  path={path}", flush=True)
         except Exception as exc:
             LOGGER.warning("hazard_image_save_failed hazard_id=%s err=%s", hazard_id, exc)
+        return raw
 
     @app.post("/hazards/submit-async", status_code=status.HTTP_202_ACCEPTED)
     @limiter.limit(lambda: get_settings().roadguard_user_limit)
@@ -6402,8 +6433,8 @@ def create_app() -> FastAPI:
         from roadguard_agent import Hazard
         _check_user_daily_submit_cap(user, db, settings)
         hazard_id = f"hz_{uuid.uuid4().hex[:12]}"
-        _save_hazard_image(hazard_id, getattr(body, "image_jpeg_base64", None))
-        hazard_input = _hazard_input_from_batch(body, hazard_id, _now_iso())
+        image_bytes = _save_hazard_image(hazard_id, getattr(body, "image_jpeg_base64", None))
+        hazard_input = _hazard_input_from_batch(body, hazard_id, _now_iso(), image_bytes=image_bytes)
         user_id = _user_id_of(user)
         db.upsert_user(user_id, user.get("email", ""), user.get("name", ""))
         db.create_hazard(Hazard(
@@ -6451,7 +6482,8 @@ def create_app() -> FastAPI:
     ) -> HazardSubmitResponse:
         _check_user_daily_submit_cap(user, db, settings)
         hazard_id = f"hz_{uuid.uuid4().hex[:12]}"
-        hazard_input = _hazard_input_from_batch(body, hazard_id, _now_iso())
+        image_bytes = _decode_hazard_image(hazard_id, getattr(body, "image_jpeg_base64", None))
+        hazard_input = _hazard_input_from_batch(body, hazard_id, _now_iso(), image_bytes=image_bytes)
         try:
             decision = multiagent_decide(hazard_input)
         except Exception:
@@ -6937,7 +6969,8 @@ def create_app() -> FastAPI:
         if not db.claim_evidence_request(request_id):
             raise _evidence_not_found()
 
-        hazard_input = _hazard_input_from_batch(body, hazard_id, _now_iso())
+        image_bytes = _decode_hazard_image(hazard_id, getattr(body, "image_jpeg_base64", None))
+        hazard_input = _hazard_input_from_batch(body, hazard_id, _now_iso(), image_bytes=image_bytes)
         try:
             decision = multiagent_resume(hazard_id, hazard_input)
         except IdenticalEvidenceError as exc:

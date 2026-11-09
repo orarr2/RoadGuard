@@ -18,6 +18,17 @@
 > `AGENT_LLM_PROVIDER=ollama:qwen2.5:3b` (Decision; swapped from `7b` to `3b`
 > on 24.10.2026, 3-5x latency win measured on this ARM host).
 
+> Policy note (9.11.2026, round 30): `known_image.claim_phash_max_distance`
+> is 4. The browser's `image_sha256` is a claim; the server keeps it only
+> when the catalogued row it names has a phash within 4 bits of the
+> difference hash of the photo the server actually received
+> (`verify_image_fingerprints`; the server's phash always replaces the
+> browser's). A claim that names a catalogued file without a matching
+> photo, or without any photo, is dropped: the case is triaged as a new
+> photo, `image_fingerprint_check` on the metadata records the outcome and
+> the trace prints a `fingerprint:` line under SANITIZE. Policy version
+> 2026.11.09.
+
 > Policy note (7.11.2026, rounds 25-29): `MAX_EVIDENCE_REQUESTS_PER_HAZARD`
 > is 0 since 6.11.2026, so no citizen is asked for another photo: the
 > ambiguous confidence band [0.4, 0.6) without recurrence and a `standard`
@@ -368,7 +379,7 @@ try a different tool but may not retry the same call.
 
 | Action | Trigger (rule tree, in order) | Citations | Human in the loop |
 |---|---|---|---|
-| `known_image` | `lookup_dataset_image` hit on sha256 (identical bytes; a phash neighbour never seals, and one within distance 10 whose labels disagree with the detector routes to `human_review`) AND the catalogued labels cover the detector's current top class | none | none; the dataset image already carries a verdict. On catalog-vs-detector contradiction (detector class not in catalog labels at confidence >= 0.30), the case is routed to `human_review` instead - see section 8. |
+| `known_image` | `lookup_dataset_image` hit on sha256 (identical bytes, and since 9.11.2026 the browser's sha256 counts only when the uploaded pixels are within `claim_phash_max_distance` of the catalogued phash; a phash neighbour never seals, and one within distance 10 whose labels disagree with the detector routes to `human_review`) AND the catalogued labels cover the detector's current top class | none | none; the dataset image already carries a verdict. On catalog-vs-detector contradiction (detector class not in catalog labels at confidence >= 0.30), the case is routed to `human_review` instead - see section 8. |
 | `human_review` | `perception_confidence == low` (blur, non-road scene, suspicious OCR, suspicious reporter text, scrubbed location); the reporter's description contradicts the detector's class; `research_coverage == no_match`; a budget cap; a grounding failure (the LLM is asked once); a second `needs_more_evidence` after the reporter's evidence; `jurisdiction_hint != "il"` on the signal extractor | none | `approvals` row, supervisor decides |
 | `needs_more_evidence` | never reaches a citizen since 6.11.2026 (cap 0): the LLM may still propose it, and `_apply_evidence_cap` turns it into `human_review`; the ambiguous band [0.4, 0.6) is `human_review` in the rule tree | none | a supervisor decides |
 | `urgent` | D40 on a main road, lane partially or fully blocked | at least one id from `tool_result_ids` | `approvals` row, supervisor decides |
