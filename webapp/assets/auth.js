@@ -217,13 +217,20 @@ export function mountGoogleSignIn(containerId, onCredential, onRendered) {
       client_id: CONFIG.GOOGLE_CLIENT_ID,
       callback: (resp) => onCredential(resp.credential),
     });
+    // The sign-in card is still hidden when the widget mounts, so its
+    // width comes from the viewport: the card is min(460px, viewport - 32px)
+    // wide with 28px of padding on each side, and Google accepts 200 to
+    // 400. The smaller viewport side keeps the button inside the card in
+    // both phone orientations.
+    const side = Math.min(window.innerWidth, window.innerHeight);
+    const buttonWidth = Math.max(200, Math.min(400, Math.min(460, side - 32) - 56));
     window.google.accounts.id.renderButton(el, {
       theme: "outline",
       size: "large",
       text: "continue_with",
       shape: "rectangular",
       logo_alignment: "left",
-      width: 400,
+      width: buttonWidth,
       locale: "en",
     });
     if (typeof onRendered === "function") onRendered(el);

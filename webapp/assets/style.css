@@ -513,48 +513,6 @@ a { color: inherit; text-decoration: none; }
    viewport's own height instead. No `(orientation: portrait)` guard
    because iOS Safari does not always report that correctly in
    emulated or embedded contexts. */
-@media (max-width: 900px) {
-  .live { grid-template-columns: 1fr; padding: 12px 12px 20px; }
-  .live-stage {
-    aspect-ratio: auto;
-    width: 100%;
-    max-width: 100%;
-    height: calc(100svh - 160px);
-    min-height: 320px;
-  }
-  /* Compact the HUD on mobile so the camera is not covered by it. */
-  .live-hud {
-    top: 10px; right: 10px;
-    padding: 6px 8px;
-    gap: 6px;
-    background: rgba(10, 13, 20, 0.5);
-  }
-  .live-hud .hud-metric { min-width: 44px; }
-  .live-hud .hud-metric-label { font-size: 9px; margin-bottom: 1px; }
-  .live-hud .hud-metric-value { font-size: 13px; }
-  .live-hud .hud-ring { width: 44px; height: 44px; }
-  .live-hud .hud-ring-count { font-size: 14px; }
-  .live-hud .hud-ring-goal { display: none; }
-  /* Top-left: shrink the label stack so the stage is less cluttered. */
-  .live-topbar { top: 10px; left: 10px; gap: 8px; }
-  .live-back { padding: 6px 10px; font-size: 12px; }
-  .live-title { display: none; }
-  /* Bottom row: compact banner, hide the mini-stats row entirely on
-     mobile - they are repeated on the side panel. The verdict banner
-     auto-fades (see .verdict-banner.verdict-fade) so the camera is
-     visible between verdicts. */
-  .live-mini { display: none; }
-  .live-bottom { bottom: 10px; left: 10px; right: 10px; gap: 8px; }
-  .verdict-banner {
-    padding: 10px 12px;
-    background: rgba(10, 13, 20, 0.6);
-    transition: opacity 0.4s ease, transform 0.4s ease;
-  }
-  .verdict-banner-text { font-size: 13px; line-height: 1.3; }
-  .verdict-banner-head { font-size: 10px; margin-bottom: 2px; }
-  .verdict-banner-icon { width: 28px; height: 28px; }
-  .verdict-banner.verdict-fade { opacity: 0; transform: translateY(10px); pointer-events: none; }
-}
 .live-stage video {
   position: absolute;
   inset: 0;
@@ -1229,7 +1187,7 @@ a { color: inherit; text-decoration: none; }
 .upload-empty p { margin: 0; font-size: 15px; }
 .upload-controls {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
   margin: 16px 0;
 }
@@ -1241,6 +1199,9 @@ a { color: inherit; text-decoration: none; }
   color: var(--text-dim);
 }
 .upload-field select, .upload-field input, .upload-field textarea {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   padding: 8px 12px;
   background: var(--bg-1);
   border: 1px solid var(--line-2);
@@ -1696,4 +1657,66 @@ a.verdict-cite:hover {
 .profile-pop-admin a:hover { text-decoration: underline; }
 .profile-pop-admin-note {
   margin: 6px 0 0; font-size: 11px; color: var(--text-dim);
+}
+
+/* ---- Phone widths. These blocks come last on purpose: a media rule only
+   wins over a base rule of the same specificity when it appears after it,
+   and the live-view block below used to sit before .live-topbar,
+   .live-bottom, .live-mini and .verdict-banner, so it never applied. */
+@media (max-width: 900px) {
+  .live { grid-template-columns: 1fr; padding: 12px 12px 20px; }
+  .live-stage {
+    aspect-ratio: auto;
+    width: 100%;
+    max-width: 100%;
+    height: calc(100svh - 160px);
+    min-height: 320px;
+  }
+  /* Compact the HUD on mobile so the camera is not covered by it. */
+  .live-hud {
+    top: 10px; right: 10px;
+    padding: 6px 8px;
+    gap: 6px;
+    background: rgba(10, 13, 20, 0.5);
+  }
+  .live-hud .hud-metric { min-width: 44px; }
+  .live-hud .hud-metric-label { font-size: 9px; margin-bottom: 1px; }
+  .live-hud .hud-metric-value { font-size: 13px; }
+  .live-hud .hud-ring { width: 44px; height: 44px; }
+  .live-hud .hud-ring-count { font-size: 14px; }
+  .live-hud .hud-ring-goal { display: none; }
+  /* Top-left: shrink the label stack so the stage is less cluttered. */
+  .live-topbar { top: 10px; left: 10px; gap: 8px; }
+  .live-back { padding: 6px 10px; font-size: 12px; }
+  .live-title { display: none; }
+  /* Bottom row: compact banner, hide the mini-stats row entirely on
+     mobile - they are repeated on the side panel. The verdict banner
+     auto-fades (see .verdict-banner.verdict-fade) so the camera is
+     visible between verdicts. */
+  .live-mini { display: none; }
+  .live-bottom { bottom: 10px; left: 10px; right: 10px; gap: 8px; }
+  .verdict-banner {
+    padding: 10px 12px;
+    background: rgba(10, 13, 20, 0.6);
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+  .verdict-banner-text { font-size: 13px; line-height: 1.3; }
+  .verdict-banner-head { font-size: 10px; margin-bottom: 2px; }
+  .verdict-banner-icon { width: 28px; height: 28px; }
+  .verdict-banner.verdict-fade { opacity: 0; transform: translateY(10px); pointer-events: none; }
+}
+
+@media (max-width: 640px) {
+  .nav { padding: 10px 12px; gap: 8px; }
+  .nav-brand { flex: none; }
+  .nav-actions { flex: 1 1 auto; min-width: 0; justify-content: flex-end; gap: 4px; }
+  .nav-btn { padding: 8px 10px; gap: 6px; font-size: 13px; white-space: nowrap; }
+  #nav-profile { min-width: 0; }
+  #nav-profile-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .upload-controls { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 560px) {
+  /* the SVG carries its desktop size inline, hence the override */
+  .nav-brand .brand-mark { height: 32px !important; min-width: 0 !important; }
+  #nav-logout span, #nav-session-label { display: none; }
 }
