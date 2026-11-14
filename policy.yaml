@@ -9,7 +9,7 @@
 # is included in the Decision prompt and in each trace entry so a
 # reviewer can tell which policy produced a given verdict.
 
-version: "2026.11.09"
+version: "2026.11.14"
 charter_grounding_target_pct: 90
 
 severity:
@@ -39,8 +39,15 @@ decision:
   human_review:
     triggers:
       - "perception_confidence == low"
+      # 14.11.2026 (the owner's r31 review): the webapp sends class D00 and
+      # the batch runner D40 at confidence 0.0 with no boxes when the
+      # detector found nothing; that placeholder is not a detection.
+      - "detector_found_nothing == true (placeholder class at confidence 0 with no boxes)"
       - "research_coverage == no_match"
       - "confidence in needs_more_evidence.confidence_range (ambiguous detection, 6.11.2026)"
+      # Since 14.11.2026 only a true catalogue match exempts this floor: the
+      # same file, or a phash neighbour within known_image.phash_floor_max_distance
+      # whose labels include the live class. A farther similar photo does not.
       - "research_sufficiency == insufficient_coverage AND llm action == standard (RAG floor, 6.11.2026)"
       - "ocr_suspicious == true"
       - "reporter_text_suspicious == true"
@@ -63,7 +70,8 @@ known_image:
   min_stored_confidence: 0.4
   # 6.11.2026 (audit F5): a phash neighbour whose labels disagree with the
   # live detector routes to a human only within this distance (bits). The
-  # relaxed lookup (16) still cites farther neighbours as context.
+  # relaxed lookup (16) still cites farther neighbours as context. Since
+  # 14.11.2026 this is also the radius of the RAG floor's catalogue exemption.
   phash_floor_max_distance: 10
   # 9.11.2026: the browser's sha256 claim is kept only when the photo the
   # server received hashes to within this many bits of the catalogued row's

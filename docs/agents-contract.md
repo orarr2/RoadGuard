@@ -18,6 +18,19 @@
 > `AGENT_LLM_PROVIDER=ollama:qwen2.5:3b` (Decision; swapped from `7b` to `3b`
 > on 24.10.2026, 3-5x latency win measured on this ARM host).
 
+> Policy note (14.11.2026, after the owner's review of the r31 trace): a
+> submission whose detector found nothing (the webapp sends class D00, the
+> batch runner D40, both at confidence 0.0 with no boxes) is marked
+> `detector_found_nothing` on the hazard profile, carries a quality warning,
+> and the rule tree routes it to `human_review` ("no detection to triage")
+> before any other branch; the LLM cannot lift it. The RAG floor (`standard`
+> on `insufficient_coverage` goes to a human) is exempted only by a true
+> catalogue match: the same file, or a phash neighbour within
+> `known_image.phash_floor_max_distance` whose labels or recorded detector
+> class include the live class; a farther similar photo cited as context no
+> longer exempts it (in r31 it exempted 31 of 36 standard verdicts). Policy
+> version 2026.11.14.
+
 > Policy note (9.11.2026, round 30): `known_image.claim_phash_max_distance`
 > is 4. The browser's `image_sha256` is a claim; the server keeps it only
 > when the catalogued row it names has a phash within 4 bits of the

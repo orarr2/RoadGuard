@@ -1785,6 +1785,10 @@ class HazardProfile(TypedDict, total=False):
     is_recurring_location: bool
     recurrence_count_30d: int
     quality_warnings: list[str]
+    # 14.11.2026: the submission carried no detection (a placeholder
+    # class at confidence 0.0 with no boxes); the rule tree routes it
+    # to a human instead of triaging the placeholder.
+    detector_found_nothing: bool
 
 
 class RoadGuardState(TypedDict, total=False):
@@ -4352,7 +4356,11 @@ def _policy_known_image() -> dict[str, float]:
         floor = float(ki.get("min_stored_confidence", 0.4))
     except (TypeError, ValueError):
         floor = 0.4
-    return {"min_stored_confidence": floor}
+    try:
+        radius = int(ki.get("phash_floor_max_distance", 10))
+    except (TypeError, ValueError):
+        radius = 10
+    return {"min_stored_confidence": floor, "phash_floor_max_distance": radius}
 
 
 def _policy_summary_for_prompt() -> str:
@@ -8823,6 +8831,31 @@ def _llm_refine(
     return refined, in_tok, out_tok
 
 
+def _detector_found_nothing(yolo: dict | None) -> bool:
+    """14.11.2026 (the owner's r31 review): the webapp (class D00) and the
+    batch runner (class D40) both submit a placeholder class at confidence
+    0.0 with no boxes when the detector found nothing. That is not a
+    detection: the profile marks it and the rule tree routes the photo to
+    a human, instead of treating the placeholder as a medium-confidence
+    hazard (r31: 19 such cases, 12 of them standard work orders)."""
+    y = yolo or {}
+    try:
+        conf = float(y.get("top1_confidence") or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    if conf > 0.0:
+        return False
+    if y.get("detections"):
+        return False
+    counts = y.get("n_detections_by_class") or {}
+    try:
+        if any(int(v or 0) > 0 for v in dict(counts).values()):
+            return False
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return True
+
+
 def profile_builder_node(state: RoadGuardState) -> dict:
     """Build the HazardProfile from raw signals, optionally LLM-refined."""
     begin_llm_log()
@@ -8834,6 +8867,7 @@ def profile_builder_node(state: RoadGuardState) -> dict:
     top1_conf = float(yolo.get("top1_confidence", 0.0))
     top1_margin = float(yolo.get("top1_margin", 0.0))
     detections = yolo.get("detections", [])
+    found_nothing = _detector_found_nothing(yolo)
     area_ratio = max(
         (d.get("area_ratio", 0.0) for d in detections), default=0.0
     )
@@ -8873,6 +8907,10 @@ def profile_builder_node(state: RoadGuardState) -> dict:
     )
 
     quality_warnings = []
+    if found_nothing:
+        quality_warnings.append(
+            "the detector found no road damage in the photo (confidence 0, no boxes); the class is a placeholder"
+        )
     if blur < 100:
         quality_warnings.append(f"blur_score={blur:.0f} is low")
     if not is_road:
@@ -8934,6 +8972,7 @@ def profile_builder_node(state: RoadGuardState) -> dict:
         "is_recurring_location": is_recurring,
         "recurrence_count_30d": recurrence_count,
         "quality_warnings": quality_warnings,
+        "detector_found_nothing": found_nothing,
     }
 
     base_confidence = _perception_confidence(
@@ -9926,6 +9965,21 @@ def _decide_rule_based(state: RoadGuardState) -> dict:
             d["image_matched"] = True
             d["image_match_status"] = image_status
         return d
+
+    if profile.get("detector_found_nothing"):
+        # 14.11.2026: a placeholder class at confidence 0 with no boxes is
+        # not a detection; nothing is triaged here, a human looks at the
+        # photo. IDX 14 keeps this human_review against the model.
+        return _finalize({
+            "action": "human_review",
+            "rationale": (
+                "routed to human: the detector found no road damage in the photo "
+                "(confidence 0, no boxes), so there is no detection to triage"
+            ),
+            "priority": priority,
+            "cited_sources": [],
+            "missing_evidence": [],
+        })
 
     if perception_conf == "low":
         return _finalize({
@@ -11311,6 +11365,8 @@ def _deterministic_rationale(decision: dict, state: dict) -> str:
         f"{_ACTION_PHRASE.get(action, action)} for {cls} at detector confidence {conf:.2f} "
         f"on a {md.get('road_type') or '?'} road, lane {md.get('lane_blocked') or 'none'}"
     ]
+    if profile.get("detector_found_nothing"):
+        bits.append("the detector found no road damage in the photo, the class shown is a placeholder")
     match = state.get("dataset_match") or {}
     if match.get("found"):
         if str(match.get("match") or "") == "sha256":
@@ -11501,6 +11557,36 @@ def _enforce_unverified(decision: dict, rule_hint: dict) -> dict:
     if gap > 10:
         return {"kind": "rule_tree_verdict", "why": f"priority {decision.get('priority')} against the tree's {rule_hint.get('priority')}"}
     return {"kind": "kept", "why": "not more severe than the rule tree"}
+
+
+def _catalog_match_exempts_rag_floor(state: dict) -> bool:
+    """14.11.2026 (owner): the RAG floor's catalogue exemption counts only a
+    true match: the same file (sha256), or a phash neighbour within
+    known_image.phash_floor_max_distance whose catalogue labels or recorded
+    detector class include the live class. A farther "similar" photo is
+    context, not evidence that the standards questions were answered; in
+    r31 it exempted 31 of 36 standard verdicts on insufficient_coverage."""
+    match = state.get("dataset_match") or {}
+    if not isinstance(match, dict) or not match.get("found"):
+        return False
+    kind = str(match.get("match") or "")
+    if kind == "sha256":
+        return True
+    if kind != "phash":
+        return False
+    try:
+        distance = int(match.get("distance"))
+    except (TypeError, ValueError):
+        return False
+    if distance > int(_policy_known_image().get("phash_floor_max_distance", 10)):
+        return False
+    live = str(((state.get("hazard_profile") or {}).get("primary_class")) or "").upper()
+    if not live:
+        return False
+    labels = _catalog_classes_set(match.get("classes") or "")
+    pred = match.get("model_prediction")
+    stored = str(pred.get("top1_class") or "").upper() if isinstance(pred, dict) else ""
+    return live in labels or (bool(stored) and live == stored)
 
 
 def decision_node(state: RoadGuardState) -> dict:
@@ -11885,14 +11971,16 @@ def decision_node(state: RoadGuardState) -> dict:
     # לא ישלים אותו באמצעות ניחוש. הוא יבחר בין בקשת ראיות נוספות
     # לבין בדיקה אנושית". A standard verdict on insufficient_coverage
     # is upgraded to needs_more_evidence (or human_review if the
-    # severity signal is severe).
+    # severity signal is severe). 14.11.2026: only a true catalogue
+    # match exempts the floor (_catalog_match_exempts_rag_floor); a far
+    # phash neighbour cited as context does not.
     rag_override: dict | None = None
     research_detail = state.get("research_coverage_detail") or {}
     if (
         research_detail.get("sufficiency") == "insufficient_coverage"
         and decision.get("action") == "standard"
         and source == "llm_react"
-        and not state.get("dataset_match")
+        and not _catalog_match_exempts_rag_floor(state)
     ):
         severity = str(((state.get("hazard_profile") or {}).get("severity_signal")) or "").lower()
         # 6.11.2026 (owner): the reporter is never asked for another photo;

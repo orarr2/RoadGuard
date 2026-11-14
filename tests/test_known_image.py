@@ -411,7 +411,7 @@ def test_known_image_needs_stored_confidence_above_policy_floor(seeded_db, monke
     from roadguard_agent import _decide_rule_based, _image_match_status, _policy_known_image
     import roadguard_agent as ra
 
-    assert _policy_known_image() == {"min_stored_confidence": 0.4}
+    assert _policy_known_image()["min_stored_confidence"] == 0.4
     match = {
         "found": True, "match": "sha256", "distance": 0, "pic_id": 1,
         "file_name": "firc_10001.jpg", "split": "train", "classes": "D20", "n_labels": 1,
@@ -579,3 +579,32 @@ def test_round30_submit_async_catalogue_claim_without_a_photo_is_not_sealed(clie
     rep = client.get(f"/report/{r.json()['hazard_id']}").json()
     assert rep["verdict"]["action"] != "known_image"
     assert any("sha256_claim_rejected:no_photo" in line for line in rep["trace_lines"]), rep["trace_lines"]
+
+
+def test_profile_builder_marks_a_submission_whose_detector_found_nothing(seeded_db):
+    """14.11.2026: the webapp sends D00 at 0.0 with no boxes when the detector
+    found nothing; the profile carries the flag and a quality warning, and
+    the rule tree then routes the case to a human."""
+    from roadguard_agent import _decide_rule_based, profile_builder_node
+
+    state = {
+        "yolo_output": {"top1_class": "D00", "top1_confidence": 0.0,
+                        "n_detections_by_class": {}, "detections": []},
+        "image_quality": {},
+        "metadata": {"road_type": "main", "lane_blocked": "none", "location": "x"},
+        "iterations": 0,
+    }
+    out = profile_builder_node(state)
+    profile = out["hazard_profile"]
+    assert profile["detector_found_nothing"] is True
+    assert any("found no road damage" in w for w in profile["quality_warnings"])
+    verdict = _decide_rule_based({**state, **out, "research_coverage": "direct_match",
+                                  "tool_result_ids": ["segment_x"]})
+    assert verdict["action"] == "human_review"
+    assert "no detection to triage" in verdict["rationale"]
+
+    # a real weak detection keeps today's behaviour
+    state2 = dict(state, yolo_output={"top1_class": "D40", "top1_confidence": 0.28,
+                                      "n_detections_by_class": {"D40": 1},
+                                      "detections": [{"class": "D40", "confidence": 0.28, "area_ratio": 0.05}]})
+    assert profile_builder_node(state2)["hazard_profile"]["detector_found_nothing"] is False
