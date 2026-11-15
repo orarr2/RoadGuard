@@ -23,8 +23,30 @@ def test_detector_found_nothing_only_for_placeholder_submissions():
     assert not ra._detector_found_nothing({"top1_class": "D40", "top1_confidence": 0.28,
                                            "detections": [{"class": "D40", "confidence": 0.28}]})
     assert not ra._detector_found_nothing({"top1_class": "D20", "top1_confidence": 0.15, "detections": []})
-    assert not ra._detector_found_nothing({"top1_class": "D40", "top1_confidence": 0.0, "detections": [],
-                                           "n_detections_by_class": {"D40": 1}})
+    assert not ra._detector_found_nothing({"top1_class": "D40", "top1_confidence": 0.0,
+                                           "detections": [{"class": "D40", "confidence": 0.2}]})
+    # the placeholder the server synthesizes for a body without boxes (r33:
+    # it hid every no-detection case from the branch)
+    assert ra._detector_found_nothing({"top1_class": "D40", "top1_confidence": 0.0,
+                                       "detections": [{"class": "D40", "confidence": 0.0, "area_ratio": 0.0}],
+                                       "n_detections_by_class": {"D40": 1}})
+
+
+def test_api_path_marks_a_body_without_boxes_as_no_detection():
+    """The webapp and the batch runner reach the graph through
+    hazard_to_graph_inputs, which synthesizes one placeholder detection
+    when the body has no boxes; the flag must survive that path."""
+    body = {"hazard_id": "hz_test_nothing", "class": "D40", "confidence": 0.0, "bboxes": [],
+            "road_type": "main", "lane_blocked": "none", "location": "x"}
+    _hid, yolo, _iq, _md = ra.hazard_to_graph_inputs(body)
+    assert yolo["detections"] and yolo["detections"][0]["confidence"] == 0.0
+    assert yolo["n_detections_by_class"].get("D40") == 1
+    assert ra._detector_found_nothing(yolo) is True
+
+    body2 = dict(body, hazard_id="hz_test_weak", confidence=0.28,
+                 bboxes=[[0.1, 0.1, 0.4, 0.4, "D40", 0.28]])
+    _hid, yolo2, _iq, _md = ra.hazard_to_graph_inputs(body2)
+    assert ra._detector_found_nothing(yolo2) is False
 
 
 def _state(found_nothing: bool) -> dict:

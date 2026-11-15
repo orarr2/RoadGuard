@@ -8838,21 +8838,23 @@ def _detector_found_nothing(yolo: dict | None) -> bool:
     detection: the profile marks it and the rule tree routes the photo to
     a human, instead of treating the placeholder as a medium-confidence
     hazard (r31: 19 such cases, 12 of them standard work orders)."""
+    # hazard_to_graph_inputs synthesizes one placeholder detection at the
+    # submitted confidence when the body has no boxes, and counts it in
+    # n_detections_by_class (r33: the branch never fired because of it).
+    # Only a detection with a confidence above zero is a detection.
     y = yolo or {}
-    try:
-        conf = float(y.get("top1_confidence") or 0.0)
-    except (TypeError, ValueError):
-        conf = 0.0
-    if conf > 0.0:
+
+    def _conf(v) -> float:
+        try:
+            return float(v or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    if _conf(y.get("top1_confidence")) > 0.0:
         return False
-    if y.get("detections"):
-        return False
-    counts = y.get("n_detections_by_class") or {}
-    try:
-        if any(int(v or 0) > 0 for v in dict(counts).values()):
+    for d in y.get("detections") or []:
+        if isinstance(d, dict) and _conf(d.get("confidence")) > 0.0:
             return False
-    except (TypeError, ValueError, AttributeError):
-        pass
     return True
 
 
